@@ -1,206 +1,256 @@
 # JARVIS — Implementation Plan
 
-Status: **Proposed. No phase starts until the architecture review is approved.**
+Status: **Proposed, revision 2. No phase starts until the architecture review is approved.**
 
-The plan builds the system from the inside out: durable core first, then the pipeline one stage
-at a time against real APIs, then the interfaces. Every phase ends in something you can run
-and verify against real data. No phase is "done" because the UI looks right.
+Revision 2:
+- Added a Definition of Done that requires a capped live test.
+- The cross-niche diversity dataset is now a multi-campaign dataset.
+- Places compliance tasks and tests added.
+- Billing hard-stop tests added.
+- DB recovery and backup tasks added.
+- Sending-readiness gate added.
+- VPS provisioning moved to Phase 0.
+- Phase costs now match the cost model.
+
+## Definition of Done (applies to every feature)
+
+A feature is **complete** only when all of these are true:
+1. Unit, integration and contract tests pass in CI.
+2. **A tightly capped live test against the real provider, or the real DB/sandbox/Cloudflare, has passed.** Its run ID, provider usage and cost are recorded in `docs/test-runs/<phase>.md`.
+3. Its acceptance criteria below are demonstrated with real data, and the dashboard shows that data from the DB.
+4. Errors surface correctly: `NOT_CONFIGURED`, `ERROR`, `QUOTA_EXCEEDED` and `BUDGET_BLOCKED` are each exercised at least once.
+
+**Mocked results never satisfy the Definition of Done.** Test doubles and recorded fixtures are
+allowed for fast CI feedback. A feature verified only against them is reported as "implemented,
+not verified".
 
 ## Phase overview
 
-| Phase | Name | Depends on | Est. effort | External spend |
+| Phase | Name | Depends on | Effort | Metered spend (est.) |
 |---|---|---|---|---|
-| 0 | Foundations & tooling | approval | 2–3 days | $0 |
-| 1 | Durable core: DB, queue, state machines, policy, cost ledger | 0 | 4–6 days | $0 |
-| 2 | Command intake + minimal operator UI shell | 1 | 3–4 days | < $1 (Claude) |
-| 3 | Discovery (Google Places) | 1 | 2–3 days | $0 (free tier) |
-| 4 | Website verification (probes + SerpApi) | 3 | 4–5 days | $0 (free tier) |
-| 5 | Research (Firecrawl + extraction) + Qualification | 4 | 4–5 days | < $2 |
-| 6 | Website builder + sandbox + QA + repair loop + preview deploy | 5 | 8–12 days | ≈ $10–15 |
-| 7 | Voice (LiveKit) | 2 | 3–4 days | $0 |
-| 8 | Outreach (blocked on sending domain) | 6 + domain | 4–6 days | $0–12 |
-| 9 | Hardening, reporting, ops | all | 3–5 days | $0 |
+| 0 | Foundations, VPS provisioning, tooling | approval | 2–3 d | VPS $10/month starts |
+| 1 | Durable core: schema, queue, state machines, limits, ledger, DB resilience, backups | 0 | 5–7 d | $0 |
+| 2 | Command intake + dashboard shell | 1 | 3–4 d | ≈ $0.10 |
+| 3 | Discovery (Places, compliant) | 1 | 3 d | $0 (free tier) |
+| 4 | Website verification | 3 | 4–5 d | $0 (free tier) |
+| 5 | Research + independent sourcing + qualification | 4 | 4–5 d | ≈ $0.50 |
+| 6 | Builder, sandbox, QA, repair, preview deploy, diversity | 5 | 8–12 d | ≈ $26 |
+| 7 | Voice (LiveKit) | 2 | 3–4 d | $0 |
+| 8 | Outreach (drafts always; sending gated) | 6 | 4–6 d | ≈ $0.20 |
+| 9 | Hardening, reporting, ops | all | 3–5 d | ≈ $0.50 |
 
-Effort assumes one engineer working with Claude Code. Phases 3–5 can overlap with the Phase 2
-UI work.
+Total development metered spend ≈ $29 (API_COST_MODEL §4). Plus the VPS.
 
 ---
 
 ## Phase 0: Foundations
 
 Tasks
-1. Monorepo skeleton per ARCHITECTURE.md §2.2. `pyproject.toml` (uv, Python 3.12, ruff, mypy strict on `jarvis_core`), `package.json` workspace (pnpm) for the dashboard and site-scaffold.
-2. Docker: `api`, `worker`, `build-sandbox` images. `docker-compose.yml` for local dev, plus a local Supabase via the CLI.
-3. A `Settings` class with full validation per ENVIRONMENT_VARIABLES.md, and a test proving production refuses test doubles.
-4. CI: lint, type-check, unit tests, secret scanning (gitleaks), and dependency audit.
-5. `.env.example`, `.gitignore`, `README.md` quickstart.
+1. Monorepo per ARCHITECTURE §2.2. uv + Python 3.12, ruff, mypy strict. pnpm workspace.
+2. Docker images (`api`, `worker`, `build-sandbox`, `backup`), compose files, local Supabase via the CLI.
+3. `Settings` validation per ENVIRONMENT_VARIABLES.md. Production refuses test doubles.
+4. **VPS provisioning (required component):** provision the approved instance; harden it (SSH keys, firewall, unattended upgrades); install Docker; set up Caddy with TLS on the provider hostname or `sslip.io`; add a deploy user and the GitHub Actions deploy key.
+5. CI: lint, types, unit tests, gitleaks, dependency audit, and the Places schema-denylist test (initially vacuous).
+6. A manual `live-test` workflow with a protected environment and the per-run caps from ENVIRONMENT_VARIABLES §13.
 
 Acceptance
-- `docker compose up` starts the api and worker against local Supabase. `/health` and `/ready` return 200.
-- Startup in `production` with a missing required variable fails with a clear message.
-- CI is green on an empty test suite plus the settings tests.
+- `docker compose up` locally gives `/health` 200. On the VPS, `https://<host>/health` returns 200 over a valid certificate.
+- Startup in production with a missing required variable fails with a clear message.
+- Live: a VPS deploy from CI succeeds and rolls back to the previous image tag.
 
 ## Phase 1: Durable core
 
 Tasks
-1. Migrations for every table in DATABASE_SCHEMA.md, with enums, indexes, triggers and RLS policies.
-2. `db/queue.py`: enqueue (idempotent), claim (`SKIP LOCKED`), heartbeat, complete, fail, retry with backoff, lease-expiry recovery, cancel.
-3. `domain/state_machines.py`: transition tables for campaign, prospect, site, outreach and task. `transition()` writes the audit event in the same transaction.
-4. `policy/`: kill switches, campaign scope check, per-provider unit caps, budget reservation/commit/release in micro-dollars.
-5. `integrations/base.py`: adapter protocol, `ProviderStatus`, retry/backoff, error mapping, usage hook, log redaction.
-6. `orchestrator/`: task runner loop, handler registry, campaign planner (stage → task fan-out), pause/resume/cancel.
-7. `observability/`: structlog config, `api_usage` writer, worker heartbeats.
+1. Migrations for all tables in DATABASE_SCHEMA.md, including the `place_refs` constraints, the `source_type` check (no `google_places`), RLS, and triggers.
+2. Queue: idempotent enqueue, `SKIP LOCKED` claim, heartbeat, retry/backoff, lease recovery, cancel.
+3. State machines and audited `transition()`.
+4. **Limits and ledger:** `usage_limits`, `usage_counters`, reservation/commit/release, and the sweeper. The ToolGateway refuses to call when a reservation fails.
+5. Adapter base: `ProviderStatus`, retries, error mapping, redaction (keys, and Places bodies).
+6. **DB resilience:** health monitor, `/ready`, reconnection with exponential backoff, a degraded mode (API 503 on writes; the worker stops claiming and makes no external calls), `db_health_events`, an alert hook, and detection of a paused project.
+7. **Backups:** daily encrypted `pg_dump` → VPS + off-site (R2 if approved), `backup_runs`, and a restore script.
+8. Orchestrator: task runner, planner, pause/resume/cancel, kill switches.
 
 Acceptance
-- Property tests: random sequences of transitions never reach a state outside the table. Invalid transitions raise and write nothing.
-- Chaos test: kill the worker mid-task. After the lease expires the task is reclaimed and finishes exactly once (idempotency key honoured).
-- Budget test: concurrent reservations against a $1 cap never commit more than $1 in total.
-- The global kill switch stops claims within one poll interval.
-- RLS tests: an `authenticated` user can't read another owner's rows, and can't write anything.
+- Property tests: no state outside the transition tables is reachable.
+- Chaos test: kill the worker mid-task. The task is reclaimed and finishes exactly once.
+- **Cap test:** 50 concurrent reservations against a cap of 10 → exactly 10 succeed, 40 return `BUDGET_BLOCKED`, and **0 adapter requests are made for the blocked ones** (verified by the adapter call counter).
+- **DB outage test:** stop Postgres during a run. The API reports 503 and the worker pauses claiming and makes no provider calls. Restart Postgres → automatic reconnection and lease recovery, with no lost or duplicated tasks.
+- **Live:** run a backup against the real Supabase project and restore it into a scratch DB, with row counts matching.
+- RLS tests: no cross-owner reads, and no direct writes by `authenticated`.
 
-## Phase 2: Command intake and UI shell
+## Phase 2: Command intake and dashboard shell
 
 Tasks
-1. `POST /commands`, `GET /commands/{id}`, `POST /commands/{id}/confirm`. Command agent on Haiku 5.5 with structured output → `CommandIntent`.
-2. Clarification flow for missing niche, location or count. A confirmation card with the plan and cost estimate.
-3. SSE endpoint `GET /campaigns/{id}/events` (with `Last-Event-ID` resume).
-4. Dashboard: auth, app shell, design tokens (dark theme), JARVIS console (text), Campaigns list/detail, Activity, Settings (kill switches, budgets, provider status). Every view reads real API data. Empty states, not demo data.
+1. `POST /commands`, confirm/clarify flow, worst-case plan and cost estimate.
+2. SSE progress with `Last-Event-ID` resume.
+3. Dashboard: auth, shell, dark design system, JARVIS console (text), Campaigns, Activity (with **Estimated vs Provider-reported** cost columns, which read "not available" until a sync exists), Settings (kill switches, caps, provider status, DB health, last backup).
+4. Real data only, with empty states.
 
 Acceptance
-- An eval set of 40 realistic commands, including ambiguous ones, gets ≥ 95% correct field extraction, and 100% of ambiguous cases ask for clarification instead of guessing.
-- Refresh the browser mid-run and the progress stream resumes with no lost events.
-- Provider panel shows `NOT_CONFIGURED` for every provider without a key.
+- Command eval (40 commands, including ambiguous ones): ≥ 95% field accuracy; 100% of ambiguous cases ask instead of guessing.
+- **Live:** the eval runs on Haiku 5.5 (capped at $0.50) and its cost appears in the ledger. The provider-reported Claude usage (from response `usage`) matches the token counts.
+- A browser refresh mid-run loses no events.
 
-## Phase 3: Discovery
+## Phase 3: Discovery (Google Places, compliant)
 
 Tasks
-1. Google Places adapter: `text_search` (Pro mask), `place_details` (Enterprise mask), pagination, field-mask → SKU mapping, unit caps.
-2. Query expansion: niche synonyms (e.g. "plumber", "plumbing contractor", "emergency plumber"). Geo bias with a rectangle or circle, splitting large cities into tiles.
-3. Dedupe on place_id, normalised phone, and normalised name + ZIP. `places_cache` with TTL and a purge job.
-4. Leads table in the dashboard, with Google attribution.
+1. Places adapter with the fixed mask constants (`DISCOVERY_ENTERPRISE`, `DISCOVERY_PRO`, `IDS_ONLY`, `DETAILS_DISPLAY`, `DETAILS_CONTACT`) and a unit test of mask → SKU for each.
+2. Discovery page task: Text Search, handled in memory only, dedupe by place_id, `OPERATIONAL` filter, and only `place_refs`/`prospects` persisted. It hands off to inline first-pass verification (Phase 4 plugs in here; in Phase 3 it records candidates as `discovered`).
+3. Geo tiling plus niche synonyms. 20 results per page, 60 per query.
+4. Payload models with no Places fields. Log redaction of Places bodies. CI denylist test now active.
+5. Lead detail "Show Google Maps listing" (live `DETAILS_DISPLAY` call), with the `<GoogleMapsAttribution>` component meeting the logo/text rules, in a visually separated container.
+6. Google Cloud quotas configured (documented runbook step). Cap alerts.
 
 Acceptance
-- A live run of "plumbing, Houston, 100" returns ≤ 100 unique, operational prospects using ≤ the planned number of calls. `api_usage` matches the Google Cloud console counts.
-- With the key removed, the task goes to `blocked`, the provider reads `NOT_CONFIGURED`, and no rows are fabricated.
-- The purge job deletes expired cache rows. Prospects keep `place_id` only.
+- **Live (capped at 3 requests):** "plumbing, Houston" returns real operational places. The DB contains only place_ids (verified by a query across every table for the returned names and phone numbers, which must find nothing). `api_usage` shows 3 Enterprise units.
+- **Cap test, live:** set the daily cap to 2 and request 3 pages. The third request isn't sent (no increment in the Google Cloud console metrics the next day, plus our adapter counter).
+- With the key removed, the result is `NOT_CONFIGURED` with no rows created.
+- Attribution component passes the visual and snapshot tests.
 
 ## Phase 4: Website verification
 
 Tasks
-1. The `http_probe` adapter with the SSRF guard (unit tests against private IPs, redirect-to-private, DNS rebinding).
-2. DNS checks, TLS, redirect chain, canonical, page title/meta extraction.
-3. SerpApi adapter. Query templates. A directory/aggregator/social domain blocklist (Yelp, Angi, BBB, Facebook…) so these are never treated as "official".
-4. Identity-matching scorer (name, phone, address, city). Quality signals for "outdated" (no viewport meta, no HTTPS, old copyright year, Flash/table layouts, page weight, CMS version).
-5. The decision logic from ARCHITECTURE.md §3.3, producing `website_audits` with evidence and confidence.
+1. HTTP/DNS probe with the SSRF guard (tests: private IPs, redirect-to-private, rebinding).
+2. SerpApi adapter (query templates, hash-only storage of Places-derived queries, usage sync from the account endpoint).
+3. Directory/aggregator/social blocklist for "official site" detection.
+4. Identity matcher and quality signals ("outdated").
+5. Decision logic (ARCHITECTURE §3.5) inside the discovery page task. `website_audits` with evidence and confidence. Website URLs persisted only after our probe confirms identity.
 
 Acceptance
-- A hand-labelled set of 50 real Houston businesses (labelled by you or me, with URLs checked manually) reaches ≥ 90% agreement on status, and **0** cases of `none_found` where a functioning official site exists and is findable by the top-2 SERP queries.
-- Every audit has ≥ 1 evidence item, method list and timestamp.
-- The SSRF test suite passes.
+- **Labelled multi-city dataset:** 60 real businesses across 3 metros and 4 niches, labelled by hand (status + official URL). ≥ 90% status agreement, and **0** `none_found` where a functioning official site is findable through the top-2 SERP queries.
+- **Live (capped: Places 2 requests, SerpApi 5 searches):** an end-to-end page task produces audits with evidence. SerpApi provider-reported usage matches our ledger.
+- SSRF suite passes.
 
-## Phase 5: Research and qualification
+## Phase 5: Research, independent sourcing, qualification
 
 Tasks
-1. Firecrawl adapter (scrape and bounded crawl), robots.txt check, per-domain concurrency of 1.
-2. Extraction with Haiku 5.5: facts with exact supporting quotes. A deterministic verifier marks a fact `verified` only if the quote appears in the fetched source text. Conflicts are detected across sources.
-3. Qualification engine: a versioned rule set implementing the 35/20/15/10/10/10 model. Unknown inputs score 0 or partial per rule, never full. Each component has an explanation and evidence IDs.
-4. Lead detail view: facts grouped by status, sources, score breakdown.
+1. Firecrawl adapter: robots.txt check, bounded crawl, credit caps, usage sync.
+2. Independent identity sourcing for no-website prospects (directory, social and licence pages through SerpApi + single-page Firecrawl). Operator confirmation flow (`source_type = manual`).
+3. Haiku extraction with exact quotes. A deterministic quote verifier marks facts `verified`. Conflict detection, with Opus escalation only when the rules can't resolve a conflict.
+4. Qualification engine (35/20/15/10/10/10), versioned rules. Unknown inputs never get full points. No Places-derived inputs.
+5. Lead detail: facts by status, sources, score breakdown, kept visually separate from the Google Maps panel.
 
 Acceptance
-- Determinism: the same inputs and rule set always produce the same score and `inputs_hash`.
-- A spot-check of 20 profiles finds zero `verified` facts without a matching source quote.
-- Changing a rule weight creates a new rule-set version and old scores remain reproducible.
+- **Live (capped: SerpApi 5, Firecrawl 5, Claude $0.50):** 3 real prospects get facts. Every `verified` fact's quote appears in its stored source text.
+- Determinism: same inputs + rules → same score and hash.
+- A prospect without an independently confirmed name and contact can't reach `qualified`.
 
-## Phase 6: Website builder, QA and deployment
+## Phase 6: Website builder, QA, deployment
 
 Tasks
-1. `site-scaffold/`: Astro + Tailwind starter, a component library (hero variants, service grids, area maps without Google embeds, CTA bars, forms, FAQ, footer), SEO helpers (meta, Open Graph, JSON-LD `LocalBusiness`), the noindex/preview banner, `_headers`.
-2. Strategy step (Opus 5.5): audience, positioning, conversion strategy, design direction (palette, type pairing, layout archetype) → a validated `SiteSpec`. The diversity guard compares the new spec with recent sites and rejects near-duplicates.
-3. Generation step: Opus 5.5 writes pages and components into allowed paths, using only `verified` facts.
-4. The sandbox runner: pinned image, no network, limits (SECURITY_AND_COMPLIANCE.md §4).
-5. QA in the sandbox with Playwright: build passes; desktop/mobile screenshots; nav and internal links; external links (HEAD check outside the sandbox through the SSRF guard); form behaviour; `tel:` links; console errors; missing assets; metadata/JSON-LD validity; axe-core accessibility; Lighthouse performance (optional); factual-claim check (each claim maps to a fact ID).
-6. LangGraph repair loop with a Postgres checkpointer: QA failures → targeted repair prompt → rebuild. Max 3 cycles, then `requires_human_review`.
-7. Deployment agent: Cloudflare Pages Direct Upload to the `jarvis-previews` project, branch = site slug. Verify the live URL (HTTP 200, title match, noindex header present). Record the deployment, plus expiry cleanup.
-8. Websites view: previews, versions, QA reports with screenshots, deployment history.
+1. `site-scaffold/`: Astro + Tailwind, a varied component library (several layout archetypes, hero, service and CTA variants), SEO helpers and JSON-LD `LocalBusiness` (from verified facts only), the noindex banner and `_headers`.
+2. Strategy → `SiteSpec` (Sonnet 5.5). Diversity guard (Haiku 5.5 text check + deterministic structural checks). Opus re-plan after 2 rejections.
+3. Generation (Sonnet 5.5) into allowed paths, with verified facts only.
+4. Sandbox runner (SECURITY_AND_COMPLIANCE §4).
+5. QA in the sandbox: build, desktop and mobile screenshots, nav and links, forms, `tel:`, console errors, assets, metadata and JSON-LD, axe-core, optional Lighthouse, factual-claim check (Haiku).
+6. LangGraph repair loop: Sonnet repairs 1–2 → Opus repair 3 → `requires_human_review`. Per-site cost cap.
+7. Deployment: Pages Direct Upload, branch per site, live verification (200, title, noindex header), expiry cleanup.
+8. Websites view.
+
+**Cross-niche diversity test dataset** (`tests/datasets/diversity/`):
+- **4 campaigns × 3 prospects = 12 research profiles**, covering at least **6 niches** and **3 metros**:
+
+| Campaign | Metro | Niches (one prospect each, plus one same-niche pair) |
+|---|---|---|
+| D1 | Houston, TX | plumbing ×2 (same-niche, same-city pair), roofing |
+| D2 | Phoenix, AZ | HVAC, landscaping, dental clinic |
+| D3 | Atlanta, GA | auto repair, hair salon, bakery |
+| D4 | Denver, CO | electrician, pest control, plumbing (cross-city same-niche) |
+
+- Profiles are frozen snapshots of **independently sourced facts only** (no Places content), produced by real Phase 5 research runs and reviewed by you. They're versioned so generation tests are repeatable.
+- Metrics per site pair: layout archetype, section order (edit distance), palette distance (CIEDE2000), type pairing, DOM structure similarity, copy similarity (shingled Jaccard on visible text).
+- Pass thresholds:
+  - No two sites share archetype + palette + section order.
+  - The same-niche pairs (Houston pair, Houston/Denver plumbers) still differ in at least 3 of the 5 structural and design dimensions.
+  - Copy Jaccard < 0.25 for every pair.
+  - Every site passes QA.
+- Full run ≈ $10 (12 sites). A smaller 4-site subset runs at each builder change.
 
 Acceptance
-- 5 sites for 5 real prospects in **different** niches/cities, all passing QA with zero console errors, axe "serious/critical" = 0, mobile Lighthouse performance ≥ 90 (target), and every factual claim traced to a verified fact.
-- A visual and structural diversity check: no two sites share a layout archetype plus palette plus section order.
-- A sandbox escape test: generated code that tries network access or writes outside `/work` fails safely.
-- The preview URL is live, noindexed, carries the banner, and is deleted by the expiry job.
-- Per-site cost recorded and ≤ `SITE_MAX_COST_MICROS`.
+- **Live diversity run:** all 12 dataset sites generated, built, QA-passed and deployed to pages.dev, meeting the thresholds above. Costs recorded per site, each ≤ $2.00 and averaging ≈ $0.80. Previews deleted after review.
+- **Live pilot:** 5 sites for 5 real qualified prospects from a real campaign, with zero console errors, zero serious or critical axe violations, mobile Lighthouse performance ≥ 90 (target), and every claim traced to a verified fact.
+- Sandbox escape tests (network access, writes outside `/work`, fork bomb) fail safely.
+- The expiry job deletes a real deployment (checked in the Cloudflare dashboard).
 
 ## Phase 7: Voice
+Tasks: LiveKit agent (STT → `/commands` → TTS), barge-in, spoken confirmations, mic UI, short-lived tokens.
+Acceptance:
+- **Live:** the 40-command eval as recorded audio gets ≥ 90% intent accuracy, and voice creates tasks identical to text.
+- Interruption stops TTS within 500 ms.
+- LiveKit minutes appear in provider-reported usage.
+
+## Phase 8: Outreach
 
 Tasks
-1. LiveKit Agents worker: STT → `POST /commands` (same pipeline) → TTS of the response. Barge-in (interrupt) support. Spoken confirmation for high-impact actions.
-2. Dashboard: a microphone button, live transcript, interrupt/cancel.
-3. Room tokens minted by the API with a short TTL.
+1. Draft generation (Sonnet 5.5), grounded in observations (fact IDs) and a verified preview URL. Drafts work with **no** email configuration.
+2. The `sending_readiness` checks: postal address entry, type and attestation; DNS SPF/DKIM/DMARC checks; provider verification; Reply-To confirmation; unsubscribe round-trip.
+3. Edge Worker: signed unsubscribe (with a KV buffer for when the API is down) and webhook relay.
+4. Email adapter (Resend or SES), idempotent sends, `List-Unsubscribe` headers, compliance footer.
+5. Reply classification (Haiku), automatic suppression, follow-up scheduler.
+6. Outreach UI: drafts, checklist, authorisation, sends, replies, suppression.
 
 Acceptance
-- The same 40-command eval spoken (recorded audio) gets ≥ 90% correct intents. Text and voice create identical tasks.
-- Interrupting mid-response stops TTS within 500 ms.
-
-## Phase 8: Outreach (needs a sending domain and postal address)
-
-Tasks
-1. Email adapter (Resend or SES), domain DNS checks (SPF/DKIM/DMARC), signed webhooks.
-2. Outreach drafts grounded in observations (fact IDs) and a verified preview URL. Compliance footer. `List-Unsubscribe` headers. Signed one-click unsubscribe endpoint.
-3. Outreach campaign authorisation with limits, send window, follow-up policy.
-4. Reply ingestion and classification (Haiku 5.5). Automatic suppression on opt-out, bounce, negative reply or complaint.
-5. Outreach view: drafts, approvals, sends, replies, suppression list.
-
-Acceptance
-- Sending is impossible without authorisation, domain and postal address (tested).
-- An unsubscribe click suppresses immediately, and no further mail is sent to that address or domain (tested with a real inbox you control).
-- Crash between provider accept and DB commit never produces a duplicate send (idempotency test with the provider's sandbox or test address).
-- First live sends go only to addresses you own, before any prospect.
+- With no email configuration: drafts are created and editable, and the send action reports `NOT_CONFIGURED` with the failing checklist items.
+- Each readiness item, removed one at a time, blocks sending (tested).
+- **Live (only after the gate passes with your domain):** sends go only to inboxes you own. The one-click unsubscribe suppresses immediately. A forced crash between provider accept and commit produces no duplicate.
+- With the API offline, an unsubscribe is still recorded through KV and drained on recovery.
 
 ## Phase 9: Hardening and operations
+Tasks:
+- Reporting views, with reconciliation of estimated vs reported usage.
+- Restore drill.
+- Encryption-key rotation script.
+- Queue load test (1k tasks).
+- Runbook covering: Supabase paused, DB restore, VPS rebuild, key leak, cap reached.
+- Alerts: heartbeat loss, 80% of cap, backup failure, DB unhealthy.
+- gVisor evaluation for the sandbox.
 
-Tasks: reporting views (funnel, cost by provider/campaign/day), cost-per-site report, backup job plus a restore drill, encryption-key rotation script, load test of the queue (1k tasks), dependency pinning, runbook (`docs/RUNBOOK.md`), an alert on worker heartbeat loss and on daily spend > 80% of cap.
-
-Acceptance: a restore from backup into a fresh project works. All dashboard numbers reconcile with SQL counts. Runbook steps have been executed once.
+Acceptance:
+- **Live:** a full restore into a fresh project.
+- VPS rebuilt from scratch in under 1 hour following the runbook.
+- All dashboard figures reconcile with SQL.
 
 ---
 
 ## Test strategy
 
-| Layer | Tool | Scope |
+| Layer | Tool | Counts toward Done? |
 |---|---|---|
-| Unit | pytest, hypothesis | state machines, policy, scoring, SSRF guard, identity matching, cost math |
-| Integration (DB) | pytest + local Supabase | queue semantics, RLS, transactions, migrations up and down |
-| Contract | pytest + recorded fixtures | each adapter's request shape and error mapping (fixtures recorded from real responses, with secrets scrubbed) |
-| Live integration | manual GitHub workflow | real providers with tiny caps (1–2 calls each). Run before each phase sign-off |
-| Frontend | Vitest + React Testing Library | components, Zod schemas, query hooks |
-| E2E | Playwright | dashboard flows against a local stack |
-| LLM evals | pytest-based eval harness | command parsing, fact extraction faithfulness, reply classification, site factuality |
-| Generated sites | Playwright + axe + Lighthouse in the sandbox | per-site QA (part of the product) |
+| Unit / property | pytest, hypothesis | required, not sufficient |
+| DB integration | pytest + local Supabase | required, not sufficient |
+| Contract (recorded fixtures, secrets scrubbed) | pytest | required, not sufficient |
+| **Live capped** | manual `live-test` workflow, per-run caps (ENV §13), dedicated `live-test` campaign with its own budget, teardown deletes deployments | **required for Done** |
+| Frontend | Vitest + React Testing Library | required |
+| E2E | Playwright against a local stack with real DB | required |
+| LLM evals | eval harness: commands, extraction faithfulness, reply classification, factuality | required where AI is involved |
+| Diversity | multi-campaign dataset (Phase 6) | required for the builder |
+| Generated-site QA | sandbox Playwright + axe (+ Lighthouse) | part of the product |
 
-Rule: test doubles exist only under `tests/` and are only importable when `JARVIS_ENV=test`.
+Rules:
+- Test doubles live under `tests/` and are importable only when `JARVIS_ENV=test`.
+- Live tests never run on every push. They need manual approval and can't exceed their caps (enforced by the same ToolGateway).
+- Every live run records provider-reported usage next to our estimate.
 
 ## Deployment strategy
-
-- `main` is always deployable. Work happens on short-lived branches, and merges require CI green.
-- Dashboard: Cloudflare Pages Git integration on `main`.
-- API/worker: GitHub Actions builds images → pushes to GHCR → SSH deploy to the host (`docker compose pull && up -d`). Migrations run first (Supabase CLI), and only backwards-compatible migrations are applied ahead of code.
-- The worker drains on SIGTERM (finishes or releases its lease) so deploys don't create orphaned tasks.
-- Rollback: redeploy the previous image tag. Migrations are additive within a release.
+- `main` is always deployable. Short-lived branches, CI must be green.
+- Dashboard: Cloudflare Pages from `main`. Edge Worker: `wrangler deploy` from CI.
+- VPS: CI builds images → GHCR → SSH `docker compose pull && up -d`. Migrations run first and are additive. The worker drains on SIGTERM.
+- Rollback: the previous image tag.
 
 ## Risks and mitigations
 
-| # | Risk | Likelihood | Impact | Mitigation |
+| # | Risk | L | I | Mitigation |
 |---|---|---|---|---|
-| 1 | Google Places terms restrict this use of Places data | Medium | High | Transient cache design. Legal review. Discovery adapter is swappable for SerpApi local results |
-| 2 | "No website" false positives damage credibility in outreach | Medium | High | Two independent checks, confidence scores, `unverified` state, and the Phase 4 accuracy gate |
-| 3 | Generated sites look templated | Medium | High | Strategy-first spec, a diversity guard, a varied component library, and the human review of the first 10 sites |
-| 4 | Generated sites contain fabricated claims | Medium | High | Verified-facts-only input, quote-verified facts, and the factual-claim QA check |
-| 5 | Claude cost overrun | Low–Med | Medium | Reservations, per-site cap, Sonnet/Batch levers, prompt caching |
-| 6 | Free-tier limits change | Medium | Medium | Prices in config, unit caps below the free allowance, `QUOTA_EXCEEDED` surfaced |
-| 7 | Outreach blocked by no domain | High (today) | High | Decision needed now. Drafts work without it |
-| 8 | Email deliverability or a spam complaint | Medium | High | Low volume, warm-up, authentication, immediate suppression, personalised content |
-| 9 | Preview site viewed as impersonation | Low–Med | Medium | Banner, noindex, no copying of logos/photos, expiry |
-| 10 | Sandbox escape | Low | High | No-network container, non-root, no Docker socket, static output validation. gVisor later |
-| 11 | Supabase Free limits (500 MB, connection caps) | Low (v1) | Medium | Retention purges, artefact pruning, upgrade path documented |
-| 12 | Single host is a single point of failure | Medium | Medium | Durable queue in Supabase means no work is lost. A host rebuild runbook. Recovery in under 1 hour |
-| 13 | Prompt injection from crawled content | Medium | Medium | Data-only prompts, no dangerous tools in extraction calls, schema validation |
+| 1 | Google terms restrict Places use for lead generation | Med | High | No content persisted, a swappable discovery adapter, legal review |
+| 2 | Compliance design reduces data available about no-website prospects | High | Med | Independent sourcing plus operator confirmation. Budgeted extra SERP and Firecrawl calls |
+| 3 | False "no website" labels | Med | High | Two checks, confidence scores, labelled multi-city accuracy gate |
+| 4 | Templated-looking sites | Med | High | Strategy-first approach, diversity guard, multi-campaign dataset gate |
+| 5 | Fabricated claims on sites | Med | High | Verified facts only, quote verification, factual QA |
+| 6 | Supabase pause or data loss on Free | Med | High | Detection and alert, manual resume runbook, own backups, Pro upgrade path |
+| 7 | Google charges despite caps (enforcement lag, misconfiguration) | Low | Med | App pre-call stop, Cloud quotas below app caps, alerts, key restrictions |
+| 8 | Outreach can't send without a domain | High (today) | Med | Drafts work. Sending unlocks when you supply a domain |
+| 9 | Deliverability or complaints | Med | High | Authentication, low volume, warm-up, immediate suppression |
+| 10 | VPS single point of failure | Med | Med | Durable queue in Supabase, rebuild runbook, backups off the VPS |
+| 11 | Sandbox escape | Low | High | No network, non-root, no Docker socket, static output. gVisor later |
+| 12 | Prompt injection from crawled content | Med | Med | Data-only prompts, no dangerous tools, schema validation |
+| 13 | Price or free-tier changes | Med | Med | Prices in config, caps below free tiers, `allow_paid=false` |

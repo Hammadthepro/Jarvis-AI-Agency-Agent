@@ -1,157 +1,189 @@
 # JARVIS — Environment Variables
 
-Status: **Proposed.** Configuration is loaded and validated at startup by a Pydantic
-`Settings` class (server) and a Zod schema (dashboard). A **required** variable that is missing
-stops the process in `production`. An **optional** integration that isn't set reports
-`NOT_CONFIGURED` in `/providers/health`. It never falls back silently to a mock.
+Status: **Proposed, revision 2.** Server configuration is validated at startup by a Pydantic
+`Settings` class. Dashboard configuration is validated by a Zod schema.
+- A missing **required** variable stops the process in `production`.
+- An **optional** integration that isn't set reports `NOT_CONFIGURED`, and never falls back silently to a mock.
 
-Classification:
-- **SECRET**: credential. Server-only. Never logged, never in the client bundle.
-- **SENSITIVE**: not a credential, but not public (internal URLs, account IDs).
-- **PUBLIC**: safe in the browser bundle.
-- **CONFIG**: non-sensitive tuning.
+Classification: **SECRET** (credential, server-only, never logged), **SENSITIVE** (not public),
+**PUBLIC** (safe in the browser bundle), **CONFIG** (tuning).
+Consumers: `api`, `worker`, `voice`, `dashboard`, `edge` (Cloudflare Worker), `backup`, `ci`.
 
-Consumers: `api`, `worker`, `voice`, `dashboard`, `sandbox`, `ci`.
+Revision 2: added VPS/hostname, model-routing, usage-sync, coordinate-storage, sending-readiness,
+backup and edge-Worker variables. Budget defaults now match the cost model §6.4.
 
-## 1. Core runtime
+## 1. Core runtime (VPS)
 
 | Variable | Purpose | Req | Consumers | Class | Validation |
 |---|---|---|---|---|---|
-| `JARVIS_ENV` | `local` \| `test` \| `production` | Required | api, worker, voice | CONFIG | enum. In `production`, any `*_TEST_DOUBLE*` flag set aborts startup |
-| `JARVIS_LOG_LEVEL` | log level | Optional (`INFO`) | api, worker | CONFIG | enum |
-| `JARVIS_ENCRYPTION_KEY` | AES-256-GCM key for secrets stored in the DB | Required | api, worker | SECRET | 32 bytes, base64. Generate with `openssl rand -base64 32` |
-| `JARVIS_WORKER_ID` | worker identity in heartbeats | Optional (hostname) | worker | CONFIG | slug |
-| `JARVIS_WORKER_CONCURRENCY` | parallel non-build tasks | Optional (`4`) | worker | CONFIG | int 1–16 |
-| `JARVIS_TASK_LEASE_SECONDS` | lease duration | Optional (`300`) | worker | CONFIG | int 60–1800 |
-| `API_CORS_ORIGINS` | allowed dashboard origins | Required | api | CONFIG | comma-separated https URLs |
-| `API_PUBLIC_BASE_URL` | the API's public URL (used for unsubscribe links and webhooks) | Required | api, worker | SENSITIVE | https URL |
-| `JARVIS_ENABLE_TEST_DOUBLES` | enables test doubles | Optional (`false`) | test only | CONFIG | must be `false`/unset unless `JARVIS_ENV=test` |
+| `JARVIS_ENV` | `local` \| `test` \| `live-test` \| `production` | Required | api, worker, voice | CONFIG | enum. Startup aborts if `JARVIS_ENABLE_TEST_DOUBLES=true` outside `test` |
+| `JARVIS_ENABLE_TEST_DOUBLES` | enables test doubles | Optional (false) | test only | CONFIG | allowed only when `JARVIS_ENV=test` |
+| `JARVIS_LOG_LEVEL` | log level | Optional (`INFO`) | all | CONFIG | enum |
+| `JARVIS_ENCRYPTION_KEY` | AES-256-GCM key for secrets stored in the DB | Required | api, worker | **SECRET** | 32 bytes base64 (`openssl rand -base64 32`) |
+| `JARVIS_WORKER_ID` | worker identity | Optional (hostname) | worker | CONFIG | slug |
+| `JARVIS_WORKER_CONCURRENCY` | parallel non-build tasks | Optional (`3`) | worker | CONFIG | 1–8 (sized for 2 vCPU / 4 GB) |
+| `JARVIS_TASK_LEASE_SECONDS` | lease length | Optional (`300`) | worker | CONFIG | 60–1800 |
+| `API_PUBLIC_BASE_URL` | public API URL (provider hostname or `<ip>.sslip.io` until a domain exists) | Required | api, worker, edge | SENSITIVE | https URL |
+| `API_CORS_ORIGINS` | dashboard origin(s) | Required | api | CONFIG | https URLs |
+| `CADDY_ACME_EMAIL` | Let's Encrypt registration email | Required | caddy | SENSITIVE | email |
+| `SANDBOX_IMAGE` | pinned build-sandbox image digest | Required | worker | CONFIG | `name@sha256:…` |
+| `SANDBOX_CPUS` / `SANDBOX_MEMORY` / `SANDBOX_TIMEOUT_S` | sandbox limits | Optional (`1` / `1g` / `180`) | worker | CONFIG | numeric |
 
-## 2. Supabase
+## 2. Supabase and database
 
-Where to get them: Supabase Dashboard → Project Settings → API / Database.
+Get these from Supabase Dashboard → Project Settings → API / Database.
 
 | Variable | Purpose | Req | Consumers | Class | Validation |
 |---|---|---|---|---|---|
 | `SUPABASE_URL` | project URL | Required | api, worker | SENSITIVE | `https://<ref>.supabase.co` |
-| `SUPABASE_SERVICE_ROLE_KEY` | server access that bypasses RLS (Storage, admin) | Required | api, worker | **SECRET** | JWT/`sb_secret_…` format. **Never in the dashboard** |
-| `SUPABASE_JWT_ISSUER` | expected `iss` for user JWTs | Required | api | CONFIG | URL |
-| `SUPABASE_JWKS_URL` | JWKS used to verify user tokens | Required | api | CONFIG | URL |
-| `DATABASE_URL` | Postgres connection (session pooler, port 5432, for the worker's `SKIP LOCKED` queue) | Required | api, worker | **SECRET** | `postgresql+asyncpg://…`, `sslmode=require` |
-| `DATABASE_POOL_SIZE` | pool size | Optional (`5`) | api, worker | CONFIG | int. Keep the total under the Free plan's connection limit |
-| `SUPABASE_STORAGE_BUCKET_SITES` | bucket for site sources and artefacts | Optional (`sites`) | worker | CONFIG | private bucket |
-| `VITE_SUPABASE_URL` | auth in the browser | Required | dashboard | PUBLIC | URL |
-| `VITE_SUPABASE_ANON_KEY` | anon/publishable key (RLS protected) | Required | dashboard | PUBLIC | key format |
-| `VITE_API_BASE_URL` | API base URL | Required | dashboard | PUBLIC | https URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | server access (bypasses RLS) | Required | api, worker | **SECRET** | never in the dashboard |
+| `SUPABASE_JWT_ISSUER` / `SUPABASE_JWKS_URL` | user token verification | Required | api | CONFIG | URLs |
+| `DATABASE_URL` | Postgres (session pooler) | Required | api, worker, backup | **SECRET** | `postgresql+asyncpg://…`, TLS required |
+| `DATABASE_POOL_SIZE` | pool per process | Optional (`5`) | api, worker | CONFIG | keep the total under Free plan limits |
+| `DB_HEALTH_INTERVAL_S` | health probe interval | Optional (`30`) | api, worker | CONFIG | 5–300 |
+| `DB_RECONNECT_MAX_BACKOFF_S` | reconnect backoff ceiling | Optional (`60`) | api, worker | CONFIG | 5–600 |
+| `SUPABASE_STORAGE_BUCKET_SITES` | private bucket | Optional (`sites`) | worker | CONFIG | |
+| `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` | browser auth | Required | dashboard | PUBLIC | RLS protected |
+| `VITE_API_BASE_URL` | API URL | Required | dashboard | PUBLIC | https URL |
 
-## 3. Google Places API (New)
-
-Where to get it: Google Cloud Console → APIs & Services → enable "Places API (New)" → Credentials → API key. Restrict it to Places API (New) and the host's IP. Set a billing budget alert.
+## 3. Backups
 
 | Variable | Purpose | Req | Consumers | Class | Validation |
 |---|---|---|---|---|---|
-| `GOOGLE_PLACES_API_KEY` | Places calls | Optional (Discovery shows NOT_CONFIGURED without it) | worker | **SECRET** | starts with `AIza`, 39 chars |
-| `PLACES_MAX_TEXT_SEARCH_PRO_MONTHLY` | unit cap | Optional (`4500`) | worker | CONFIG | ≤ free allowance by default |
-| `PLACES_MAX_ENTERPRISE_CALLS_MONTHLY` | unit cap (Details/Text Search Enterprise) | Optional (`950`) | worker | CONFIG | int |
-| `PLACES_CACHE_TTL_HOURS` | `places_cache` expiry | Optional (`720`) | worker | CONFIG | int ≤ 720. Set per the current terms |
+| `BACKUP_SCHEDULE_CRON` | daily `pg_dump` schedule | Optional (`0 4 * * *`) | backup | CONFIG | cron |
+| `BACKUP_AGE_RECIPIENT` | age public key for encryption | Required | backup | SENSITIVE | `age1…` (keep the private key offline) |
+| `BACKUP_R2_ACCOUNT_ID` / `BACKUP_R2_BUCKET` | off-site target | Optional (recommended) | backup | SENSITIVE / CONFIG | |
+| `BACKUP_R2_ACCESS_KEY_ID` / `BACKUP_R2_SECRET_ACCESS_KEY` | R2 token scoped to the backup bucket | Optional | backup | **SECRET** | |
 
-## 4. SerpApi
+## 4. Google Places API (New)
 
-Where to get it: serpapi.com → Dashboard → API Key.
-
-| Variable | Purpose | Req | Consumers | Class | Validation |
-|---|---|---|---|---|---|
-| `SERPAPI_API_KEY` | Google Search via SerpApi | Optional | worker | **SECRET** | 64 hex chars. Redacted from URLs in logs |
-| `SERPAPI_MAX_SEARCHES_MONTHLY` | unit cap | Optional (`240`) | worker | CONFIG | int |
-| `SERPAPI_MAX_PER_HOUR` | throughput cap | Optional (`45`) | worker | CONFIG | int below plan limit |
-
-## 5. Firecrawl
-
-Where to get it: firecrawl.dev → Dashboard → API Keys.
+Get it from Google Cloud Console: enable "Places API (New)" → Credentials → API key. Restrict the
+key to Places API (New) and the VPS IP. Set per-day quotas and budget alerts (alerts are warnings only).
 
 | Variable | Purpose | Req | Consumers | Class | Validation |
 |---|---|---|---|---|---|
-| `FIRECRAWL_API_KEY` | scrape/crawl | Optional | worker | **SECRET** | starts with `fc-` |
-| `FIRECRAWL_MAX_CREDITS_MONTHLY` | unit cap | Optional (`950`) | worker | CONFIG | int |
-| `FIRECRAWL_MAX_PAGES_PER_PROSPECT` | default crawl limit | Optional (`5`) | worker | CONFIG | int 1–20 |
+| `GOOGLE_PLACES_API_KEY` | Places calls | Optional (Discovery shows NOT_CONFIGURED without it) | worker, api (on-demand display) | **SECRET** | `AIza…`, 39 chars |
+| `PLACES_CAP_TEXT_SEARCH_ENTERPRISE_MONTHLY` / `_DAILY` | app hard cap | Optional (`900` / `60`) | worker | CONFIG | ≤ free allowance unless `allow_paid` |
+| `PLACES_CAP_TEXT_SEARCH_PRO_MONTHLY` | fallback mask cap | Optional (`4500`) | worker | CONFIG | |
+| `PLACES_CAP_DETAILS_PRO_MONTHLY` | on-demand display cap | Optional (`300`) | api | CONFIG | |
+| `PLACES_CAP_DETAILS_ENTERPRISE_MONTHLY` | on-demand contact cap | Optional (`50`) | api | CONFIG | |
+| `PLACES_STORE_COORDINATES` | persist lat/lng (≤ 30 days) | Optional (`false`) | worker | CONFIG | bool |
+| `PLACES_COORDINATES_TTL_DAYS` | coordinate expiry | Optional (`30`) | worker | CONFIG | 1–30 (hard upper bound) |
 
-## 6. Claude API
+There is **no** cache-TTL variable for other Places content, because it is never stored.
 
-Where to get it: platform.claude.com → API Keys. Use a dedicated workspace and set a workspace spend limit.
+## 5. SerpApi
 
-| Variable | Purpose | Req | Consumers | Class | Validation |
-|---|---|---|---|---|---|
-| `ANTHROPIC_API_KEY` | Claude calls | Required for command parsing, building and outreach | api, worker, voice | **SECRET** | starts with `sk-ant-` |
-| `CLAUDE_MODEL_REASONING` | generation/strategy model | Optional (`claude-opus-5-5`) | worker | CONFIG | must be in the allowed list |
-| `CLAUDE_MODEL_FAST` | parsing/extraction/classification | Optional (`claude-haiku-5-5`) | api, worker | CONFIG | allowed list |
-| `CLAUDE_MODEL_OUTREACH` | outreach copy | Optional (`claude-opus-5-5`) | worker | CONFIG | allowed list |
-| `CLAUDE_MAX_TOKENS_GENERATION` | per-call output cap | Optional (`64000`) | worker | CONFIG | int ≤ 128000 |
-| `SITE_MAX_COST_MICROS` | per-site spend cap | Optional (`4000000`) | worker | CONFIG | int |
-
-## 7. Groq (deferred, not used in v1)
+Get it from serpapi.com → Dashboard → API Key.
 
 | Variable | Purpose | Req | Consumers | Class | Validation |
 |---|---|---|---|---|---|
-| `GROQ_API_KEY` | reserved for a future cheap-classification adapter | Optional | worker | **SECRET** | starts with `gsk_` |
+| `SERPAPI_API_KEY` | search | Optional | worker | **SECRET** | 64 hex chars. Redacted in logs |
+| `SERPAPI_CAP_MONTHLY` / `SERPAPI_CAP_HOURLY` | app hard caps | Optional (`240` / `45`) | worker | CONFIG | below plan limits |
+| `SERPAPI_USAGE_SYNC_MINUTES` | provider-reported usage sync | Optional (`60`) | worker | CONFIG | |
 
-## 8. Cloudflare
+## 6. Firecrawl
 
-Where to get them: Cloudflare Dashboard → My Profile → API Tokens → Create Token. Use a custom token with **Account → Cloudflare Pages → Edit**, limited to one account. The account ID is on the account overview page.
+Get it from firecrawl.dev → Dashboard → API Keys. Keep auto-recharge **off**.
 
 | Variable | Purpose | Req | Consumers | Class | Validation |
 |---|---|---|---|---|---|
-| `CLOUDFLARE_API_TOKEN` | Pages deployments and cleanup | Optional (Deployment shows NOT_CONFIGURED without it) | worker, ci | **SECRET** | verified at startup via `/user/tokens/verify` |
+| `FIRECRAWL_API_KEY` | scrape/crawl | Optional | worker | **SECRET** | `fc-…` |
+| `FIRECRAWL_CAP_CREDITS_MONTHLY` | app hard cap | Optional (`950`) | worker | CONFIG | |
+| `FIRECRAWL_MAX_PAGES_PER_PROSPECT` | crawl limit | Optional (`5`) | worker | CONFIG | 1–20 |
+| `FIRECRAWL_USAGE_SYNC_MINUTES` | usage sync | Optional (`60`) | worker | CONFIG | |
+
+## 7. Claude API
+
+Get it from platform.claude.com → API Keys. Use a dedicated workspace with a **spend limit of $35/month**.
+
+| Variable | Purpose | Req | Consumers | Class | Validation |
+|---|---|---|---|---|---|
+| `ANTHROPIC_API_KEY` | Claude calls | Required for commands, research, building, drafts | api, worker, voice | **SECRET** | `sk-ant-…` |
+| `ANTHROPIC_ADMIN_KEY` | Usage and Cost API (provider-reported usage) | Optional | worker | **SECRET** | `sk-ant-admin…`. Sync shows "not available" if unset |
+| `CLAUDE_MODEL_FAST` | classification, extraction, routing | Optional (`claude-haiku-5-5`) | api, worker | CONFIG | allowed list |
+| `CLAUDE_MODEL_BUILD` | strategy, generation, ordinary repair, outreach copy | Optional (`claude-sonnet-5-5`) | worker | CONFIG | allowed list |
+| `CLAUDE_MODEL_ESCALATION` | difficult reasoning, repair escalation | Optional (`claude-opus-5-5`) | worker | CONFIG | allowed list |
+| `OPUS_MAX_ESCALATIONS_PER_SITE` / `_PER_DAY` | escalation caps | Optional (`2` / `5`) | worker | CONFIG | int |
+| `SITE_MAX_COST_MICROS` | per-site hard cap | Optional (`2000000`) | worker | CONFIG | int |
+| `CLAUDE_USE_BATCHES` | batch non-urgent builds | Optional (`false`) | worker | CONFIG | bool |
+
+## 8. Groq (deferred, not used in v1)
+`GROQ_API_KEY`: reserved, optional, **SECRET**. Ignored in v1.
+
+## 9. Cloudflare
+
+Get a custom API token from Cloudflare Dashboard → My Profile → API Tokens, with Account →
+Cloudflare Pages → Edit and Workers KV → Edit, on one account only.
+
+| Variable | Purpose | Req | Consumers | Class | Validation |
+|---|---|---|---|---|---|
+| `CLOUDFLARE_API_TOKEN` | Pages deployments and cleanup | Optional (Deployment shows NOT_CONFIGURED without it) | worker, ci | **SECRET** | verified via `/user/tokens/verify` |
 | `CLOUDFLARE_ACCOUNT_ID` | account | Required with token | worker, ci | SENSITIVE | 32 hex |
-| `CLOUDFLARE_PAGES_PREVIEW_PROJECT` | preview project name | Optional (`jarvis-previews`) | worker | CONFIG | slug |
-| `PREVIEW_TTL_DAYS` | preview expiry | Optional (`30`) | worker | CONFIG | int 1–90 |
-| `WEBHOOK_RELAY_SHARED_SECRET` | HMAC between the Worker relay and the API (if used) | Optional | api, webhook-relay | **SECRET** | ≥ 32 bytes |
+| `CLOUDFLARE_PAGES_PREVIEW_PROJECT` | preview project | Optional (`jarvis-previews`) | worker | CONFIG | slug |
+| `PREVIEW_TTL_DAYS` | expiry | Optional (`30`) | worker | CONFIG | 1–90 |
+| `EDGE_TO_API_HMAC_SECRET` | signs edge → API forwards | Required if the edge Worker is deployed | api, edge | **SECRET** | ≥ 32 bytes |
+| `EDGE_PUBLIC_BASE_URL` | `https://jarvis-edge.<acct>.workers.dev` | Required for unsubscribe links | api, worker | CONFIG | https URL |
 
-## 9. Email (blocked until a sending domain is approved)
+## 10. Outreach and email
 
-| Variable | Purpose | Req | Consumers | Class | Validation |
-|---|---|---|---|---|---|
-| `EMAIL_PROVIDER` | `resend` \| `ses` | Optional | worker, api | CONFIG | enum |
-| `RESEND_API_KEY` | send API | Optional | worker | **SECRET** | starts with `re_` |
-| `RESEND_WEBHOOK_SECRET` | Svix signature verification | Optional | api | **SECRET** | starts with `whsec_` |
-| `AWS_SES_ACCESS_KEY_ID` / `AWS_SES_SECRET_ACCESS_KEY` / `AWS_SES_REGION` | SES alternative | Optional | worker | **SECRET** / SECRET / CONFIG | IAM user limited to `ses:SendEmail` |
-| `EMAIL_FROM_ADDRESS` | sender | Required to send | worker | SENSITIVE | must be on `EMAIL_SENDING_DOMAIN`. Rejected if the domain is `pages.dev`, `workers.dev` or free mail |
-| `EMAIL_SENDING_DOMAIN` | verified domain | Required to send | worker | SENSITIVE | SPF/DKIM/DMARC checked via DNS at startup |
-| `EMAIL_REPLY_TO` | monitored inbox | Required to send | worker | SENSITIVE | email |
-| `UNSUBSCRIBE_SIGNING_KEY` | signs unsubscribe tokens | Required to send | api, worker | **SECRET** | ≥ 32 bytes |
-
-## 10. LiveKit (Phase 7)
-
-Where to get them: LiveKit Cloud → Project → Settings → Keys.
+Drafting needs **none** of these. Sending is blocked until the sending-readiness gate passes (SECURITY_AND_COMPLIANCE §7.3).
 
 | Variable | Purpose | Req | Consumers | Class | Validation |
 |---|---|---|---|---|---|
-| `LIVEKIT_URL` | project WebSocket URL | Optional | api, voice | SENSITIVE | `wss://…livekit.cloud` |
-| `LIVEKIT_API_KEY` | token minting | Optional | api, voice | **SECRET** | starts with `API` |
-| `LIVEKIT_API_SECRET` | token minting | Optional | api, voice | **SECRET** | non-empty |
-| `VOICE_STT_PROVIDER` / `VOICE_TTS_PROVIDER` | STT/TTS choice (LiveKit Inference by default) | Optional | voice | CONFIG | enum |
+| `EMAIL_PROVIDER` | `resend` \| `ses` | Required to send | worker, api | CONFIG | enum |
+| `RESEND_API_KEY` | send | Required to send (Resend) | worker | **SECRET** | `re_…` |
+| `RESEND_WEBHOOK_SECRET` | signature check (at the edge) | Required to send (Resend) | edge | **SECRET** | `whsec_…` |
+| `AWS_SES_ACCESS_KEY_ID` / `AWS_SES_SECRET_ACCESS_KEY` / `AWS_SES_REGION` | SES alternative | Required to send (SES) | worker | **SECRET** / **SECRET** / CONFIG | IAM limited to `ses:SendEmail` |
+| `EMAIL_SENDING_DOMAIN` | authenticated domain | Required to send | worker | SENSITIVE | SPF/DKIM/DMARC checked. `pages.dev`, `workers.dev` and free-mail rejected |
+| `EMAIL_FROM_ADDRESS` / `EMAIL_REPLY_TO` | sender / monitored inbox | Required to send | worker | SENSITIVE | must be on the sending domain |
+| `UNSUBSCRIBE_SIGNING_KEY` | signs unsubscribe tokens (with `kid`) | Required to send | api, worker, edge | **SECRET** | ≥ 32 bytes |
 
-## 11. Budgets & limits (global defaults; can be overridden in `system_settings`)
+The postal address isn't an environment variable. It's entered, typed and attested in Settings
+(`sending_readiness`), so the attestation is audited.
+
+## 11. LiveKit (Phase 7)
+
+Get these from LiveKit Cloud → Project → Settings → Keys.
+
+| Variable | Purpose | Req | Consumers | Class |
+|---|---|---|---|---|
+| `LIVEKIT_URL` | WebSocket URL | Optional | api, voice | SENSITIVE |
+| `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | token minting | Optional | api, voice | **SECRET** |
+| `VOICE_STT_PROVIDER` / `VOICE_TTS_PROVIDER` | provider choice | Optional | voice | CONFIG |
+
+## 12. Budgets (defaults; can be overridden in `system_settings` / `usage_limits`)
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BUDGET_DAILY_CAP_USD` | `5` | global daily spend cap |
-| `BUDGET_MONTHLY_CAP_USD` | `50` | global monthly spend cap |
-| `BUDGET_CAMPAIGN_DEFAULT_USD` | `10` | default per-campaign cap |
+| `BUDGET_DAILY_CAP_USD` | `5` | global metered spend per day |
+| `BUDGET_MONTHLY_CAP_USD` | `35` | global metered spend per month (matches the Claude Console limit) |
+| `BUDGET_CAMPAIGN_DEFAULT_USD` | `5` | per-campaign cap |
+| `ALLOW_PAID_DEFAULT` | `false` | caps can't exceed free allowances unless changed per limit by the owner |
 | `MAX_CONCURRENT_BUILDS` | `1` | sandbox concurrency |
 | `OUTREACH_DAILY_LIMIT_DEFAULT` | `20` | per outreach campaign |
-| `PRICING_OVERRIDES_JSON` | unset | optional unit-price overrides for the cost model |
+| `PRICING_OVERRIDES_JSON` | unset | unit-price corrections (versioned) |
 
-## 12. CI only (GitHub Actions secrets)
+## 13. Live-test caps (`JARVIS_ENV=live-test`, manual CI workflow only)
 
-`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` (dashboard deploy), `SUPABASE_ACCESS_TOKEN` and
-`SUPABASE_DB_PASSWORD` (migrations, **SECRET**). Integration tests against real providers run
-only through a manual workflow with low caps, never on every push.
-
-## 13. Rotation
-
-| Secret | Rotate when | How |
+| Variable | Default | Purpose |
 |---|---|---|
-| Provider API keys | suspected leak, staff change, every 6 months | create the new key → update env → restart → revoke the old one |
-| `SUPABASE_SERVICE_ROLE_KEY` / DB password | suspected leak | Supabase dashboard → roll the key |
-| `JARVIS_ENCRYPTION_KEY` | yearly | dual-key period: decrypt with old, re-encrypt with new (script in Phase 9) |
-| Signing secrets | suspected leak | rotate. Outstanding unsubscribe links stay valid through the key-ID (`kid`) mechanism |
+| `LIVE_TEST_MAX_PLACES_REQUESTS` | `3` | per run |
+| `LIVE_TEST_MAX_SERP_SEARCHES` | `5` | per run |
+| `LIVE_TEST_MAX_FIRECRAWL_CREDITS` | `5` | per run |
+| `LIVE_TEST_MAX_CLAUDE_USD` | `0.50` | per run (site-build live test: `2.00`) |
+| `LIVE_TEST_MAX_CF_DEPLOYS` | `1` | per run (deleted at teardown) |
+
+## 14. CI secrets (GitHub Actions)
+`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `SUPABASE_ACCESS_TOKEN`, `SUPABASE_DB_PASSWORD`,
+`VPS_SSH_KEY` (deploy), and live-test provider keys in a protected `live-test` environment that
+needs manual approval. All **SECRET**.
+
+## 15. Rotation
+| Secret | When | How |
+|---|---|---|
+| Provider keys | suspected leak, every 6 months | create new → update → restart → revoke old |
+| Supabase service key / DB password | suspected leak | roll in Supabase → update → restart |
+| `JARVIS_ENCRYPTION_KEY` | yearly | dual-key re-encryption script (Phase 9) |
+| Signing keys (`UNSUBSCRIBE_SIGNING_KEY`, `EDGE_TO_API_HMAC_SECRET`) | suspected leak | rotate with a `kid`. Old links stay valid until expiry |
+| Backup age key | if compromised | new key pair. Re-encrypt retained backups |

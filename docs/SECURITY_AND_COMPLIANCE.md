@@ -1,189 +1,219 @@
 # JARVIS — Security & Compliance
 
-Status: **Proposed.** This is an engineering interpretation of the relevant terms and laws, not
-legal advice. Items marked **⚖ Review** should be checked by you, or by counsel, against the
-current official text before production use.
+Status: **Proposed, revision 2.** This is an engineering interpretation of the relevant terms and
+laws. It isn't legal advice. Items marked **⚖ Review** need your own check, or counsel's, against
+the current official text.
+
+Revision 2: Places content is never persisted (only Place IDs and optional 30-day coordinates).
+Attribution rules are documented. Field masks are mapped to SKUs. Google billing protection is
+layered. Outreach has a sending-readiness gate with legitimate-postal-address and
+authenticated-domain requirements. Drafts are always available.
 
 ---
 
-## 1. Google Maps Platform (Places API New)
+## 1. Google Maps Platform: Places API (New)
 
-### 1.1 Constraints we design around
-Paraphrased from the Google Maps Platform Terms of Service and the Places API service-specific
-terms. **⚖ Review the current versions.**
+### 1.1 Storage rules (from Google's Places API policies page, checked 2026-11-18)
 
-| Constraint | Design response |
+| Google rule | JARVIS enforcement |
 |---|---|
-| No scraping, no bulk export, and no building a database or list from Google Maps Content outside the permitted caching rules. | Use only the official API. Our durable prospect record is `place_id` plus data we independently verified. Places content lives only in `places_cache`, with an expiry. |
-| **Place IDs may be stored indefinitely.** | `prospects.place_id` is retained. |
-| Other Places content (name, address, phone, website, hours, ratings) may not be cached beyond the limited periods the terms allow. Latitude/longitude have a temporary caching allowance, generally up to 30 consecutive days. | `places_cache.expires_at` defaults to ≤ 30 days, a nightly purge deletes expired rows, and the UI refreshes through Place Details on demand. **⚖ Review:** the terms may allow less than 30 days for non-coordinate fields. The TTL is configurable (`PLACES_CACHE_TTL_HOURS`) and we should set it to whatever the current text permits. |
-| Places content shown to users must carry attribution, and must not be shown on a non-Google map. | The dashboard shows "Google Maps" attribution on any Places-derived field. There is no third-party map display. |
-| No using Places content to create "derived content" that substitutes for Google. | Generated websites and outreach use **independently verified facts** (from the business's own site or other sources), never Places-only fields. The Website Builder and Outreach agents can't read `places_cache` (ToolGateway). |
-| Billing and quotas. | Field masks are always explicit. Per-SKU monthly caps are set below the free allowance. The Google Cloud budget alert is at $1. |
+| Cache or store Google Maps Content only as the Service Specific Terms expressly permit. No pre-fetching, indexing, storing or redistributing outside the Services. | No table stores Places content (DATABASE_SCHEMA §2). There's no `places_cache`. Places responses exist only in process memory during the task that requested them. |
+| **Place IDs are exempt from caching limits and may be stored indefinitely.** | `place_refs.place_id` is stored. |
+| Latitude/longitude may be cached for **up to 30 consecutive calendar days**, then deleted. | Off by default. If enabled, there's a DB check constraint for ≤ 30 days and a nightly purge. |
+| Don't copy or save business names, addresses or user reviews. | No columns exist for them on Google-linked tables. A CI schema denylist test enforces this. Pydantic payload models for Places-calling tasks contain no Places fields. Logs redact Places response bodies. |
+| Recommended: request only the fields you need, store the place ID, and fetch fresh details when a user interacts with the place. | Fixed field masks (§1.3). The lead detail "Show Google Maps listing" action makes a live Place Details Pro call, shown with attribution and never stored. |
+| Don't create new content from Google Maps Content. | Scores, generated sites and outreach use only independently sourced facts. Ratings and reviews are never requested. The Website Builder, Outreach and Qualification agents can't call the Places adapter (ToolGateway allow-list). |
 
-**Separation rule:** if a business's phone number appears only in Places data, we may display it
-to the operator (with attribution, while cached), but it isn't a "verified contact" for outreach
-until it's confirmed on an independent source, such as the business's website. This also
-improves data quality.
+**Independent sourcing.** Business details that JARVIS keeps (name, phone, website, services) must
+come from non-Google-Maps sources: the business's own website, other pages fetched by Firecrawl,
+SerpApi results (treated as evidence, not fact), licence registers, or the operator. Places values
+may be used in memory as *search keys* to find those sources, but they aren't written down. SERP
+query strings built from Places values are stored only as a template ID plus a hash.
 
-**⚖ Open question:** whether using Places search results to choose businesses for commercial
-outreach is consistent with the current terms. This is the biggest compliance dependency in the
-product. If the answer is no, Discovery can switch to SERP local results (SerpApi `google_maps`
-or `google_local` engines) or another licensed business-data source, and the rest of the
-architecture stays the same.
+**⚖ Review: open questions**
+1. Whether using Places search results to choose businesses for commercial outreach is consistent with the current Maps Platform Terms and Service Specific Terms. This is the biggest compliance dependency in the product. The Discovery adapter is swappable: alternatives are SerpApi's local engines (subject to SerpApi's terms) or a licensed business-data provider.
+2. Whether sending a Places-derived business name to SerpApi as a search query counts as redistribution. We minimise this (name + city only, no addresses) and store only a hash.
+3. Whether persisting a website URL that we independently confirm by fetching the site (first hinted by Places `websiteUri`) is acceptable. We store it only after our own probe confirms identity, with `source_type = http_probe`, and record only that a Maps hint was used.
 
-### 1.2 Key handling
-API key restricted to the Places API (New) only, plus an IP restriction to the container host. It's never sent to the browser.
+### 1.2 Attribution and display requirements
+
+These apply whenever the dashboard shows Places content (the live "Show Google Maps listing"
+panel; Places content is never shown anywhere else):
+
+| Requirement | Implementation |
+|---|---|
+| Attribution whenever Places content is displayed, unless it's on a Google Map where attribution is already visible | We don't show a Google Map, so the panel always shows attribution |
+| Prefer the Google Maps logo. Use the text "Google Maps" where space is limited | Logo inside the panel container. Text fallback on narrow layouts |
+| Logo not modified or distorted. Height 16–19 dp with the required clear space. Accessibility label "Google Maps" | `<GoogleMapsAttribution>` component using Google's asset unmodified. Snapshot test on size and aspect ratio |
+| Text attribution: exact capitalisation, not wrapped, not translated, `translate="no"`, Roboto or sans-serif fallback, weight 400, colour white, #1F1F1F or #5E5E5E, 12–16 sp | Component styles fixed to these values. Visual regression test |
+| Never remove, hide, obscure or alter attribution | The panel can't render without the attribution component (a type-level requirement) |
+| Third-party attributions supplied in the response must be shown, and "Google Maps" alone isn't enough when they exist | The panel renders any `attributions` returned |
+| Visually separate Places content from other content (border, background, whitespace), with attribution in the same container near the top or bottom | A distinct bordered card labelled "From Google Maps", separate from the independently verified data |
+| Reviews/photos need author attribution and links | Not applicable: we never request reviews or photos |
+| `googleMapsUri` link lets the user view the place on Google Maps | Included in the Pro mask and shown as "View on Google Maps" |
+
+### 1.3 Field masks and billing SKUs
+
+Confirmed against Google's Text Search (New) and Place Details (New) field tables. The
+highest-tier field sets the SKU for the whole request.
+
+| Mask | Endpoint | Fields | SKU |
+|---|---|---|---|
+| `DISCOVERY_ENTERPRISE` | Text Search | id, displayName, formattedAddress, businessStatus, primaryType, types, websiteUri, nationalPhoneNumber, nextPageToken | **Enterprise** (websiteUri, nationalPhoneNumber) |
+| `DISCOVERY_PRO` | Text Search | id, displayName, formattedAddress, businessStatus, primaryType, types, nextPageToken | **Pro** |
+| `IDS_ONLY` | Text Search | id, nextPageToken | **Essentials (IDs Only)** |
+| `DETAILS_DISPLAY` | Place Details | id, displayName, formattedAddress, businessStatus, googleMapsUri | **Pro** (displayName, businessStatus, googleMapsUri. formattedAddress alone would be Essentials) |
+| `DETAILS_CONTACT` | Place Details | DETAILS_DISPLAY + websiteUri, nationalPhoneNumber | **Enterprise** |
+
+Never requested: rating, userRatingCount, regularOpeningHours (Enterprise), reviews/photos
+(Enterprise + Atmosphere). A unit test asserts mask → SKU for every constant.
+
+### 1.4 Billing protection
+
+**Google Cloud budget alerts don't cap spending. They only notify.** Controls:
+1. **App-level hard stop (primary):** before every Places request, the ToolGateway reserves one unit on the per-SKU daily and monthly counters and the campaign counter, under a row lock. If any cap would be exceeded, the request is **not sent** (`BUDGET_BLOCKED`). Default caps sit below the free allowances.
+2. **Provider-side hard stop:** Cloud Console → Google Maps Platform → Quotas → per-day request limits on the Text Search and Place Details methods, set *below* the app caps, because quota enforcement has some latency.
+3. **Warnings:** Cloud Billing budget alerts at $1 and $5, and an in-app alert at 80% of any cap.
+4. **Key restrictions:** API restriction to Places API (New) only, IP restriction to the VPS.
+5. Estimated usage (our ledger) and provider-reported usage (manually imported from Cloud Billing reports in v1) are shown separately.
 
 ---
 
 ## 2. SerpApi
+- Stay within plan quota and throughput. Our token bucket stays below the plan limit, and nothing is retried past `QUOTA_EXCEEDED`.
+- Results and snippets are stored as **evidence**, never as verified facts.
+- The API key goes in the query string, so it's redacted from logs, errors and stored URLs.
+- Usage is synced from the SerpApi account endpoint and shown as provider-reported.
 
-- Use only within the plan's quota and throughput. Our adapter enforces a per-hour token bucket set below the plan limit.
-- SerpApi returns Google results, and our use is subject to SerpApi's terms. We store queries, URLs and snippets as evidence with timestamps. **Snippets are never treated as verified facts.**
-- No automated clicking-through from SERP results except our own probes of candidate official domains, which go through the SSRF guard and respect robots.txt.
-- API key goes in the query string, which is how SerpApi works. So it must be **scrubbed from logs and error messages**, and `httpx` request logging is configured to redact `api_key`.
-
----
-
-## 3. Firecrawl & our own HTTP probes
+## 3. Firecrawl and direct HTTP probes
 
 | Rule | Enforcement |
 |---|---|
-| Crawl only verified official websites, or a single page for identity checks | The Research agent only crawls a URL that has a `website_audits` row with `status in (functioning, outdated)` and identity score ≥ threshold |
-| Bounded crawling | `limit` = `max_crawl_pages_per_prospect` (default 5), `maxDepth` 2, same domain only, timeout 60 s |
-| Respect robots.txt | Our probe fetches and evaluates robots.txt before any Firecrawl crawl. Disallowed paths are skipped. A site that disallows everything is scraped only at its homepage for identity, or skipped (configurable) |
-| No login walls, paywalls or form submission | Not supported by the adapter |
-| Rate | At most 1 concurrent crawl per domain |
-| No personal data beyond business contacts | Extraction prompts request business information only. Individual employees' personal details are discarded |
+| Crawl only verified official sites. Other pages are single-page scrapes for identity or evidence | The Research agent checks `website_audits` before crawling |
+| Bounded | `limit` ≤ 5 pages, `maxDepth` 2, same domain, 60 s timeout, per-prospect and monthly credit caps |
+| robots.txt | Checked by our probe before every Firecrawl call. Disallowed URLs are skipped |
+| Third-party site terms | Directory and social pages: one page per source, no login walls, no bulk extraction. Sources whose terms forbid automated access are on a blocklist **⚖ Review the list** |
+| No personal data beyond public business contacts | Extraction prompt and schema are limited to business information |
 
-### SSRF protection (our direct fetches: DNS/HTTP probes, robots.txt)
-- Allow only the `http` and `https` schemes, and ports 80 and 443.
-- Resolve DNS ourselves. Reject private, loopback, link-local, CGNAT and multicast addresses, IPv6 ULA/link-local, and `169.254.169.254` and other metadata hosts. Connect to the **resolved IP**, with SNI/Host set to the hostname, so DNS rebinding can't work.
-- Re-validate every redirect hop, with at most 5 redirects.
-- Response size cap of 2 MB, total timeout of 10 s, no cookies, generic User-Agent `JarvisSiteCheck/1.0` (no personal or agency data).
-- Firecrawl fetches on its own infrastructure, but we still validate the URL with the same rules before sending it.
-
----
+**SSRF guard** (all direct fetches): http/https only on ports 80/443. Resolve DNS ourselves and
+reject private, loopback, link-local, CGNAT, multicast, IPv6 ULA and metadata addresses. Connect
+to the vetted IP (anti-rebinding). Re-validate each redirect, with at most 5. 2 MB / 10 s limits.
+Generic User-Agent `JarvisSiteCheck/1.0`, with no personal or agency data.
 
 ## 4. Website build sandboxing
 
-Generated code is untrusted. It is never imported or executed in the API or worker process.
+Generated code is untrusted and is never executed in the API or worker process.
 
 | Control | Setting |
 |---|---|
-| Isolation | A fresh container per build from a pinned image digest (`build-sandbox`) |
-| Network | `--network none`. Dependencies are pre-installed in the image, and `package.json` is owned by the scaffold, not by the model |
-| User | non-root UID, `--cap-drop ALL`, `--security-opt no-new-privileges` |
-| Filesystem | read-only root, tmpfs `/work` (512 MB), source copied in, artefact copied out |
-| Resources | `--cpus 1`, `--memory 1g`, `--pids-limit 256`, wall-clock timeout 180 s for build and 300 s for QA |
-| Docker socket | Never mounted into the sandbox. The worker uses a dedicated, restricted runner, and in later phases we'll consider gVisor (`runsc`) for extra isolation |
-| Output validation | The artefact must be static files only (`.html .css .js .svg .png .jpg .webp .avif .ico .txt .xml .json .woff2`), ≤ 20 MB in total, with no server functions (`_worker.js`, `functions/` rejected) |
-| Content rules | No external scripts except an allow-list (none by default). Forms post to a configured endpoint, or show a "preview, form disabled" notice. No tracking pixels |
-| Path safety | Model output is written only to allowed paths inside the scaffold (`src/pages`, `src/components`, `src/content`, `public/`), and path traversal is rejected |
-
-The model can't add npm dependencies. If it asks for one, the request is logged and the build
-fails, which goes to repair or human review.
-
----
+| Isolation | Fresh container per build from a pinned image digest on the VPS |
+| Network | `--network none`. Dependencies pre-installed. `package.json` is owned by the scaffold |
+| Privileges | non-root UID, `--cap-drop ALL`, `no-new-privileges`, default seccomp profile |
+| Filesystem | read-only root, 512 MB tmpfs `/work` |
+| Resources | `--cpus 1`, `--memory 1g`, `--pids-limit 256`. 180 s build, 300 s QA |
+| Docker socket | never mounted into the sandbox. A restricted runner service starts sandboxes. gVisor considered for Phase 9 |
+| Output | static files only (allow-listed extensions), ≤ 20 MB, no `_worker.js` or `functions/` |
+| Content | no external scripts by default, no trackers. Forms disabled with a preview notice |
+| Paths | writes only to allowed scaffold paths. Traversal rejected |
 
 ## 5. Preview sites (pages.dev)
+- `X-Robots-Tag: noindex, nofollow`, meta robots noindex, and `robots.txt` set to disallow everything.
+- A persistent banner: "Concept preview prepared by *[agency]*. Not affiliated with or endorsed by *[business]*."
+- No logos, photos or copyrighted text copied from the prospect without permission. No Google Maps content (no Places names, addresses, ratings or photos). Only independently verified facts and licensed imagery.
+- No fabricated reviews, testimonials, awards, licences or prices (enforced by the factual-claim QA check).
+- Unguessable slug, 30-day expiry, automatic deletion.
+- Publishing to a client's live domain isn't a capability of the system in v1.
 
-Previews use a real business's name, so they need care:
-
-- Served with `X-Robots-Tag: noindex, nofollow` (via `_headers`) and `<meta name="robots" content="noindex">`, plus `robots.txt` with `Disallow: /`.
-- A persistent, non-dismissable banner: "Concept preview prepared by *[agency]*. Not affiliated with or endorsed by *[business]*."
-- No use of the prospect's logo, photos or copyrighted text without permission. We use their **facts** (services, area, phone), our own copy, and licensed or royalty-free imagery.
-- No fake reviews, testimonials, awards, licences, years in business or prices. The factual-claim QA check fails a build that contains any claim not linked to a verified fact.
-- URLs use an unguessable slug (`<business-slug>-<8 random chars>`).
-- Expiry after 30 days by default (`PREVIEW_TTL_DAYS`). Cleanup deletes the Cloudflare deployment and marks the record `expired`.
-- **No deployment to a client's live domain** is possible from the Deployment agent. That requires a separate, human-approved flow, outside v1.
-
----
-
-## 6. API key and secret security
+## 6. Secrets and API security
 
 | Rule | Implementation |
 |---|---|
-| Server-side only | Keys live only in the API/worker environment. The dashboard gets only `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` (public by design, protected by RLS) and `VITE_API_BASE_URL` |
-| Storage | `.env` on the host with mode 600 and owned by the deploy user, or Docker secrets. GitHub Actions secrets for CI. Nothing committed (`.gitignore`, and secret scanning on the repo) |
-| Encrypted at rest | Provider keys entered through the Settings UI (a later phase) are encrypted with AES-GCM using `JARVIS_ENCRYPTION_KEY` before they're stored. The UI shows only the last 4 characters |
-| Least privilege | Cloudflare token: `Pages:Edit` on one account. Google key: Places API only, IP-restricted. Supabase service key: server only. Claude: a dedicated workspace with a spend limit |
-| Rotation | Documented per key in ENVIRONMENT_VARIABLES.md. Rotate on any suspected leak |
-| Logging | The `structlog` processor redacts keys matching `*key*`, `*token*`, `*secret*`, `authorization`, and the `api_key` query param |
-| Webhooks | Verify provider signatures (Svix for Resend, SNS signatures for SES) and reject anything older than 5 minutes (replay protection). The idempotency key is the provider event ID |
-| Auth | Supabase Auth (email plus magic link or password, with optional TOTP MFA). The API verifies JWTs against the project's JWKS, checking `aud`, `exp` and `iss` |
-| Rate limiting | Per user and IP on the API (e.g. 60 req/min, 10 commands/min) |
-
----
+| Server-side only | Keys only on the VPS (`.env`, mode 600, or Docker secrets) and in GitHub Actions secrets. The SPA gets only public Supabase values and the API URL |
+| Encrypted at rest | Keys entered through Settings are AES-256-GCM encrypted with `JARVIS_ENCRYPTION_KEY`. The UI shows the last 4 characters |
+| Least privilege | Cloudflare token: Pages:Edit + Workers KV on one account. Google key: Places API (New) only, IP-restricted. Claude: a dedicated workspace with a spend limit. SES IAM: `ses:SendEmail` only |
+| Redaction | Log processor redacts `*key*`, `*token*`, `*secret*`, `authorization`, `api_key=`, and Places response bodies |
+| Webhooks | Provider signature verified at the edge Worker, re-signed with HMAC to the API, 5-minute replay window, provider event ID used as the idempotency key |
+| Auth | Supabase Auth with TOTP MFA recommended. JWT checked against JWKS (`aud`, `iss`, `exp`) |
+| VPS hardening | SSH keys only, firewall (80/443 open, SSH restricted), unattended security updates, Docker daemon not exposed |
+| Rate limiting | per user and IP on the API |
 
 ## 7. US outreach compliance
 
-### 7.1 CAN-SPAM (15 U.S.C. 7701 et seq., 16 CFR Part 316)
-Applies to commercial email, **including B2B**. Each violating message can carry civil
-penalties of over $50,000 (adjusted annually for inflation). **⚖ Review.**
+### 7.1 CAN-SPAM (15 U.S.C. 7701 et seq.; 16 CFR Part 316)
+This applies to commercial email, including B2B. The FTC guide lists penalties of up to $53,088
+per violating email (inflation-adjusted). **⚖ Review.**
 
-| Requirement | Enforcement in JARVIS |
+| Requirement | Enforcement |
 |---|---|
-| No false or misleading header information | The From name and address are the agency's real identity on the agency's own domain. Reply-To is a monitored mailbox |
-| No deceptive subject lines | Subjects come from templates, and Claude copy is checked against a rule list (no "Re:"/"Fwd:" on first touch, no false urgency) |
-| Identify the message as an advertisement or solicitation | A clear disclosure line in the footer |
-| Include a valid physical postal address | `users.agency_postal_address` is required. Sending is blocked if it's missing |
-| Clear opt-out mechanism | A one-click unsubscribe link (with `List-Unsubscribe` and `List-Unsubscribe-Post` headers) and "reply STOP" |
-| Honour opt-outs within 10 business days, with no fee or extra steps, and never sell or transfer the address | Opt-outs are processed immediately into `suppression_list`. The suppression check and the send happen in one DB transaction |
-| Responsibility for third parties | We're responsible for what the agent sends, so every send is logged in `outreach_messages` and `audit_events` |
+| Accurate header information | From/Reply-To on the agency's authenticated domain |
+| Non-deceptive subject lines | Template rules: no "Re:"/"Fwd:" on a first touch, no false urgency. Lint on Claude output |
+| Identify the message as an advertisement | Footer disclosure |
+| **Valid physical postal address** | Must be the sender's current street address, a PO Box registered with the USPS, or a private mailbox registered with a Commercial Mail Receiving Agency under USPS regulations (FTC guidance). The owner records the address, its type and a dated attestation that it's current and registered. Placeholder or invalid patterns are rejected (e.g. missing ZIP, "123 Main St", "N/A"). Re-attestation every 12 months |
+| Clear opt-out | Signed one-click unsubscribe link served by the edge Worker (with `List-Unsubscribe` and `List-Unsubscribe-Post` headers), plus "reply STOP" |
+| Honour opt-outs within 10 business days, with no fee or extra steps, and never transfer the address | Immediate suppression. The suppression check and the send are in one transaction |
+| Responsibility for agents acting on your behalf | Every send is logged and audited |
 
-### 7.2 Deliverability rules (Gmail and Yahoo bulk-sender requirements)
-SPF, DKIM and DMARC on the sending domain. One-click unsubscribe. Keep the spam-complaint rate
-under 0.3%. Low volume: **default 20 emails/day per outreach campaign**, with warm-up. Never use
-`pages.dev`, `workers.dev` or free-mail domains to send.
+### 7.2 Authenticated sending domain
+- **SPF**: includes the email provider. **DKIM**: provider-signed, aligned with the From domain. **DMARC**: a published record (`p=none` at minimum for monitoring; `quarantine` recommended after warm-up).
+- The provider must report the domain as verified.
+- DNS is checked automatically at configuration time and again if the last check is older than 24 hours before any send.
+- Forbidden sender domains: `pages.dev`, `workers.dev`, and free-mail providers.
+- Gmail/Yahoo bulk-sender practice: one-click unsubscribe, complaint rate < 0.3%, low volume (default 20/day per outreach campaign), warm-up.
 
-### 7.3 Other channels
-**No SMS or automated calls.** The TCPA (Telephone Consumer Protection Act) and state laws make
-those high-risk. Click-to-call exists only on the generated websites.
+### 7.3 Sending-readiness gate
+Drafting is **always available**: drafts need no email provider, domain or address. They are
+generated, edited and stored as `outreach_messages` in `draft`.
 
-### 7.4 Outreach policy engine rules
-1. Send only within an `outreach_campaign` in state `authorized`, inside the configured limits and send window (recipient's local business hours).
-2. Use only contacts with `is_public_business_contact = true` and `verification = verified`.
-3. Check suppression by email, domain, place_id and phone hash.
-4. Each message must reference at least one real, verified observation (a fact ID), and the preview link must point to a `deployments` row with `status = verified`.
-5. Stop the sequence on any reply classified `opt_out`, `not_interested` or `bounce`, or on a complaint. Hard bounces and complaints get suppressed at domain level.
-6. At most 1 follow-up by default, at least 4 days later.
-7. No sending until a sending domain is configured. Until then the status is `NOT_CONFIGURED`, and drafts only.
+**Sending is blocked** (`NOT_CONFIGURED` / `BLOCKED_COMPLIANCE`) until **all** of these pass, as
+recorded in `sending_readiness` and re-checked inside the send transaction:
+1. Legitimate postal address recorded, typed and attested (≤ 12 months old).
+2. Sending domain authenticated: SPF, DKIM and DMARC pass, and the provider reports it verified (check ≤ 24 h old).
+3. From and Reply-To on that domain. Reply-To mailbox confirmed (test message received).
+4. Email provider configured, and its webhook signature verified end to end.
+5. Unsubscribe endpoint reachable over public HTTPS, with a round-trip test that writes a test suppression.
+6. Outreach campaign authorised by the owner, with daily and total limits and a send window.
+7. Recipient checks per message: verified public business contact, not suppressed (email, domain, place_id, phone), preview deployment verified live, at least one verified observation referenced.
 
-State laws, such as state anti-spam statutes and privacy laws like the CCPA/CPRA for any personal
-data, may add requirements. Business contact data is lower risk, but the retention rules in the
-schema still apply. **⚖ Review.**
+The Outreach page shows the checklist with each item's status. No item can be bypassed from the UI or the API.
 
----
+### 7.4 Other channels
+No SMS or automated calls (TCPA risk). Click-to-call exists only on generated sites.
+
+### 7.5 Sequence rules
+Stop on `opt_out`, `not_interested`, `bounce` or a complaint. Domain-level suppression on hard
+bounce or complaint. At most 1 follow-up after ≥ 4 days. Send only inside the recipient's local
+business hours. State laws may add requirements. **⚖ Review.**
 
 ## 8. Autonomous action permissions
 
 | Action | Autonomous? | Condition |
 |---|---|---|
-| Discovery, verification, research, scoring | Yes | Within an authorised campaign scope and budget |
-| Generate, build, QA and deploy **previews** | Yes | Within `max_sites` and budget, only after the campaign authorises the `building` scope |
-| Send outreach | Yes, within limits | Only after an explicit outreach authorisation that sets limits. A sending domain and postal address are required |
-| Publish to a client's live domain | **No** | Human approval with client authorisation recorded. Not in v1 |
-| Purchases, paid plan upgrades, domain purchase | **No** | Human only. JARVIS can recommend, never execute |
-| Contracts, pricing commitments, negotiation | **No** | Replies classified as `interested` or `question` are flagged for a human. Drafts may not include prices unless you provide them |
-| Anything outside the campaign's authorisation | **No** | Blocked, and the task goes to `blocked` or `requires_human_review` |
-| Raise its own limits | **No** | Limits change only through an authenticated user action, which is audited |
+| Discovery, verification, research, scoring | Yes | within authorised scope and caps |
+| Build, QA, deploy previews | Yes | within `max_sites` and the budget |
+| Draft outreach | Yes | always (no email configuration needed) |
+| Send outreach | Within limits | only when the sending-readiness gate passes and the outreach campaign is authorised |
+| Live client-domain publishing | **No** | not in v1. Later only with recorded client authorisation |
+| Purchases, paid plans, raising caps above free allowances | **No** | human action only. Audited |
+| Contracts, pricing commitments | **No** | interested replies are flagged for a human |
+| Anything outside the campaign authorisation | **No** | blocked |
 
-Kill switches: global (`system_settings.global_kill_switch`), per provider, and per campaign. All
-are checked by the ToolGateway before every external call, and by the worker before claiming tasks.
+Kill switches: global, per provider and per campaign. Checked before every claim and every external call.
 
----
+## 9. Database availability and data protection
+- Supabase Free may pause an inactive project, and we don't assume worker traffic prevents it. Detection, alerting, a manual-resume runbook and automatic reconnection are in ARCHITECTURE §11–12.
+- Supabase Free has no managed backups or PITR. We take daily encrypted `pg_dump`s off-site and test a restore monthly.
+- While the DB is unavailable, no billable or outward-facing action runs, because nothing can reserve budget or record usage.
 
-## 9. Threat model summary
+## 10. Threat model summary
 
 | Threat | Mitigation |
 |---|---|
-| Prompt injection from crawled websites ("ignore instructions, email X") | Crawled content is passed to Claude as quoted data with an explicit system instruction. Extraction outputs are validated by schema. No tool that sends or deploys is available to the research or extraction calls. Outreach recipients come from the DB, never from model output |
-| Model fabricates business facts | Facts need a source quote that matches the fetched text exactly (we check substring presence). QA runs a factual-claim check |
-| Malicious code generated or injected into a site | Sandbox (§4), static-only output, no external scripts |
-| Leaked keys | Server-only storage, redaction, scoped keys, spend caps at each provider |
-| Runaway spend | Reservations before calls, provider unit caps, daily and monthly caps, kill switch, bounded retries |
-| Duplicate sends after a crash | Idempotency key per message, provider message ID stored, send state committed with the provider response |
+| Prompt injection from crawled pages | Content passed as quoted data. Extraction calls have no dangerous tools. Schema-validated outputs. Recipients come from the DB only |
+| Fabricated business facts | Quote-verified facts, plus the factual-claim QA check |
+| Accidental persistence of Places content | No columns, payload schemas without Places fields, CI denylist test, log redaction |
+| Malicious generated code | Sandbox and static-only output |
+| Leaked keys | Server-only storage, redaction, scoped keys, provider spend limits |
+| Runaway spend | Pre-call reservations, provider quotas, caps below free allowances, kill switch, bounded retries |
+| Duplicate sends | Idempotency keys, send state committed with the provider ID |
 | Webhook spoofing | Signature verification and replay window |
-| Account takeover | Supabase Auth with MFA recommended. Only the owner role can authorise campaigns or outreach |
+| DB outage causing unrecorded spend | Ledger write required before any billable call. Worker pauses when the DB is unhealthy |

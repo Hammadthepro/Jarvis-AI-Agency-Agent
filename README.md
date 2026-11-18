@@ -5,7 +5,7 @@ prospects, checks whether they have a website, researches them, scores them, bui
 personalised preview site, tests it, deploys it to a temporary URL and handles outreach within
 the limits you authorise.
 
-**Status: architecture review. No application code yet.**
+**Status: architecture review, revision 2. No application code yet.**
 
 | Document | Contents |
 |---|---|
@@ -17,6 +17,6 @@ the limits you authorise.
 | [docs/SECURITY_AND_COMPLIANCE.md](docs/SECURITY_AND_COMPLIANCE.md) | Google Maps terms, crawling, sandboxing, secrets, CAN-SPAM, autonomy limits |
 | [docs/SYSTEM_DIAGRAM.md](docs/SYSTEM_DIAGRAM.md) | Mermaid diagrams |
 
-Planned stack: React/Vite/TS dashboard on Cloudflare Pages · FastAPI + Python worker on a small
-container host · Supabase (Postgres, Auth, Storage) · Google Places API (New) · SerpApi ·
-Firecrawl · Claude API · Playwright · Cloudflare Pages previews · LiveKit (voice, later).
+Planned stack: React/Vite/TS dashboard and pages.dev previews on Cloudflare Pages · FastAPI,
+Python workers, Playwright and the build sandbox on a required VPS · Supabase (Postgres, Auth, Storage) · Google Places API (New) · SerpApi ·
+Firecrawl · Claude API (Haiku 5.5 / Sonnet 5.5, Opus 5.5 for escalation) · Playwright · Cloudflare Pages previews · LiveKit (voice, later).

@@ -1,6 +1,6 @@
 # JARVIS — System Architecture
 
-Status: **Proposed — awaiting architecture review approval.** No application code exists yet.
+Status: **Proposed, revision 2.** Awaiting architecture approval. No application code exists.
 Last updated: 2026-11-18
 
 Related documents:
@@ -10,6 +10,17 @@ Related documents:
 [docs/DATABASE_SCHEMA.md](docs/DATABASE_SCHEMA.md) ·
 [docs/SECURITY_AND_COMPLIANCE.md](docs/SECURITY_AND_COMPLIANCE.md) ·
 [docs/SYSTEM_DIAGRAM.md](docs/SYSTEM_DIAGRAM.md)
+
+### Revision 2 changes
+| Area | Change |
+|---|---|
+| Google Maps | Removed `places_cache`. The only Places values we persist are Place IDs (indefinitely) and, optionally, lat/lng (deleted within 30 days). Places content is used in process memory only. Field masks were rechecked against Google's SKU tables. Discovery now uses one Text Search Enterprise call per 20 places, not one Place Details call per place. Attribution rules are documented. |
+| Infrastructure | A VPS is a **required** component and a recurring cost. It hosts FastAPI, the workers, Playwright and the build sandbox. Cloudflare Pages hosts the dashboard and previews. Workers are used only for short request/response endpoints. Cloud Run is no longer an option. |
+| AI routing | Haiku 5.5 for classification, extraction and routing. Sonnet 5.5 for strategy, generation, ordinary repair and outreach copy. Opus 5.5 only for escalation. Deterministic Python for scoring and policy. |
+| Billing protection | Limits are checked before every billable call, using locked counters. Google Cloud quotas act as a second hard stop, and budget alerts only warn. Estimated usage and provider-reported usage are stored and shown separately. |
+| Supabase | Worker activity no longer counts as protection against the inactivity pause. Added DB health monitoring, reconnection, a degraded mode and our own backups. |
+| Outreach | A sending-readiness gate: legitimate postal address, authenticated domain, public unsubscribe endpoint and authorisation. Drafts work without any email configuration. |
+| Testing | A feature is complete only after it passes a tightly capped live test. Diversity tests use a multi-campaign, cross-niche dataset. |
 
 ---
 
@@ -22,148 +33,124 @@ acquisition pipeline:
 command → discover → verify website → research → qualify → build site → QA → preview deploy → outreach → report
 ```
 
-It has one conversational surface (text first, voice later) and one orchestration core.
-All work runs as **durable tasks in PostgreSQL**, executed by a **Python worker** that does not
-depend on the browser or the user's laptop.
+There is one conversational interface (text first, voice in Phase 7) and one orchestration core.
+All work runs as **durable tasks in PostgreSQL**. Python workers on a VPS execute them, so they
+don't depend on the browser or on the user's laptop.
 
 ### 1.1 Design principles
 
-| Principle | What it means in practice |
+| Principle | In practice |
 |---|---|
-| Deterministic core, AI at the edges | State machines, scoring, budgets, policies and routing are plain Python. LLMs are called for language understanding, research summarisation, site strategy/code, and outreach copy, never for deciding whether something is permitted. |
-| Durable by default | Every unit of work is an `agent_tasks` row with a lease, attempt counter, idempotency key and event log. A worker crash loses at most one in-flight step, which is then retried. |
-| Evidence over assertion | Every fact about a business carries source, method, timestamp and confidence. Generated websites may only use facts in `verified` status. |
-| Fail loudly | Integrations return a typed status: `OK`, `NOT_CONFIGURED`, `ERROR`, `QUOTA_EXCEEDED`, `RATE_LIMITED`, `BUDGET_BLOCKED`. There is no mock fallback in production. |
-| Bounded autonomy | Each campaign has explicit authorisation: max prospects, max sites, max spend, allowed actions, outreach limits. The policy engine checks these before every billable or outward-facing action. |
-| Cheapest reliable path | Use free tiers first, call paid APIs only when a cheaper signal can't answer the question (e.g. no SERP call if the Maps website field already resolves to a verified site). |
+| Deterministic core, AI at the edges | State machines, scoring, budgets, policy and routing are plain Python. LLMs handle language understanding, extraction, site strategy and code, and outreach copy. They never decide what is permitted. |
+| Durable by default | Every unit of work is an `agent_tasks` row with a lease, an attempt counter, an idempotency key and an event log. |
+| Evidence over assertion | Every persisted fact has a source, method, timestamp and confidence. Generated websites use only facts with status `verified`. |
+| Compliance by construction | Restricted Google Maps content has no column to be written into. Sending email is impossible until a readiness checklist passes. |
+| Fail loudly | Integrations return a typed status: `OK`, `NOT_CONFIGURED`, `ERROR`, `QUOTA_EXCEEDED`, `RATE_LIMITED`, `BUDGET_BLOCKED`, `DISABLED`. There is no mock fallback in production. |
+| Bounded autonomy | Explicit campaign authorisation sets limits on scope, counts, spend and outreach. They are checked before every billable or outward-facing action. |
+| Cheapest reliable path | Free tiers first, the cheapest adequate model, and no paid call when a free signal answers the question. |
 
-### 1.2 Key architectural decisions (and departures from the brief)
+### 1.2 Key architectural decisions
 
-These are the places where I recommend something different from, or more specific than, the
-directive. Each one needs your sign-off (see §14).
-
-1. **PostgreSQL is the job queue; Cloudflare Queues is not needed for v1.**
-   A `SELECT … FOR UPDATE SKIP LOCKED` queue on `agent_tasks` gives durability, visibility,
-   cancellation and transactional state changes in one place. Cloudflare Queues would add a
-   second source of truth with no benefit at our volume (hundreds of tasks/day). It can be added
-   later for fan-out from Workers webhooks.
-2. **The Python API + worker run on one small always-on container host, not Cloudflare Workers.**
-   Playwright, `npm run build` for generated sites, and LangGraph runs need a real Linux
-   container with Chromium and Node. Workers cannot do that. Recommended: a single small VPS
-   (≈$5–8/month) running Docker Compose. Alternatives are compared in §8.3.
-3. **Cloudflare is used for what it is good at:** Pages for the dashboard and for preview sites,
-   and optionally a Worker for signed inbound webhooks (email replies/bounces) that forwards to the API.
-4. **LangGraph only where the flow is genuinely graph-shaped.** The campaign pipeline is a
-   deterministic state machine in our own code. LangGraph (with a Postgres checkpointer) is used
-   inside the **Website Builder ↔ QA repair loop**, where a strategy → generate → build → test →
-   repair cycle with bounded iterations and checkpointing is exactly what it's built for.
-5. **Groq is deferred.** Claude Haiku 5.5 costs $0.10 / $0.50 per million tokens, which makes
-   the saving from Groq on classification negligible at our volume, while adding another key,
-   another failure mode and another model to evaluate. The `LLMProvider` interface keeps Groq a
-   one-adapter addition if volume ever justifies it.
-6. **Voice is Phase 7.** Voice and text share one command pipeline, so voice is an input adapter
-   on top of a working system. Building it first would mean demoing an interface with nothing behind it.
-7. **One Cloudflare Pages project for all previews, one branch per site.** Each site deploys to
-   `https://<site-slug>.<project>.pages.dev` (branch alias). This avoids per-account project limits
-   and makes cleanup a single API call per deployment.
-8. **Generated sites are static Astro + Tailwind builds** from a constrained scaffold. Claude
-   writes a structured site spec and then the page/component source within that scaffold. Static
-   output is fastest, most SEO-friendly, cheapest to host and safest to build.
-9. **Outreach cannot be compliant without a sending domain.** The brief forbids buying a domain
-   *and* forbids using pages.dev for email. Outreach therefore needs either an existing agency
-   domain you control, or approval to buy one (~$10–12/yr). Until then, the Outreach agent can
-   draft but not send. This is the most important open decision.
-10. **Google Places data is treated as a short-lived, non-owned cache.** We keep `place_id`
-    permanently and refresh Places fields on demand. Facts we independently verify (from the
-    business's own website or other sources) are stored separately with their own provenance.
-    See [SECURITY_AND_COMPLIANCE.md §1](docs/SECURITY_AND_COMPLIANCE.md).
+1. **The VPS is mandatory.** FastAPI, the Python workers, Playwright/Chromium and the
+   isolated build sandbox all run on one Linux VPS under Docker Compose. These are long-running
+   workloads that need a real container runtime (Chromium, Node builds, LangGraph loops, Docker
+   isolation), and Cloudflare Workers can't run them. Budget: **≤ $10/month, recurring**
+   (for example a Hetzner CX23-class machine with 2 vCPU and 4 GB, ≈ €6/month including IPv4. Check the current price).
+2. **Cloudflare is used for edge and static work only:** Pages for the dashboard and previews.
+   Workers (on `workers.dev`) only for short, stateless request handlers: the public unsubscribe
+   endpoint and the inbound email webhook relay. These write to the API and run for milliseconds.
+3. **PostgreSQL is the job queue.** It uses `SELECT … FOR UPDATE SKIP LOCKED` on `agent_tasks`.
+   Cloudflare Queues isn't used in v1.
+4. **LangGraph runs only the build → QA → repair loop**, with a Postgres checkpointer. The
+   campaign pipeline is our own deterministic state machine.
+5. **Google Places content is never persisted.** We store `place_id` and, optionally, lat/lng with
+   a 30-day expiry. Everything else (name, address, phone, website, hours, ratings) exists only in
+   process memory during the task that fetched it. Persistent business information comes only
+   from independent sources (§3.4).
+6. **Model routing is by task difficulty** (§4.1). Most Claude spend goes to Sonnet 5.5, and
+   Opus 5.5 is an escalation path with its own budget.
+7. **Groq is deferred.** Haiku 5.5 at $0.10/$0.50 per MTok makes the saving negligible.
+8. **Voice is Phase 7.** It's an input adapter on the same command pipeline.
+9. **One Cloudflare Pages project for all previews, one branch per site.** Previews live at `*.pages.dev`.
+10. **Generated sites are static Astro + Tailwind builds** from a constrained scaffold, built in a sandbox with no network.
+11. **Outreach drafts work with no email configuration. Sending is blocked** until every
+    compliance requirement in [SECURITY_AND_COMPLIANCE.md §7](docs/SECURITY_AND_COMPLIANCE.md) is met.
+    No domain purchase is assumed. If you later supply or buy one, sending unlocks.
 
 ---
 
 ## 2. Component Architecture
 
 ```
-┌─────────────────────────── Cloudflare ───────────────────────────┐
-│  Pages: dashboard (React SPA)        Pages: jarvis-previews       │
-│  Worker (optional): webhook-relay    (one branch per generated    │
-│                                       site → *.pages.dev)         │
-└──────────────┬───────────────────────────────▲───────────────────┘
-               │ HTTPS (JWT)                   │ Direct Upload API
-┌──────────────▼───────────────────────────────┴───────────────────┐
-│  Container host (Docker Compose)                                   │
-│  ┌──────────────┐  ┌────────────────────┐  ┌───────────────────┐  │
-│  │ api          │  │ worker (N=1..2)    │  │ build-sandbox     │  │
-│  │ FastAPI      │  │ task runner,       │  │ ephemeral, no-net │  │
-│  │ REST + SSE   │  │ agents, scheduler  │  │ Node + Astro +    │  │
-│  │ auth, policy │  │ LangGraph          │  │ Playwright        │  │
-│  └──────┬───────┘  └─────────┬──────────┘  └─────────▲─────────┘  │
-│         │                    │  spawns (docker run)  │            │
-│         │                    └───────────────────────┘            │
-│  ┌──────────────┐  (Phase 7)                                       │
-│  │ voice agent  │  LiveKit Agents worker                           │
-│  └──────────────┘                                                  │
-└─────────┬──────────────────────┬───────────────────────────────────┘
-          │ SQL (pooled)         │ HTTPS
-┌─────────▼────────┐   ┌─────────▼──────────────────────────────────┐
-│ Supabase         │   │ External APIs                               │
-│ Postgres + Auth  │   │ Google Places (New) · SerpApi · Firecrawl   │
-│ + Storage + RLS  │   │ Claude API · LiveKit · Cloudflare API       │
-└──────────────────┘   │ Email provider (Resend/SES, needs domain)   │
-                       └─────────────────────────────────────────────┘
+┌──────────────────────────── Cloudflare (free) ─────────────────────────────┐
+│ Pages: jarvis-dashboard (React SPA)   Pages: jarvis-previews (branch/site) │
+│ Workers (workers.dev, short handlers only): unsubscribe · email-webhooks    │
+└───────────────┬─────────────────────────────────▲──────────────▲───────────┘
+                │ HTTPS + JWT                     │ Direct Upload │ HMAC-signed forward
+┌───────────────▼─────────────────────────────────┴──────────────┴───────────┐
+│ VPS (REQUIRED, ≈$7–10/mo) · Docker Compose · Caddy (TLS)                    │
+│ ┌───────────┐ ┌──────────────────────┐ ┌────────────────────────────────┐  │
+│ │ api       │ │ worker ×1–2          │ │ build-sandbox (ephemeral)      │  │
+│ │ FastAPI   │ │ task runner, agents, │ │ --network none, non-root,      │  │
+│ │ REST, SSE │ │ scheduler, LangGraph │ │ Node + Astro + Playwright/     │  │
+│ │ auth      │ │ DB health monitor    │ │ Chromium, CPU/mem/time caps    │  │
+│ └───────────┘ └──────────────────────┘ └────────────────────────────────┘  │
+│ ┌───────────┐ ┌──────────────────────┐                                     │
+│ │ voice (P7)│ │ backup job (pg_dump) │──► encrypted off-site copy          │
+│ └───────────┘ └──────────────────────┘                                     │
+└───────┬───────────────────────┬────────────────────────────────────────────┘
+        │ Postgres (TLS)        │ HTTPS
+┌───────▼─────────┐   ┌─────────▼──────────────────────────────────────────┐
+│ Supabase Free   │   │ Google Places (New) · SerpApi · Firecrawl · Claude  │
+│ Postgres, Auth, │   │ Cloudflare API · LiveKit (P7) · Email (when ready)  │
+│ Storage         │   └─────────────────────────────────────────────────────┘
+└─────────────────┘
 ```
 
 ### 2.1 Components
 
-| Component | Tech | Responsibility | Deploys to |
+| Component | Tech | Responsibility | Runs on |
 |---|---|---|---|
-| `apps/dashboard` | React, Vite, TS, Tailwind, Framer Motion, TanStack Query, React Router, Zod | Operator UI. Reads/writes only through the API. Live progress via SSE. Uses Supabase Auth for login only. | Cloudflare Pages (`jarvis-dashboard.pages.dev`) |
-| `apps/api` | FastAPI, Pydantic v2, SQLAlchemy 2 (async), asyncpg | Auth verification (Supabase JWT), REST endpoints, SSE stream of `task_events`, command intake, policy checks for user-initiated actions, webhook receivers. Stateless. | Container host |
-| `apps/worker` | Python 3.12, same core package | Claims tasks from `agent_tasks`, runs agent handlers, writes events, enforces budgets, runs the scheduler (follow-ups, preview expiry, retention purges), lease recovery. | Container host |
-| `build-sandbox` image | Node 22, Astro, Tailwind, Playwright + Chromium | Runs `npm run build` and Playwright QA for one site, with no network, as non-root, with CPU/memory/time caps. Started per job by the worker. | Container host (ephemeral) |
-| `apps/voice` (Phase 7) | LiveKit Agents (Python) | Joins a LiveKit room, does STT → posts text to the same `/commands` endpoint → speaks responses via TTS. Supports barge-in. | Container host |
-| `workers/webhook-relay` (optional) | Cloudflare Worker | Public endpoint for email-provider webhooks. Verifies signature, forwards to API. Lets the API stay off the public internet if desired. | workers.dev |
-| `jarvis_core` (Python package) | Shared library | Domain models, state machines, policy engine, agents, integration adapters, scoring, cost tracking. Imported by api, worker, voice. | — |
+| `apps/dashboard` | React, Vite, TS, Tailwind, Framer Motion, TanStack Query, React Router, Zod | Operator UI. Talks only to the API. Live progress over SSE. Supabase Auth for login. | Cloudflare Pages |
+| `apps/api` | FastAPI, Pydantic v2, SQLAlchemy 2 async, asyncpg | JWT verification, REST, SSE, command intake, user-initiated policy checks, health endpoints, receiving forwarded webhooks. | VPS |
+| `apps/worker` | Python 3.12 | Claims tasks, runs agents, enforces limits, scheduler (follow-ups, preview expiry, retention purges, provider-usage sync), lease recovery, DB health monitor. | VPS |
+| `build-sandbox` | Node 22, Astro, Tailwind, Playwright + Chromium | Builds and QA-tests one site in isolation. | VPS (ephemeral container) |
+| `apps/voice` (Phase 7) | LiveKit Agents (Python) | STT → `/commands` → TTS, barge-in. | VPS |
+| `workers/edge` | Cloudflare Worker | `GET/POST /u/:token` one-click unsubscribe (verifies signature, forwards to API, queues the event if the API is down) and `POST /webhooks/email` (verifies provider signature, forwards). | workers.dev |
+| `jarvis_core` | Python package | Domain models, state machines, policy, limits, agents, adapters, scoring, cost ledger. | — |
 
-### 2.2 Proposed repository layout
+**API hostname without a domain:** Caddy obtains a Let's Encrypt certificate for the VPS
+provider's assigned reverse-DNS hostname (or an `<ip>.sslip.io` name). When you have a domain,
+this moves to `api.<domain>` with no code change (`API_PUBLIC_BASE_URL`).
 
-Improved from the brief: all Python lives in **one installable package** (`packages/jarvis_core`)
-so `api`, `worker` and `voice` share code without path hacks, and so the agent/integration
-boundaries are enforced by import rules rather than directory conventions.
+### 2.2 Repository layout
 
 ```
 jarvis/
-├── apps/
-│   ├── dashboard/            React SPA
-│   ├── api/                  FastAPI app (thin: routers, auth, SSE)
-│   ├── worker/               worker entrypoint, scheduler
-│   └── voice/                LiveKit agent (Phase 7)
-├── packages/
-│   └── jarvis_core/
-│       ├── domain/           Pydantic models, enums, state machines
-│       ├── policy/           authorisation, budgets, kill switches, limits
-│       ├── orchestrator/     task runner, campaign planner, retries, leases
-│       ├── agents/
-│       │   ├── command/  discovery/  verification/  research/
-│       │   ├── qualification/  website_builder/  quality_assurance/
-│       │   └── deployment/  outreach/
-│       ├── integrations/
-│       │   ├── google_places/  serp_api/  firecrawl/  claude/
-│       │   ├── livekit/  cloudflare/  email/  http_probe/
-│       │   └── base.py       Adapter protocol, ProviderStatus, errors, usage hooks
-│       ├── workflows/        LangGraph graphs (site build/repair)
-│       ├── db/               SQLAlchemy models, repositories, queue
-│       ├── security/         SSRF guard, secrets, signing, sandbox runner
-│       └── observability/    structured logging, cost ledger, metrics
-├── site-scaffold/            Astro + Tailwind starter + component library for generated sites
-├── database/
-│   ├── migrations/           Supabase CLI SQL migrations (source of truth)
-│   └── policies/             RLS policies (included by migrations)
-├── docker/                   Dockerfiles: api, worker, build-sandbox, voice
-├── tests/                    unit / integration / e2e (pytest, vitest, playwright)
+├── apps/        dashboard/  api/  worker/  voice/
+├── packages/jarvis_core/
+│   ├── domain/          Pydantic models, enums, state machines
+│   ├── policy/          authorisation, limits, budget reservations, kill switches, sending readiness
+│   ├── orchestrator/    task runner, campaign planner, retries, leases
+│   ├── agents/          command/ discovery/ verification/ research/ qualification/
+│   │                    website_builder/ quality_assurance/ deployment/ outreach/
+│   ├── integrations/    google_places/ serp_api/ firecrawl/ claude/ cloudflare/
+│   │                    email/ livekit/ http_probe/ base.py
+│   ├── workflows/       LangGraph build/repair graph
+│   ├── db/              SQLAlchemy models, repositories, queue, health/reconnect
+│   ├── security/        SSRF guard, secret encryption, signing, sandbox runner
+│   └── observability/   logging, cost ledger, usage reconciliation
+├── workers/edge/        Cloudflare Worker (unsubscribe + webhook relay)
+├── site-scaffold/       Astro + Tailwind scaffold and component library for generated sites
+├── database/migrations/ database/policies/
+├── docker/              api, worker, build-sandbox, voice Dockerfiles; compose files
+├── tests/               unit/ integration/ contract/ live/ e2e/ evals/ datasets/
 ├── docs/
-├── .env.example
-├── ARCHITECTURE.md  IMPLEMENTATION_PLAN.md  ENVIRONMENT_VARIABLES.md  README.md
+└── .env.example  ARCHITECTURE.md  IMPLEMENTATION_PLAN.md  ENVIRONMENT_VARIABLES.md  README.md
 ```
+
+All Python is one installable package, so `api`, `worker` and `voice` share code and import
+boundaries between modules can be enforced by a lint rule.
 
 ---
 
@@ -171,304 +158,323 @@ jarvis/
 
 ### 3.1 Command to campaign
 
-1. User types (or speaks) "Find 100 plumbing businesses in Houston that don't have websites."
-2. `POST /commands` stores the raw command, then the **Command agent** (Claude Haiku 5.5,
-   structured output) returns a validated `CommandIntent`:
-   `{intent: "create_campaign", niche: "plumbing", location: {city: "Houston", state: "TX"}, target_count: 100, filters: {website_status: ["none_found","broken"]}}`.
-3. Missing required fields produce a clarification question, not a guess.
-4. The **Policy agent** (deterministic) computes an execution plan and a cost estimate from
-   [API_COST_MODEL.md](docs/API_COST_MODEL.md) unit costs, and returns a confirmation card:
-   "This will make ~10 Places searches and ~100 Place Details calls (within free tier), up to 250
-   SERP searches, est. $0.00–$6.50. Authorise?"
-5. On confirmation, the campaign moves `draft → authorized → queued` and a root task is enqueued.
+1. "Find 100 plumbing businesses in Houston that don't have websites."
+2. `POST /commands` stores the raw text. The Command agent (Haiku 5.5, structured output) returns
+   a validated `CommandIntent`, or asks a clarifying question when a field is missing.
+3. The Policy engine (deterministic) builds the plan and a **worst-case** cost and unit estimate:
+   "≤ 12 Places Text Search Enterprise calls (free allowance), ≤ 150 SERP searches, ≤ 100 Firecrawl
+   credits, ≤ $0.60 Claude. Estimated cost $0.00–$0.60 within free tiers."
+4. Once you confirm, the campaign moves `draft → authorized → queued` and the root task is enqueued.
 
-### 3.2 Pipeline (per campaign)
+### 3.2 Pipeline
 
-| Stage | Agent | Input | Output | Paid calls |
-|---|---|---|---|---|
-| Discover | Discovery | niche, geo, count | `prospects` (place_id + transient Places cache) | Places Text Search (Pro), Place Details (Enterprise) |
-| Verify | Verification | prospect | `website_audits` with status + evidence + confidence | SerpApi (only when needed), HTTP/DNS probes (free) |
-| Research | Research | top-N prospects | `research_facts` (verified / inferred / unknown / conflicting) | SerpApi, Firecrawl, Claude Haiku 5.5 for extraction |
-| Qualify | Qualification | facts + audits | `lead_scores` with per-rule explanation | none (deterministic) |
-| Build | Website Builder | verified facts, brand cues | `generated_sites`, `site_versions` (source in Supabase Storage) | Claude Opus 5.5 |
-| QA | Quality Assurance | site version | `site_builds`, `qa_reports` | none (sandbox), Claude for repair |
-| Deploy | Deployment | passed build | `deployments` with pages.dev URL, verified live | Cloudflare (free) |
-| Outreach | Outreach | prospect, site, observations | `outreach_messages` drafts → sends | Claude for copy, email provider |
+| Stage | Agent | Persists | Billable calls |
+|---|---|---|---|
+| Discover + first-pass verify | Discovery → Verification (same task, per result page) | `prospects` (place_id only), `website_audits`, independent `prospect_sources` | Places Text Search (Enterprise mask), SerpApi, probes (free) |
+| Research | Research | `research_facts`, `prospect_contacts` (independent sources only) | SerpApi, Firecrawl, Haiku 5.5 |
+| Qualify | Qualification | `lead_scores` | none |
+| Build | Website Builder | `generated_sites`, `site_versions` | Sonnet 5.5 (Opus 5.5 on escalation) |
+| QA / repair | QA | `site_builds`, `qa_reports` | Haiku 5.5 (fact check), Sonnet/Opus (repair) |
+| Deploy | Deployment | `deployments` | Cloudflare (free) |
+| Outreach | Outreach | drafts, sends, replies | Sonnet 5.5, email provider (when ready) |
 
-Each stage is a separate task type, so a campaign can be paused between any two stages, and
-the user can run "Research the top 20 prospects" as a standalone command on an existing campaign.
+### 3.3 Why discovery and first-pass verification run in the same task
 
-### 3.3 Website verification decision logic
+Places content can't be stored, so we can't hold names, phones and websites in the DB between
+tasks. Each **discovery page task** therefore does the following:
+1. Calls Text Search once with the Enterprise mask, getting up to 20 places. The Places data lives only in memory.
+2. For each place: dedupes by `place_id`, skips anything not `OPERATIONAL`, and runs website
+   verification (DNS/HTTP probe of `websiteUri`, SERP queries for name + city, identity matching).
+3. Persists only the `place_id`, the independently obtained evidence (probe results, SerpApi
+   results, pages fetched from the business's own site) and the audit outcome.
+4. Discards the Places data when the task ends. The task payload and result contain no Places content.
+
+If the task crashes, the retry re-issues the same Text Search call (one extra Enterprise
+request). We accept that cost in exchange for compliance.
+
+### 3.4 Independently sourced business information
+
+Persisted business details must come from a non-Google-Maps source:
+
+| Field | Acceptable independent sources | `verified` when |
+|---|---|---|
+| Business name | Official website, SerpApi result page fetched by Firecrawl, state licence register, operator confirmation | the same name, normalised, appears in ≥ 1 fetched non-Maps page (with a quote), or the operator confirms it |
+| Phone | Official website, directory or social page fetched, operator | the exact E.164 match appears in a fetched non-Maps page |
+| Website URL | Our HTTP probe of the site plus identity match on the page content | the probe succeeds and the identity score ≥ threshold |
+| Services, service area, brand | Official website, social pages | quoted from the fetched text |
+
+We can use the Places name and phone in memory to *search* for independent sources, but they are
+never written to the DB. A prospect with no independently confirmed name and contact detail can't
+reach `qualified`. It goes to `requires_human_review`, where the operator can confirm it
+(`source_type = manual`). This is the main product consequence of the Places terms. It costs
+roughly 1–2 extra SERP searches and Firecrawl pages per no-website prospect, and both are budgeted.
+
+### 3.5 Website verification decision logic
 
 ```
-Maps websiteUri present? ──yes──▶ probe URL (DNS, HTTP, redirects, TLS, canonical)
-        │                              │
-        no                       reachable & identity match ≥ threshold?
-        │                         yes ─▶ FUNCTIONING (then quality audit → OUTDATED?)
-        ▼                         no  ─▶ BROKEN (if DNS/HTTP fail) or go to SERP
-SERP: "<name>" "<city>" + "<name>" <phone>  (max 2 queries)
-        │
-  candidate domains (filtered: no directories/social/aggregators)
-        │
-  probe + identity match (name, phone, address on page; Firecrawl single-page scrape if needed)
-        │
-  match ─▶ FUNCTIONING / OUTDATED / BROKEN
-  none  ─▶ NONE_FOUND (confidence from number of checks done)
-  ambiguous ─▶ UNVERIFIED (flagged for human review)
+(in memory) Places websiteUri present?
+   yes → probe (DNS, HTTP, redirects, TLS, canonical) → identity match on page
+          match → FUNCTIONING → quality audit → OUTDATED?
+          DNS/HTTP failure → BROKEN (confirmed by a second probe 10 min later)
+          mismatch → SERP path
+   no  → SERP path:
+          ≤ 2 queries ("<name>" <city> <state>; "<phone>")
+          drop directories/social/aggregators → probe candidates → identity match
+          match → FUNCTIONING / OUTDATED / BROKEN
+          none  → NONE_FOUND (confidence from checks performed)
+          ambiguous → UNVERIFIED (human review)
 ```
 
-Identity matching is deterministic: normalised business name similarity, phone number match
-(E.164), street/ZIP match, and city match each contribute to a score. "No website" is only
-asserted after both the Maps field and SERP checks come back empty, and it carries a confidence
-value, never a bare boolean.
+Identity matching is deterministic: name similarity, phone match, ZIP/street match and city
+match. "No website" is never a bare boolean. It is a status with a confidence value and its evidence.
 
 ---
 
 ## 4. Agent Architecture
 
-All agents implement one interface:
+All agents implement:
 
 ```python
 class Agent(Protocol):
     role: AgentRole
     input_model: type[BaseModel]
     output_model: type[BaseModel]
-    allowed_tools: frozenset[ToolName]       # enforced by the ToolGateway
+    allowed_tools: frozenset[ToolName]   # enforced by ToolGateway
     max_attempts: int
     timeout_s: int
     async def run(self, ctx: TaskContext, inp: BaseModel) -> AgentResult: ...
 ```
 
-`TaskContext` exposes only the integrations listed in `allowed_tools`, each wrapped by the
-**ToolGateway**, which: checks kill switches → checks campaign authorisation → reserves budget
-→ calls the adapter → records `api_usage` and the actual cost → releases or commits the budget
-reservation → emits a `task_event`. Agents cannot call providers directly.
+Agents reach providers only through the **ToolGateway**, which on every call:
+1. checks the global, provider and campaign kill switches;
+2. checks the campaign's authorisation scope;
+3. **reserves** the call's worst-case units and cost against every applicable limit (campaign,
+   daily, monthly, provider unit cap), with a row lock. If any limit would be exceeded it returns
+   `BUDGET_BLOCKED` and **no request is sent**;
+4. calls the adapter;
+5. records actual units and cost in `api_usage` and commits the reservation (or releases it);
+6. emits a `task_event`.
 
-| # | Agent | Inputs | Outputs | Allowed tools | Retries | Key boundary |
-|---|---|---|---|---|---|---|
-| 1 | Command | raw text, conversation context | `CommandIntent` or `ClarificationNeeded` | Claude (Haiku 5.5) | 2 | Produces intents only, never executes. |
-| 2 | Orchestrator & Policy | intents, task results | task graph, state transitions, approvals | DB only | n/a | Only component that changes campaign state. Deterministic. |
-| 3 | Discovery | niche, geo, limits | prospects (deduped by place_id + phone + normalised name/address) | Google Places | 3 (backoff) | Max pages/queries per campaign; never scrapes Maps. |
-| 4 | Verification | prospect | `website_audits` | SerpApi, HTTP probe, DNS, Firecrawl (1 page) | 3 | SSRF guard on every probe; max 2 SERP queries/prospect by default. |
-| 5 | Research | prospect + audit | `research_facts`, `prospect_contacts` | SerpApi, Firecrawl, Claude (Haiku 5.5) | 2 | Crawl budget per prospect (default 5 pages); LLM extracts with citations to source text; unsupported claims dropped. |
-| 6 | Qualification | facts, audits | `lead_scores` | none | 0 | Pure function, versioned rule set. |
-| 7 | Website Builder | verified facts, brand cues, scaffold | site spec + source | Claude (Opus 5.5), Storage | 2 per stage | Can only use `verified` facts; outputs into scaffold paths only. |
-| 8 | QA | site version | `site_builds`, `qa_reports`, repair requests | Build sandbox, Playwright | max 3 repair cycles | Build runs in no-network sandbox; after 3 failed repairs → `requires_human_review`. |
-| 9 | Deployment | passed build artefact | `deployments` | Cloudflare Pages API, HTTP probe | 3 | Preview project only; live-domain deploy is not a capability of this agent. |
-| 10 | Outreach | prospect, site, observations, outreach campaign | drafts, sends, reply classifications | Claude (Sonnet/Opus), Email provider | 2 | Send only inside an authorised outreach campaign; suppression check in the same transaction as the send. |
-
-Supporting infrastructure, not agents: cost ledger, logging, scheduler, retention purger, health checks.
+| # | Agent | Inputs → Outputs | Allowed tools | Retries | Key boundary |
+|---|---|---|---|---|---|
+| 1 | Command | text → `CommandIntent` / clarification | Haiku 5.5 | 2 | Produces intents. Never executes. |
+| 2 | Orchestrator & Policy | intents, results → task graph, transitions | DB | n/a | Deterministic. The only component that changes campaign state. |
+| 3 | Discovery | niche, geo → place_ids + in-memory candidates | Places | 3 | Field masks fixed in code (§5.1). No Places content persisted. |
+| 4 | Verification | in-memory candidate → `website_audits` | SerpApi, HTTP probe, DNS, Firecrawl (1 page) | 3 | SSRF guard. ≤ 2 SERP queries per prospect. |
+| 5 | Research | prospect → `research_facts`, contacts | SerpApi, Firecrawl, Haiku 5.5 | 2 | Crawl budget per prospect. Independent sources only. Quote-verified facts. |
+| 6 | Qualification | facts, audits → `lead_scores` | none | 0 | Pure function with a versioned rule set. No Places-derived inputs. |
+| 7 | Website Builder | verified facts → spec + source | Sonnet 5.5, Opus 5.5 (escalation), Storage | 2 per stage | Verified facts only. Writes only to scaffold paths. |
+| 8 | QA | site version → builds, reports | Sandbox, Playwright, Haiku 5.5 | ≤ 3 repair cycles | Then `requires_human_review`. |
+| 9 | Deployment | passed build → `deployments` | Cloudflare Pages API, HTTP probe | 3 | Preview project only. |
+| 10 | Outreach | prospect, site → drafts, sends, reply classes | Sonnet 5.5, Haiku 5.5, Email | 2 | Drafts always allowed. Sends only when sending readiness passes and the campaign is authorised. |
 
 ### 4.1 Model routing
 
-| Use | Model | Why |
+| Task | Model | Rationale |
 |---|---|---|
-| Command parsing, reply classification, fact extraction | `claude-haiku-5-5` | Structured output, very cheap ($0.10/$0.50 per MTok). |
-| Website strategy, site code generation, repair | `claude-opus-5-5` | Highest-quality code and design reasoning; this is the product's core value. Effort `high` for generation, `medium` for repair. |
-| Outreach copy | `claude-opus-5-5` (default) — `claude-sonnet-5-5` is the cost lever | Short outputs, quality matters for reply rate. |
+| Command parsing and routing, reply classification, fact extraction, factual-claim checks, diversity-guard text comparison | `claude-haiku-5-5` | Structured, short, high volume. $0.10 / $0.50 per MTok |
+| Website strategy (`SiteSpec`), page and component generation, ordinary repair (cycles 1–2), outreach copy | `claude-sonnet-5-5` | Strong code and design quality at $2 / $10 per MTok |
+| Escalation only: repair cycle 3 after two failed Sonnet repairs; resolving conflicting facts that the deterministic rules can't resolve; re-planning a strategy rejected twice by the diversity guard | `claude-opus-5-5` | $4 / $20 per MTok. Its own per-site sub-cap |
+| Scoring, policy, limits, state transitions, identity matching, dedupe | Python | Deterministic and reproducible |
 
-Cost levers you can approve: Sonnet 5.5 for generation (~50% cheaper), Message Batches for
-non-urgent generation (50% off), prompt caching for the scaffold/system prompt (cache reads at
-$0.20/MTok on Opus 5.5). All Claude calls set `max_tokens` and a per-task token budget; the
-policy engine rejects a call whose worst-case cost would exceed the remaining campaign budget.
+Controls: every call sets `max_tokens`, which bounds worst-case cost for the reservation.
+Prompt caching covers the scaffold and system prompts. Message Batches (50% off) are available
+for non-urgent builds. Opus escalations are counted separately and capped at
+`OPUS_MAX_ESCALATIONS_PER_DAY`.
 
 ---
 
 ## 5. API Integrations
 
-Every integration lives in `integrations/<name>/` and implements:
+Every integration lives in `integrations/<name>/` with a typed adapter, config validation, auth,
+explicit timeouts, retries with backoff and jitter (max 3, honouring `Retry-After`), error mapping,
+a usage hook, and contract and live tests.
 
-```python
-class ProviderStatus(StrEnum): OK, NOT_CONFIGURED, ERROR, QUOTA_EXCEEDED, RATE_LIMITED, BUDGET_BLOCKED, DISABLED
+### 5.1 Google Places (New): field masks and SKUs
 
-class Adapter(Protocol):
-    name: str
-    def configured(self) -> bool                    # config validated at startup
-    async def health(self) -> ProviderHealth        # cheap, cached 5 min
-    # typed methods, e.g. GooglePlaces.text_search(req) -> TextSearchResult
-```
+Checked on 2026-11-18 against Google's Text Search (New) and Place Details (New) field tables. The
+**highest-tier field in the mask sets the SKU for the whole request.** Masks are constants in code,
+with a unit test that maps each mask to its expected SKU, so a careless edit can't silently move
+a call to a more expensive tier.
 
-Common behaviour (in `integrations/base.py`): `httpx.AsyncClient` with explicit timeouts,
-retry with exponential backoff + jitter on 429/5xx/network (max 3, respects `Retry-After`),
-error mapping to typed exceptions, request/response metadata logging (never secrets or full
-bodies containing personal data), and a usage hook that writes `api_usage`.
-
-| Integration | Endpoints used | Notes |
-|---|---|---|
-| Google Places (New) | `POST places:searchText`, `GET places/{id}` | Always send `X-Goog-FieldMask`; the most expensive requested field sets the SKU. Discovery uses a Pro-tier mask; Details uses an explicit Enterprise mask only for prospects that survive dedupe. |
-| SerpApi | `GET /search?engine=google` | `location`, `gl=us`, `hl=en`, `num=10`. Store query + params + top results. `no_cache=false` (cached repeats are free on SerpApi). |
-| Firecrawl | `POST /v2/scrape`, `POST /v2/crawl` (with `limit`), `GET /v2/crawl/{id}` | Scrape for single pages; crawl only for verified official sites, `limit` ≤ budget. Our own robots.txt check before crawling. |
-| Claude | `POST /v1/messages` (streaming), `/v1/messages/batches` | Official `anthropic` Python SDK. Structured outputs for intents/facts. Usage → cost ledger. |
-| Cloudflare | Pages Direct Upload (via `wrangler pages deploy` in sandbox or the API), deployments list/delete | Scoped API token: Pages edit on one account only. |
-| Email (blocked on domain) | Resend or Amazon SES | Signed webhooks for bounces/complaints/replies. |
-| LiveKit (Phase 7) | Server API for room tokens; Agents SDK | Tokens minted by API, short TTL. |
-
----
-
-## 6. Database Design (summary)
-
-Full detail in [docs/DATABASE_SCHEMA.md](docs/DATABASE_SCHEMA.md). Highlights:
-
-- ~30 tables, UUID PKs, `created_at`/`updated_at` everywhere, soft delete only on user-facing
-  entities (campaigns, prospects, generated_sites).
-- `agent_tasks` is both the queue and the execution record; `task_events` is append-only.
-- Provenance: `prospect_sources` + `research_facts.source_*` columns + `retention_policy` enum on
-  every externally sourced field. Google Places content lives in `places_cache` with an
-  `expires_at`, separate from independently verified data.
-- Money: `budget_ledger` uses integer **micro-dollars**; reservations and commits are separate
-  rows so spend is never double-counted or lost on crash.
-- RLS enabled on every table; the dashboard never queries tables directly in v1, but RLS is
-  defence in depth.
-
----
-
-## 7. State Machines
-
-Implemented in `domain/state_machines.py` as explicit transition tables. `transition(entity,
-to_state, actor, reason)` validates against the table, writes the new state and an
-`audit_events` row in the same transaction, and raises `InvalidTransition` otherwise.
-
-### 7.1 Campaign
-
-```
-draft → authorized → queued → discovering → verifying → researching → qualifying
-      → building → qa → preview_deployed → outreach_authorized → completed
-```
-From any active state: `paused` (resume returns to the stored `resume_state`), `cancelled`
-(terminal), `failed` (terminal unless retried by user), `requires_human_review` (resumes to the
-stored state after the user acts). Stages can be skipped if the campaign scope excludes them
-(e.g. a discovery-only campaign goes `qualifying → completed`).
-
-### 7.2 Prospect
-```
-discovered → identity_verified → website_verified → researched → qualified
-                     └──────────────┴─────────────────┴──────────→ rejected
-```
-
-### 7.3 Website
-```
-queued → strategy → generating → building → qa → passed → deployed
-                                    ▲         │
-                                    └─ repair ┘   (max 3 cycles → requires_human_review)
-```
-plus `failed`, `expired` (preview cleaned up), `archived`.
-
-### 7.4 Outreach message
-```
-draft → authorized → queued → sent → replied → follow_up → closed
-terminal side states: suppressed, bounced, opted_out, failed
-```
-
-### 7.5 Task (internal)
-```
-pending → leased → running → succeeded
-                    ├→ retry_wait → pending      (attempts < max_attempts)
-                    ├→ failed                    (attempts exhausted / non-retryable)
-                    ├→ cancelled                 (user / kill switch)
-                    └→ blocked                   (budget, quota, NOT_CONFIGURED, needs approval)
-```
-
----
-
-## 8. Deployment Topology
-
-### 8.1 Environments
-
-| Env | Purpose | Data | External APIs |
-|---|---|---|---|
-| `local` | development | local Supabase (CLI, Docker) | real keys with low caps, or test doubles **only** when `JARVIS_ENV=test` |
-| `test` | CI | ephemeral Postgres | test doubles (explicit, never in prod build) + contract tests against recorded fixtures |
-| `production` | live | Supabase Free project | real |
-
-The application refuses to start in `production` if any test-double flag is set.
-
-### 8.2 Production
-
-- **Dashboard:** Cloudflare Pages (free), built from GitHub on push to `main`.
-- **API + worker (+ voice later):** Docker Compose on one container host, behind Caddy for TLS.
-  Public hostname: a free subdomain from the host, or a Cloudflare Tunnel (`*.trycloudflare.com`
-  is not stable; a named tunnel requires a domain on Cloudflare — another reason a domain helps).
-- **DB/Auth/Storage:** Supabase Free.
-- **Previews:** Cloudflare Pages project `jarvis-previews`, Direct Upload, branch per site.
-- **CI:** GitHub Actions (free for public repos; 2,000 min/month on private).
-
-### 8.3 Container host options
-
-| Option | Cost | Pros | Cons | Verdict |
+| Mask name | Endpoint | Fields | SKU | Used for |
 |---|---|---|---|---|
-| Small VPS (e.g. Hetzner, 2 vCPU/4 GB) | ≈$5–8/mo | Always on, Docker-in-Docker sandbox possible, predictable | You own patching | **Recommended** |
-| Google Cloud Run (service + jobs) | Free tier, then usage | Scales to zero, managed | Background worker needs min-instances (cost) or jobs; nested sandbox harder | Good alternative |
-| Render / Railway | $5–7+/mo | Simple | Free tiers sleep; sandboxing limited | Not preferred |
-| Cloudflare Workers / Containers | varies | Same vendor | Python + Chromium + Node builds are a poor fit for Workers | Not for the worker |
+| `DISCOVERY_ENTERPRISE` | Text Search | `places.id, places.displayName, places.formattedAddress, places.businessStatus, places.primaryType, places.types, places.websiteUri, places.nationalPhoneNumber, nextPageToken` | **Text Search Enterprise** (`websiteUri` and `nationalPhoneNumber` are Enterprise fields) | Discovery + first-pass verification, 1 request per ≤ 20 places |
+| `DISCOVERY_PRO` (fallback) | Text Search | as above, minus `websiteUri` and `nationalPhoneNumber` | Text Search Pro | Used if the Enterprise allowance is exhausted. Verification then relies on SERP only |
+| `IDS_ONLY` | Text Search | `places.id, nextPageToken` | Text Search Essentials (IDs Only) | Re-checking whether a place is still listed |
+| `DETAILS_DISPLAY` | Place Details | `id, displayName, formattedAddress, businessStatus, googleMapsUri` | **Place Details Pro** (`displayName`, `businessStatus` and `googleMapsUri` are Pro fields) | On-demand "Show Google Maps listing" in lead detail, with attribution |
+| `DETAILS_CONTACT` | Place Details | `DETAILS_DISPLAY` + `websiteUri, nationalPhoneNumber` | Place Details Enterprise | On-demand only, operator-initiated, capped |
+
+Deliberately never requested: `rating`, `userRatingCount`, `regularOpeningHours`, `reviews`,
+`photos`. They raise the SKU, and using them for scoring or site content would mean creating
+content derived from Google Maps Content.
+
+Text Search returns at most 20 results per page and 60 per query. Large cities are split into
+location-bias tiles and niche synonyms to reach the target count.
+
+### 5.2 Other providers
+
+| Integration | Endpoints | Notes |
+|---|---|---|
+| SerpApi | `GET /search?engine=google`; `GET /account` (usage sync) | `location`, `gl=us`, `hl=en`. The API key is redacted from logs. Cached repeats are free. |
+| Firecrawl | `/v2/scrape`, `/v2/crawl` (with `limit`), credit-usage endpoint (usage sync) | Our own robots.txt check first. Plain markdown scrapes, extraction done by Haiku. |
+| Claude | `/v1/messages` (streaming), `/v1/messages/batches` | Official `anthropic` SDK. The `usage` in each response gives exact token counts. |
+| Cloudflare | Pages Direct Upload, deployments list/delete | Token scoped to Pages:Edit on one account. |
+| Email | Resend or SES (when ready) | Signed webhooks through the edge Worker. |
+| LiveKit (Phase 7) | Server API (tokens), Agents SDK | Short-lived tokens. |
 
 ---
 
-## 9. Security Boundaries
+## 6. Billing Protection and Usage Visibility
 
-Full detail in [docs/SECURITY_AND_COMPLIANCE.md](docs/SECURITY_AND_COMPLIANCE.md).
+**Google Cloud budget alerts don't cap spending.** They only send notifications. JARVIS
+therefore enforces its own limits, with a Google-side hard stop as a backstop.
+
+| Layer | Mechanism | Hard stop? |
+|---|---|---|
+| 1. Application limits (primary) | Locked counters in `usage_counters` per provider/SKU/day/month, plus `budget_ledger` reservations. The worst-case cost and units are reserved **before** the request. A call that would exceed any cap is not sent. | Yes, before the request |
+| 2. Provider-side quotas | Google Cloud Console → Places API (New) → Quotas: a per-day request cap on `SearchText` and `GetPlace` set below our app limits, with a margin for enforcement lag. SerpApi and Firecrawl stop at plan limits (no overage while auto-recharge is off). Claude: a workspace spend limit in the Console. | Yes, with Google's enforcement lag |
+| 3. Alerts (warning only) | A Google Cloud budget alert at $1 and $5. Daily email or dashboard alert at 80% of any JARVIS cap. | No |
+
+Default caps sit **below** each free allowance (for example 900 of 1,000 Text Search Enterprise
+calls/month), so normal operation never reaches paid usage. Raising a cap above a free allowance
+is a user action, it is audited, and the UI shows the price.
+
+**Estimated vs actual usage** are stored separately and never blended:
+- **Estimated** (`api_usage.estimated_cost_micros`): our ledger, computed at call time from
+  configured unit prices.
+- **Provider-reported** (`provider_usage_reports`): pulled on a schedule where an API exists
+  (SerpApi account usage, Firecrawl credit usage, Claude response `usage` per call plus the Usage
+  and Cost Admin API if an admin key is configured). Entered or imported manually for Google
+  (Cloud Billing reports), and labelled as such.
+- The Activity dashboard shows both columns, the variance and the last sync time. A missing
+  provider report shows "not available", never a copied estimate.
+
+---
+
+## 7. Database Design (summary)
+
+Full detail in [docs/DATABASE_SCHEMA.md](docs/DATABASE_SCHEMA.md).
+- About 30 tables. `agent_tasks` is both the queue and the execution record.
+- **No table has a column for Google Places content.** Places-derived data is limited to
+  `place_refs.place_id` and an optional `place_refs.lat/lng` with `coords_expires_at` ≤ 30 days.
+  A CI schema test fails if new columns match a denylist (`*_name` on `place_refs`,
+  `formatted_address`, `rating`, …) on Places-linked tables.
+- Provenance on every independently sourced value: `source_type`, `source_ref`, `retrieved_at`, `retention_policy`.
+- Money is stored in integer micro-dollars. Usage counters and ledger rows are locked for each reservation.
+- RLS is enabled on every table.
+
+---
+
+## 8. State Machines
+
+Implemented as explicit transition tables. `transition()` writes the state change and an
+`audit_events` row in one transaction and rejects any invalid transition.
+
+**Campaign:** `draft → authorized → queued → discovering → verifying → researching → qualifying → building → qa → preview_deployed → outreach_authorized → completed`; plus `paused`, `cancelled`, `failed`, `requires_human_review` (both resume to a stored state). Stages outside the campaign's scope are skipped. In the combined discovery task, `discovering` and `verifying` overlap per page, and the campaign moves to `verifying` once every page task is done.
+
+**Prospect:** `discovered → identity_verified → website_verified → researched → qualified`, with `rejected` reachable from any non-terminal state.
+
+**Website:** `queued → strategy → generating → building → qa → (repair → building)* → passed → deployed`; plus `failed`, `requires_human_review`, `expired`, `archived`.
+
+**Outreach message:** `draft → authorized → queued → sent → replied → follow_up → closed`; terminal side states `suppressed`, `bounced`, `opted_out`, `failed`. `draft` needs no email configuration. `draft → authorized` requires sending readiness.
+
+**Task:** `pending → leased → running → succeeded | retry_wait → pending | failed | cancelled | blocked`.
+
+---
+
+## 9. Deployment Topology
+
+| Env | DB | External APIs |
+|---|---|---|
+| `local` | local Supabase (CLI) | real keys with very low caps, or test doubles only when `JARVIS_ENV=test` |
+| `test` (CI) | ephemeral Postgres | test doubles plus recorded contract fixtures |
+| `live-test` (manual workflow) | dedicated Supabase schema or project | **real providers, tightly capped** (§10 of the plan) |
+| `production` | Supabase Free | real |
+
+Production:
+- **Dashboard:** Cloudflare Pages from `main`.
+- **Previews:** Pages project `jarvis-previews`, Direct Upload, branch per site, `*.pages.dev`.
+- **Edge Worker:** `jarvis-edge.<account>.workers.dev` (unsubscribe, webhooks).
+- **VPS (required):** Docker Compose running `caddy`, `api`, `worker`, `backup`, and later
+  `voice`, with sandbox containers launched by a restricted runner. Unattended security upgrades,
+  SSH keys only, a firewall allowing only 80/443 and SSH from your IP.
+- **Supabase Free:** Postgres, Auth, Storage.
+- **CI:** GitHub Actions.
+
+---
+
+## 10. Security Boundaries
+
+Detail in [docs/SECURITY_AND_COMPLIANCE.md](docs/SECURITY_AND_COMPLIANCE.md).
 
 | Boundary | Control |
 |---|---|
-| Browser ↔ API | Supabase JWT (verified against project JWKS), CORS locked to dashboard origin, rate limiting, Zod (client) + Pydantic (server) validation. No secrets in the SPA bundle. |
-| API/worker ↔ providers | Keys only in server env (Docker secrets / env file with 600 perms), never logged, scoped tokens (Cloudflare token limited to Pages on one account). |
-| Worker ↔ internet (probes) | SSRF guard: resolve DNS, reject private/loopback/link-local/metadata IPs, re-check after redirects, http/https only, ports 80/443, size and time limits. |
-| Worker ↔ generated code | Code never runs in the worker. Build/QA in a throwaway container: `--network none`, non-root, read-only root FS, tmpfs workdir, CPU/mem/pids limits, hard timeout, pre-installed dependencies (no `npm install` of model-chosen packages). |
-| Agent ↔ tools | ToolGateway allow-list per agent role. |
-| System ↔ outside world | Policy engine: kill switches, authorisation scope, budgets, daily limits, suppression list, human-approval gates. |
+| Browser ↔ API | Supabase JWT checked against JWKS, CORS restricted to the dashboard origin, rate limits, Zod and Pydantic validation, no secrets in the bundle |
+| Server ↔ providers | Server-only keys, scoped tokens, log redaction |
+| Worker ↔ internet | SSRF guard on every direct fetch |
+| Worker ↔ generated code | Sandbox with no network, non-root user, read-only root, resource caps, static-only output |
+| Agent ↔ tools | ToolGateway allow-list and limits |
+| System ↔ outside world | Kill switches, authorisation, budgets, suppression, sending readiness, human-approval gates |
 
 ---
 
-## 10. Failure Recovery
+## 11. Failure Recovery
 
 | Failure | Behaviour |
 |---|---|
-| Worker crash mid-task | Lease expires (default 5 min, renewed by heartbeat every 60 s); task returns to `pending`, attempt counter incremented. Handlers are idempotent per step via `idempotency_key`. |
-| Provider 429 / 5xx | Retry with backoff up to adapter limit, then task `retry_wait` with `run_after`; after `max_attempts` → `failed` with mapped error; campaign continues for other prospects. |
-| Quota exhausted | Adapter returns `QUOTA_EXCEEDED`; task → `blocked`; campaign shows the blocking provider; no further calls to that provider until reset or user action. |
-| Budget exceeded | Reservation fails before the call; task `blocked (BUDGET_BLOCKED)`; campaign → `requires_human_review`. |
-| Claude refusal / truncated output | `stop_reason` checked; refusal → logged, task failed with reason (fallback model configured where supported); `max_tokens` → one retry with continuation, then fail. |
-| Build/QA keeps failing | 3 repair cycles max → `requires_human_review` with the last QA report attached. |
-| Deployment URL not live | Verify up to 5 times over 2 min; then `failed`, no outreach can reference it. |
-| DB unavailable | API returns 503; worker pauses claiming with backoff. Supabase daily backups (Free = no PITR) + our weekly `pg_dump` to Storage/off-site. |
-| Kill switch flipped | Worker stops claiming immediately; running tasks are cancelled at their next checkpoint (ToolGateway refuses all calls). |
+| Worker crash | Lease expiry (5 min, heartbeat every 60 s) → task reclaimed. Step idempotency keys stop duplicate side effects. |
+| Provider 429/5xx | Backoff retries → `retry_wait` → `failed` after `max_attempts`. The campaign continues with other prospects. |
+| Quota or cap reached | `QUOTA_EXCEEDED` / `BUDGET_BLOCKED` → task `blocked`, shown on the campaign. No further calls to that provider. |
+| **Database unreachable** (network, restart, Supabase pause) | The DB health monitor detects it (`SELECT 1` every 30 s, connection errors). API → `/ready` 503, writes rejected with "database unavailable". Worker → stops claiming, finishes nothing that needs a commit, and holds no new external calls (nothing billable runs without a ledger write). Reconnects with exponential backoff (1 s → 60 s cap). An alert goes out through the edge Worker or email. On reconnect: lease recovery, then normal operation. |
+| **Supabase project paused for inactivity** | Detected as a persistent connection failure with a paused-project error. Shown in the dashboard as "Database paused: resume it in the Supabase dashboard" (a manual action). After resume, the worker reconnects automatically. Inactivity pausing is **not** assumed to be prevented by worker traffic (§12). |
+| Data loss / corruption | Restore from our own daily `pg_dump` (Supabase Free has no managed backups or PITR). Runbook in Phase 9. |
+| Claude refusal / truncation | `stop_reason` checked. A refusal is logged and the task fails with its reason (a server-side fallback is configured where supported). On `max_tokens`: one continuation, then fail. |
+| Build/QA keeps failing | 2 Sonnet repairs → 1 Opus repair → `requires_human_review`. |
+| Preview not live | 5 checks over 2 min, then `failed`. Outreach can't reference it. |
+| Edge Worker can't reach the API | The unsubscribe is still recorded: the Worker stores the token in Workers KV (free) and the API drains KV on recovery. The user sees a confirmation either way. |
+| Kill switch | Claims stop immediately. The ToolGateway refuses all calls, and running tasks are cancelled at their next checkpoint. |
 
 ---
 
-## 11. Observability
+## 12. Supabase Free Tier: Limits and Mitigations
 
-- Structured JSON logs (`structlog`) with `task_id`, `campaign_id`, `agent_role`, `provider`,
-  `model`, `duration_ms`, `tokens_in/out`, `cost_usd_micros`, `attempt`, `result`.
-- `api_usage` + `budget_ledger` power the cost dashboard; `task_events` powers live progress.
-- `/health` (liveness), `/ready` (DB + queue), `/providers/health` (per-adapter status).
-- Worker heartbeat table → dashboard "worker health"; queue depth = `count(*) where status in ('pending','retry_wait')`.
-- Optional later: OpenTelemetry export, Sentry free tier for exceptions.
+Figures from secondary sources. **Check them on supabase.com/pricing before Phase 1.**
 
----
-
-## 12. Reporting
-
-All dashboard numbers are SQL views over real rows (`v_campaign_funnel`, `v_cost_by_provider`,
-`v_daily_usage`). There is no client-side aggregation of invented data and no demo dataset in
-production builds.
+| Limitation | Impact | Mitigation |
+|---|---|---|
+| 500 MB database | Grows with evidence and events | Retention purges (task events 90 d, SERP 180 d), raw pages kept in Storage not rows, storage monitored at 70% |
+| 1 GB file storage | Site sources and artefacts | Content-addressed artefacts, keep only the last 2 builds per site, purge on preview expiry |
+| 5 GB egress | Dashboard and Storage downloads | Artefacts go straight to Cloudflare, and the dashboard shows thumbnails |
+| **Inactivity pause** (≈ 7 days of low activity) | Production outage until resumed manually | Not guaranteed to be prevented by worker traffic. Detected and alerted. Manual resume runbook. Upgrade to Pro ($25/mo, optional) removes it |
+| **No managed backups or PITR on Free** | Data loss risk | Our daily `pg_dump` (schema + data) to the VPS plus an encrypted off-site copy (Cloudflare R2 free tier or similar). Retention: 7 daily + 4 weekly. A tested restore |
+| Connection limits | Pool exhaustion | Small pools (api 5, worker 5) through the session pooler |
+| 2 projects | live-test can't have its own project if two already exist | Use a separate schema for live tests, or reuse the second free project |
 
 ---
 
-## 13. Scalability Path
+## 13. Observability
 
-v1 targets one operator, ~1–3k prospects and ~100 sites/month. Beyond that: multiple worker
-replicas (queue already supports it), Message Batches for generation, a separate build-runner
-host, Cloudflare Queues for webhook fan-in, Supabase Pro for PITR and capacity.
+- Structured JSON logs carrying `task_id`, `campaign_id`, `agent_role`, `provider`, `model`, `sku`, `duration_ms`, `tokens_in/out`, `estimated_cost_micros`, `attempt` and `result`.
+- `/health` (process), `/ready` (DB and queue), `/providers/health` (per-adapter status, including `NOT_CONFIGURED`).
+- A worker heartbeat table, queue depth, DB health state and the last backup time are shown on the dashboard.
+- The cost dashboard shows estimated vs provider-reported usage, by provider, campaign and day.
 
----
+## 14. Reporting
 
-## 14. Decisions Requiring Approval
+All dashboard figures are SQL views over real rows. Production builds have no demo data and no client-side fabrication.
 
-1. Container host: small VPS (~$5–8/mo) vs Cloud Run.
-2. Sending domain for outreach: use an existing domain you control, or approve buying one.
-3. Defer Groq (use Claude Haiku 5.5 for cheap tasks).
-4. Default generation model: Opus 5.5 (quality) vs Sonnet 5.5 (≈half the cost).
-5. Voice in Phase 7, after the text pipeline works end to end.
-6. Google Places data handling approach (transient cache + place_id), and acceptance that this
-   needs your own reading of Google's terms (I am not a lawyer).
-7. Preview-site policy: `noindex`, "concept preview, not affiliated" banner, no copying of the
-   prospect's photos/logo without permission, 30-day expiry.
+## 15. Scalability Path
+
+More worker replicas, Batches for generation, a second VPS for builds, Supabase Pro, Cloudflare Queues for webhook fan-in.
+
+## 16. Decisions Requiring Approval
+
+1. VPS provider and size (recommended: CX23-class, 2 vCPU / 4 GB, ≤ $10/month).
+2. The model routing in §4.1 (Sonnet 5.5 as the main generation model, Opus 5.5 for escalation only).
+3. The Places compliance design (§3.3–3.4, §5.1), including that no-website prospects need an independent or operator-confirmed name and contact before they qualify.
+4. Deferring Groq.
+5. Voice in Phase 7.
+6. The preview-site policy: noindex, a non-affiliation banner, no logos or photos copied, 30-day expiry.
+7. Outreach sending stays blocked until you provide a sending domain and a legitimate postal address (no purchase assumed).
+8. An off-site backup target (recommended: Cloudflare R2 free tier).
