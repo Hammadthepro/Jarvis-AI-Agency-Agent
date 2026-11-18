@@ -1,6 +1,6 @@
 # JARVIS — Environment Variables
 
-Status: **Proposed, revision 2.** Server configuration is validated at startup by a Pydantic
+Status: **Proposed, revision 3.** Server configuration is validated at startup by a Pydantic
 `Settings` class. Dashboard configuration is validated by a Zod schema.
 - A missing **required** variable stops the process in `production`.
 - An **optional** integration that isn't set reports `NOT_CONFIGURED`, and never falls back silently to a mock.
@@ -8,6 +8,8 @@ Status: **Proposed, revision 2.** Server configuration is validated at startup b
 Classification: **SECRET** (credential, server-only, never logged), **SENSITIVE** (not public),
 **PUBLIC** (safe in the browser bundle), **CONFIG** (tuning).
 Consumers: `api`, `worker`, `voice`, `dashboard`, `edge` (Cloudflare Worker), `backup`, `ci`.
+
+Revision 3: Places API (New) naming; `PLACES_API_BASE_URL`; the listing-panel cap is now Details Enterprise; rating, compliance-gate and website-verification variables. The compliance gate itself lives in the DB (`compliance_approvals`), not in env vars.
 
 Revision 2: added VPS/hostname, model-routing, usage-sync, coordinate-storage, sending-readiness,
 backup and edge-Worker variables. Budget defaults now match the cost model §6.4.
@@ -57,20 +59,33 @@ Get these from Supabase Dashboard → Project Settings → API / Database.
 
 ## 4. Google Places API (New)
 
-Get it from Google Cloud Console: enable "Places API (New)" → Credentials → API key. Restrict the
-key to Places API (New) and the VPS IP. Set per-day quotas and budget alerts (alerts are warnings only).
+Google Maps Platform setup: in a Google Cloud project, enable **only Places API (New)** (not
+Maps JavaScript, Embed, Static, Routes, Geocoding or Autocomplete) → Credentials → API key.
+Restrict the key to Places API (New) and the VPS IP. Set per-day quotas and budget alerts (alerts
+are warnings only). **Having a key doesn't enable Places usage.** The compliance gate in
+`compliance_approvals` must also be approved for the relevant scope.
 
 | Variable | Purpose | Req | Consumers | Class | Validation |
 |---|---|---|---|---|---|
-| `GOOGLE_PLACES_API_KEY` | Places calls | Optional (Discovery shows NOT_CONFIGURED without it) | worker, api (on-demand display) | **SECRET** | `AIza…`, 39 chars |
+| `GOOGLE_PLACES_API_KEY` | Places API (New) calls (Text Search; Place Details for the listing panel) | Optional (shows NOT_CONFIGURED without it; COMPLIANCE_BLOCKED while the gate is closed) | worker, api (listing panel) | **SECRET** | `AIza…`, 39 chars |
+| `PLACES_API_BASE_URL` | Places API (New) host | Optional (`https://places.googleapis.com/v1`) | worker, api | CONFIG | must be exactly this host in production (no other Google API hosts are allowed) |
 | `PLACES_CAP_TEXT_SEARCH_ENTERPRISE_MONTHLY` / `_DAILY` | app hard cap | Optional (`900` / `60`) | worker | CONFIG | ≤ free allowance unless `allow_paid` |
 | `PLACES_CAP_TEXT_SEARCH_PRO_MONTHLY` | fallback mask cap | Optional (`4500`) | worker | CONFIG | |
-| `PLACES_CAP_DETAILS_PRO_MONTHLY` | on-demand display cap | Optional (`300`) | api | CONFIG | |
-| `PLACES_CAP_DETAILS_ENTERPRISE_MONTHLY` | on-demand contact cap | Optional (`50`) | api | CONFIG | |
+| `PLACES_CAP_DETAILS_ENTERPRISE_MONTHLY` | listing-panel cap (`LISTING_DISPLAY` is Enterprise because it includes the rating) | Optional (`100`) | api | CONFIG | ≤ free allowance unless `allow_paid` |
+| `PLACES_INCLUDE_SERVICE_AREA_DEFAULT` | default for `includePureServiceAreaBusinesses` | Optional (`true`) | worker | CONFIG | bool |
+| `DEFAULT_MISSING_RATING_POLICY_PRESELECT` | which option the confirmation card pre-selects (the operator must still confirm) | Optional (`exclude`) | api | CONFIG | `exclude` \| `include_for_review` |
 | `PLACES_STORE_COORDINATES` | persist lat/lng (≤ 30 days) | Optional (`false`) | worker | CONFIG | bool |
 | `PLACES_COORDINATES_TTL_DAYS` | coordinate expiry | Optional (`30`) | worker | CONFIG | 1–30 (hard upper bound) |
 
-There is **no** cache-TTL variable for other Places content, because it is never stored.
+There is **no** cache-TTL variable for other Places content, because it is never stored. There is **no** default minimum-rating variable: `minimum_google_rating` comes only from the operator's command.
+
+### 4a. Website verification
+
+| Variable | Purpose | Req | Consumers | Class | Validation |
+|---|---|---|---|---|---|
+| `NO_WEBSITE_MIN_CONFIDENCE` | threshold for `NO_WEBSITE` (otherwise `WEBSITE_UNKNOWN`) | Optional (`0.8`) | worker | CONFIG | 0.5–1.0 |
+| `BROKEN_SECOND_PROBE_MINUTES` | delay before the confirming probe | Optional (`10`) | worker | CONFIG | ≥ 10 |
+| `MAX_CANDIDATE_DOMAINS` / `MAX_PROFILE_CHECKS` | independent-check bounds | Optional (`3` / `3`) | worker | CONFIG | 1–5 |
 
 ## 5. SerpApi
 
@@ -168,7 +183,7 @@ Get these from LiveKit Cloud → Project → Settings → Keys.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `LIVE_TEST_MAX_PLACES_REQUESTS` | `3` | per run |
+| `LIVE_TEST_MAX_PLACES_REQUESTS` | `3` | per run. Also needs the `google_places_technical_testing` approval |
 | `LIVE_TEST_MAX_SERP_SEARCHES` | `5` | per run |
 | `LIVE_TEST_MAX_FIRECRAWL_CREDITS` | `5` | per run |
 | `LIVE_TEST_MAX_CLAUDE_USD` | `0.50` | per run (site-build live test: `2.00`) |

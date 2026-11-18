@@ -1,9 +1,12 @@
 # JARVIS — System Architecture
 
-Status: **Proposed, revision 2.** Awaiting architecture approval. No application code exists.
-Last updated: 2026-11-18
+Status: **Proposed, revision 3.** Awaiting architecture approval. No application code exists.
+Last updated: 2026-11-18. Full change history: [CHANGELOG.md](CHANGELOG.md).
 
 Related documents:
+[docs/PRODUCT_REQUIREMENTS.md](docs/PRODUCT_REQUIREMENTS.md) ·
+[docs/API_CONTRACTS.md](docs/API_CONTRACTS.md) ·
+[docs/VERIFICATION_REGISTER.md](docs/VERIFICATION_REGISTER.md) ·
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) ·
 [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md) ·
 [docs/API_COST_MODEL.md](docs/API_COST_MODEL.md) ·
@@ -11,10 +14,18 @@ Related documents:
 [docs/SECURITY_AND_COMPLIANCE.md](docs/SECURITY_AND_COMPLIANCE.md) ·
 [docs/SYSTEM_DIAGRAM.md](docs/SYSTEM_DIAGRAM.md)
 
+### Revision 3 changes
+| Area | Change |
+|---|---|
+| Rating filter | Optional `minimum_google_rating` (0.5 steps, no default) is sent as Text Search `minRating` and re-checked in memory, with an explicit missing-rating policy. Ratings are never persisted. See §3.6 and PR-2 |
+| Website availability | New evidence-based states: `WEBSITE_LISTED`, `WEBSITE_WORKING`, `WEBSITE_BROKEN`, `NO_WEBSITE`, `WEBSITE_UNKNOWN`. A missing `websiteUri` never means `NO_WEBSITE`. See §3.5 and PR-3 |
+| Compliance gate | Places-based discovery and qualification stay **disabled** until written approval from Google or legal counsel covers the stated use. The discovery provider is replaceable. SerpApi's Maps engines are no longer listed as an alternative, because they return Google Maps content. See §3.7 and PR-4 |
+| Field masks and costs | Re-verified: `rating`, `userRatingCount` and `websiteUri` are Enterprise; `displayName` and `businessStatus` are Pro; `attributions` is Essentials (IDs Only). One Text Search Enterprise request returns at most 20 places, and at most 60 per query. The cost model now uses a yield-based estimate. See §5.1 |
+
 ### Revision 2 changes
 | Area | Change |
 |---|---|
-| Google Maps | Removed `places_cache`. The only Places values we persist are Place IDs (indefinitely) and, optionally, lat/lng (deleted within 30 days). Places content is used in process memory only. Field masks were rechecked against Google's SKU tables. Discovery now uses one Text Search Enterprise call per 20 places, not one Place Details call per place. Attribution rules are documented. |
+| Google Places API | Removed `places_cache`. The only Places values we persist are Place IDs (indefinitely) and, optionally, lat/lng (deleted within 30 days). Places content is used in process memory only. Field masks were rechecked against Google's SKU tables. Discovery now uses one Text Search Enterprise call per 20 places, not one Place Details call per place. Attribution rules are documented. |
 | Infrastructure | A VPS is a **required** component and a recurring cost. It hosts FastAPI, the workers, Playwright and the build sandbox. Cloudflare Pages hosts the dashboard and previews. Workers are used only for short request/response endpoints. Cloud Run is no longer an option. |
 | AI routing | Haiku 5.5 for classification, extraction and routing. Sonnet 5.5 for strategy, generation, ordinary repair and outreach copy. Opus 5.5 only for escalation. Deterministic Python for scoring and policy. |
 | Billing protection | Limits are checked before every billable call, using locked counters. Google Cloud quotas act as a second hard stop, and budget alerts only warn. Estimated usage and provider-reported usage are stored and shown separately. |
@@ -44,7 +55,7 @@ don't depend on the browser or on the user's laptop.
 | Deterministic core, AI at the edges | State machines, scoring, budgets, policy and routing are plain Python. LLMs handle language understanding, extraction, site strategy and code, and outreach copy. They never decide what is permitted. |
 | Durable by default | Every unit of work is an `agent_tasks` row with a lease, an attempt counter, an idempotency key and an event log. |
 | Evidence over assertion | Every persisted fact has a source, method, timestamp and confidence. Generated websites use only facts with status `verified`. |
-| Compliance by construction | Restricted Google Maps content has no column to be written into. Sending email is impossible until a readiness checklist passes. |
+| Compliance by construction | Restricted Google Maps Content returned by the Places API has no column to be written into. Sending email is impossible until a readiness checklist passes. |
 | Fail loudly | Integrations return a typed status: `OK`, `NOT_CONFIGURED`, `ERROR`, `QUOTA_EXCEEDED`, `RATE_LIMITED`, `BUDGET_BLOCKED`, `DISABLED`. There is no mock fallback in production. |
 | Bounded autonomy | Explicit campaign authorisation sets limits on scope, counts, spend and outreach. They are checked before every billable or outward-facing action. |
 | Cheapest reliable path | Free tiers first, the cheapest adequate model, and no paid call when a free signal answers the question. |
@@ -64,9 +75,10 @@ don't depend on the browser or on the user's laptop.
 4. **LangGraph runs only the build → QA → repair loop**, with a Postgres checkpointer. The
    campaign pipeline is our own deterministic state machine.
 5. **Google Places content is never persisted.** We store `place_id` and, optionally, lat/lng with
-   a 30-day expiry. Everything else (name, address, phone, website, hours, ratings) exists only in
-   process memory during the task that fetched it. Persistent business information comes only
-   from independent sources (§3.4).
+   a 30-day expiry. Everything else (name, address, phone, website, hours, **rating, review
+   count**) exists only in process memory during the task that fetched it. Persistent business
+   information comes only from independent sources (§3.4). **Not storing it doesn't make the use
+   compliant on its own:** Places-based prospect selection is behind a compliance gate (§3.7).
 6. **Model routing is by task difficulty** (§4.1). Most Claude spend goes to Sonnet 5.5, and
    Opus 5.5 is an escalation path with its own budget.
 7. **Groq is deferred.** Haiku 5.5 at $0.10/$0.50 per MTok makes the saving negligible.
@@ -158,19 +170,24 @@ boundaries between modules can be enforced by a lint rule.
 
 ### 3.1 Command to campaign
 
-1. "Find 100 plumbing businesses in Houston that don't have websites."
+1. "Find 100 plumbers in Houston with at least a 3.5 Google rating and no website."
 2. `POST /commands` stores the raw text. The Command agent (Haiku 5.5, structured output) returns
-   a validated `CommandIntent`, or asks a clarifying question when a field is missing.
-3. The Policy engine (deterministic) builds the plan and a **worst-case** cost and unit estimate:
-   "≤ 12 Places Text Search Enterprise calls (free allowance), ≤ 150 SERP searches, ≤ 100 Firecrawl
-   credits, ≤ $0.60 Claude. Estimated cost $0.00–$0.60 within free tiers."
-4. Once you confirm, the campaign moves `draft → authorized → queued` and the root task is enqueued.
+   validated `CampaignParameters` ([API_CONTRACTS §2](docs/API_CONTRACTS.md)):
+   `minimum_google_rating=3.5`, `website_filter=[NO_WEBSITE]`. If any field is missing or invalid
+   (e.g. a rating of 3.7), it asks a clarifying question instead.
+3. The Policy engine (deterministic) checks the **compliance gate** for the discovery provider,
+   requires a `missing_rating_policy`, and builds a **worst-case** unit and cost estimate from the
+   yield model ([API_COST_MODEL §2](docs/API_COST_MODEL.md)): "≤ 80 Text Search Enterprise requests,
+   ≤ 380 SERP searches (more than the free 250: blocked unless you raise the cap), ≤ 200 Firecrawl
+   credits, ≤ $0.60 Claude."
+4. Once you confirm, the campaign moves `draft → authorized → queued`. If the gate is closed, the
+   result is `COMPLIANCE_BLOCKED` and the campaign stays `draft`.
 
 ### 3.2 Pipeline
 
 | Stage | Agent | Persists | Billable calls |
 |---|---|---|---|
-| Discover + first-pass verify | Discovery → Verification (same task, per result page) | `prospects` (place_id only), `website_audits`, independent `prospect_sources` | Places Text Search (Enterprise mask), SerpApi, probes (free) |
+| Discover + first-pass verify | Discovery → Verification (same task, per result page) | `prospects` (place_id only), `website_audits`, independent `prospect_sources` | Places Text Search (Enterprise mask, gated), SerpApi, probes (free) |
 | Research | Research | `research_facts`, `prospect_contacts` (independent sources only) | SerpApi, Firecrawl, Haiku 5.5 |
 | Qualify | Qualification | `lead_scores` | none |
 | Build | Website Builder | `generated_sites`, `site_versions` | Sonnet 5.5 (Opus 5.5 on escalation) |
@@ -180,11 +197,15 @@ boundaries between modules can be enforced by a lint rule.
 
 ### 3.3 Why discovery and first-pass verification run in the same task
 
-Places content can't be stored, so we can't hold names, phones and websites in the DB between
-tasks. Each **discovery page task** therefore does the following:
-1. Calls Text Search once with the Enterprise mask, getting up to 20 places. The Places data lives only in memory.
-2. For each place: dedupes by `place_id`, skips anything not `OPERATIONAL`, and runs website
-   verification (DNS/HTTP probe of `websiteUri`, SERP queries for name + city, identity matching).
+Places content can't be stored, so we can't hold names, phones, websites or ratings in the DB
+between tasks. Each **discovery page task** therefore does the following:
+1. Checks the compliance gate. Calls Text Search once with the Enterprise mask (and `minRating`
+   when set and the policy is `exclude`). Gets **up to** 20 places. Pages may hold fewer, and a query
+   stops after 60 results. The Places data lives only in memory.
+2. For each place: dedupes by `place_id`; skips anything not `OPERATIONAL`; applies the in-memory
+   rating check and missing-rating policy (§3.6); applies the website pre-filter (e.g. for a
+   `NO_WEBSITE` campaign, a listed `websiteUri` is probed first and the place is dropped if it's
+   `WEBSITE_WORKING`); then runs website verification (§3.5).
 3. Persists only the `place_id`, the independently obtained evidence (probe results, SerpApi
    results, pages fetched from the business's own site) and the audit outcome.
 4. Discards the Places data when the task ends. The task payload and result contain no Places content.
@@ -209,24 +230,62 @@ reach `qualified`. It goes to `requires_human_review`, where the operator can co
 (`source_type = manual`). This is the main product consequence of the Places terms. It costs
 roughly 1–2 extra SERP searches and Firecrawl pages per no-website prospect, and both are budgeted.
 
-### 3.5 Website verification decision logic
+### 3.5 Website availability: evidence-based states
+
+States (defined in PR-3): `WEBSITE_LISTED`, `WEBSITE_WORKING`, `WEBSITE_BROKEN`, `NO_WEBSITE`,
+`WEBSITE_UNKNOWN`. Quality (`modern`, `outdated`, `unassessed`) is a separate attribute of
+`WEBSITE_WORKING`.
 
 ```
-(in memory) Places websiteUri present?
-   yes → probe (DNS, HTTP, redirects, TLS, canonical) → identity match on page
-          match → FUNCTIONING → quality audit → OUTDATED?
-          DNS/HTTP failure → BROKEN (confirmed by a second probe 10 min later)
-          mismatch → SERP path
-   no  → SERP path:
-          ≤ 2 queries ("<name>" <city> <state>; "<phone>")
-          drop directories/social/aggregators → probe candidates → identity match
-          match → FUNCTIONING / OUTDATED / BROKEN
-          none  → NONE_FOUND (confidence from checks performed)
-          ambiguous → UNVERIFIED (human review)
+Listing sources: Places websiteUri (in memory only) · directory/social profile links · SERP results
+   any listed URL → state WEBSITE_LISTED (persisted only if an independent source lists it)
+      → probe (DNS, HTTP, redirects, TLS, parked-page detection, canonical) → identity match
+         responds + identity match   → WEBSITE_WORKING (+ quality audit)
+         NXDOMAIN / connect / TLS / 4xx-5xx at root / parked / expired
+                                     → second probe ≥ 10 min later → still failing → WEBSITE_BROKEN(reason)
+         responds, identity mismatch → listed URL not this business → continue independent search
+   no listed URL anywhere (a missing Places websiteUri is a hint only, never a conclusion):
+      required independent checks (PR-3.3):
+         1. SERP "<name>" <city> <state>       2. SERP "<phone>"
+         3. up to 3 independent profiles checked for a website link
+         4. DNS of up to 3 candidate domains derived from the name
+      all completed, no site found, confidence ≥ NO_WEBSITE_MIN_CONFIDENCE → NO_WEBSITE
+      any check failed / skipped by quota or error                        → WEBSITE_UNKNOWN(verification_incomplete)
+      completed but weak or conflicting                                    → WEBSITE_UNKNOWN(insufficient_evidence | conflicting_evidence)
 ```
 
 Identity matching is deterministic: name similarity, phone match, ZIP/street match and city
-match. "No website" is never a bare boolean. It is a status with a confidence value and its evidence.
+match (service-area businesses have no address, so they rely on name and phone). Availability is
+never a bare boolean. It's a state with checks, evidence and confidence. `WEBSITE_UNKNOWN` never
+satisfies a campaign's website filter, and outreach can't claim "no website" for it.
+
+### 3.6 Dynamic Google rating filter
+
+| Step | Behaviour |
+|---|---|
+| Parameter | `minimum_google_rating`: optional, **no default**, 0.5–5.0 in 0.5 steps, validated without rounding |
+| Request | Policy `exclude`: send `minRating = minimum`. Policy `include_for_review`: omit `minRating` (Google's handling of unrated places is undocumented) and filter in memory. The mask always includes `places.rating` when a minimum is set (no SKU change: the mask is already Enterprise) |
+| In-memory check | Every returned place: `rating ≥ minimum` → pass. `rating` absent → apply the policy (`exclude` drops it; `include_for_review` keeps it, flagged `rating_unknown` for review). Below the minimum → drop |
+| Persistence | **None.** No rating, review count, pass/fail flag, rating band or derived score is written to any table, log, task payload or metric label. Campaign membership is the only trace, and the parameter is the operator's own input |
+| Scoring | Lead scoring doesn't use Google ratings or reviews |
+| Display | Only in the live `<GooglePlacesListingPanel>` (Place Details Enterprise call, attributed, `no-store`) |
+| No provider | If the discovery provider can't supply Google ratings, or the gate is closed, a campaign with a minimum is rejected with `COMPLIANCE_BLOCKED` / `VALIDATION_ERROR` |
+
+### 3.7 Google Places compliance gate
+
+- **Intended use (PR-4.1):** use Places Text Search, with `minRating` and website-listing data, to find and filter US businesses by Google rating and website availability, in order to select potential website-development clients for commercial email outreach.
+- **Not storing the data doesn't settle compliance.** The use itself needs confirmation from Google, or a written opinion from qualified legal counsel covering this exact use.
+- Gate scopes, stored in `compliance_approvals` and checked by the ToolGateway before any Places call:
+
+| Scope | Unlocks | Default |
+|---|---|---|
+| `google_places_prospect_selection` | discovery, rating filter, qualification from Places results | **closed** |
+| `google_places_listing_display` | live Google Places listing panel in lead detail | **closed** |
+| `google_places_technical_testing` | capped adapter tests in `live-test` only, with no prospect records created | closed (operator decision) |
+
+- While closed: those calls return `COMPLIANCE_BLOCKED` with no request sent. The dashboard shows a gate banner.
+- **Provider replaceability:** `DiscoveryProvider` interface with `google_places` (gated), `manual_import` (operator-supplied list with an attested right to use it), and `licensed_business_data` (future, TBD). Verification, research, building and outreach work the same for every provider. Note: SerpApi's Google Maps or local engines return Google Maps content and fall under the same open question. They aren't a workaround.
+- **Development impact:** Phases 4–6 are built and live-tested using `manual_import` prospects and the diversity dataset, so the gate doesn't block development.
 
 ---
 
@@ -259,10 +318,10 @@ Agents reach providers only through the **ToolGateway**, which on every call:
 |---|---|---|---|---|---|
 | 1 | Command | text → `CommandIntent` / clarification | Haiku 5.5 | 2 | Produces intents. Never executes. |
 | 2 | Orchestrator & Policy | intents, results → task graph, transitions | DB | n/a | Deterministic. The only component that changes campaign state. |
-| 3 | Discovery | niche, geo → place_ids + in-memory candidates | Places | 3 | Field masks fixed in code (§5.1). No Places content persisted. |
-| 4 | Verification | in-memory candidate → `website_audits` | SerpApi, HTTP probe, DNS, Firecrawl (1 page) | 3 | SSRF guard. ≤ 2 SERP queries per prospect. |
+| 3 | Discovery | `CampaignParameters` → place_ids + in-memory candidates | `DiscoveryProvider` (Places gated; manual import) | 3 | Compliance gate (§3.7). Field masks fixed (§5.1). In-memory rating filter and missing-rating policy (§3.6). No Places content persisted. |
+| 4 | Verification | in-memory candidate → `website_audits` (evidence-based state, §3.5) | SerpApi, HTTP probe, DNS, Firecrawl (≤ 3 profile pages) | 3 | SSRF guard. ≤ 2 SERP queries per prospect. `NO_WEBSITE` only after every required check completes. |
 | 5 | Research | prospect → `research_facts`, contacts | SerpApi, Firecrawl, Haiku 5.5 | 2 | Crawl budget per prospect. Independent sources only. Quote-verified facts. |
-| 6 | Qualification | facts, audits → `lead_scores` | none | 0 | Pure function with a versioned rule set. No Places-derived inputs. |
+| 6 | Qualification | facts, audits → `lead_scores` | none | 0 | Pure function with a versioned rule set. No Places-derived inputs (no rating, no review count). `WEBSITE_UNKNOWN` scores 0 for website opportunity. |
 | 7 | Website Builder | verified facts → spec + source | Sonnet 5.5, Opus 5.5 (escalation), Storage | 2 per stage | Verified facts only. Writes only to scaffold paths. |
 | 8 | QA | site version → builds, reports | Sandbox, Playwright, Haiku 5.5 | ≤ 3 repair cycles | Then `requires_human_review`. |
 | 9 | Deployment | passed build → `deployments` | Cloudflare Pages API, HTTP probe | 3 | Preview project only. |
@@ -290,27 +349,84 @@ Every integration lives in `integrations/<name>/` with a typed adapter, config v
 explicit timeouts, retries with backoff and jitter (max 3, honouring `Retry-After`), error mapping,
 a usage hook, and contract and live tests.
 
-### 5.1 Google Places (New): field masks and SKUs
+### 5.0 Google API scope and terminology
 
-Checked on 2026-11-18 against Google's Text Search (New) and Place Details (New) field tables. The
-**highest-tier field in the mask sets the SKU for the whole request.** Masks are constants in code,
-with a unit test that maps each mask to its expected SKU, so a careless edit can't silently move
-a call to a more expensive tier.
+| Term | Meaning in JARVIS documents |
+|---|---|
+| **Google Maps Platform** | The overall Google platform: its Terms of Service, Service Specific Terms, billing, quotas, attribution policy and the Google Cloud project. Used only when talking about terms, billing or quotas |
+| **Google Places API (New)** | The **only** Google Maps Platform API JARVIS integrates. Provider ID `google_places`, adapter `integrations/google_places/`, key `GOOGLE_PLACES_API_KEY` |
+| **Google Maps Content** | Google's contractual term for data returned by Maps Platform APIs, including Places API responses. Used when describing storage and display restrictions |
 
-| Mask name | Endpoint | Fields | SKU | Used for |
-|---|---|---|---|---|
-| `DISCOVERY_ENTERPRISE` | Text Search | `places.id, places.displayName, places.formattedAddress, places.businessStatus, places.primaryType, places.types, places.websiteUri, places.nationalPhoneNumber, nextPageToken` | **Text Search Enterprise** (`websiteUri` and `nationalPhoneNumber` are Enterprise fields) | Discovery + first-pass verification, 1 request per ≤ 20 places |
-| `DISCOVERY_PRO` (fallback) | Text Search | as above, minus `websiteUri` and `nationalPhoneNumber` | Text Search Pro | Used if the Enterprise allowance is exhausted. Verification then relies on SERP only |
-| `IDS_ONLY` | Text Search | `places.id, nextPageToken` | Text Search Essentials (IDs Only) | Re-checking whether a place is still listed |
-| `DETAILS_DISPLAY` | Place Details | `id, displayName, formattedAddress, businessStatus, googleMapsUri` | **Place Details Pro** (`displayName`, `businessStatus` and `googleMapsUri` are Pro fields) | On-demand "Show Google Maps listing" in lead detail, with attribution |
-| `DETAILS_CONTACT` | Place Details | `DETAILS_DISPLAY` + `websiteUri, nationalPhoneNumber` | Place Details Enterprise | On-demand only, operator-initiated, capped |
+**Endpoints used (Places API New only):**
 
-Deliberately never requested: `rating`, `userRatingCount`, `regularOpeningHours`, `reviews`,
-`photos`. They raise the SKU, and using them for scoring or site content would mean creating
-content derived from Google Maps Content.
+| Endpoint | Purpose | Notes |
+|---|---|---|
+| `POST https://places.googleapis.com/v1/places:searchText` (Text Search) | **Primary.** Business discovery by category and location; dynamic `minRating` filter; retrieves `rating`, `userRatingCount`, `websiteUri` (whether a website is listed) and `businessStatus` in the same response | All discovery and filtering |
+| `GET https://places.googleapis.com/v1/places/{place_id}` (Place Details) | Secondary, optional: the on-demand Google Places listing panel only | Gated separately (`google_places_listing_display`) |
 
-Text Search returns at most 20 results per page and 60 per query. Large cities are split into
-location-bias tiles and niche synonyms to reach the target count.
+**Explicitly not integrated:** Maps JavaScript API, Maps Embed API, Maps Static API, Routes API
+(and the legacy Directions/Distance Matrix), Geocoding API, Places Autocomplete, Places photos,
+and Nearby Search (New). Text Search covers category + location queries, and the `minRating`
+parameter is documented for Text Search. There are no interactive maps, directions or navigation.
+The Google Cloud project enables only Places API (New), and the API key is restricted to it.
+
+**Other providers, unchanged:** SerpApi (Google Search engine) for search research and
+independent website verification. Firecrawl for website crawling and extraction.
+
+### 5.1 Google Places API (New): field masks and SKUs
+
+**Re-verified 2026-11-18** against Google's Text Search (New) page and its Place Data Fields
+(New) table **[confirmed]**. The **highest-tier field in the mask sets the SKU for the whole
+request.** Masks are code constants, and a unit test asserts each mask maps to its expected SKU.
+
+Per-field SKUs **[confirmed]**:
+
+| Field | Text Search SKU | Place Details SKU |
+|---|---|---|
+| `rating` | Enterprise | Enterprise |
+| `userRatingCount` | Enterprise | Enterprise |
+| `websiteUri` | Enterprise | Enterprise |
+| `nationalPhoneNumber` | Enterprise | Enterprise |
+| `displayName` | Pro | Pro |
+| `businessStatus` | Pro | Pro |
+| `googleMapsUri` | Pro | Pro |
+| `primaryType` | Pro | Pro |
+| `formattedAddress` | Pro | Essentials |
+| `types` | Pro | Essentials |
+| `attributions` | Essentials (IDs Only) | Essentials (IDs Only) |
+| `id` | Essentials (IDs Only) | Essentials (IDs Only) |
+| `nextPageToken` | Essentials (IDs Only) | n/a |
+
+Masks:
+
+| Mask | Endpoint | Fields | SKU | Used for | Gate scope |
+|---|---|---|---|---|---|
+| `DISCOVERY_ENTERPRISE` | Text Search | `places.id, places.attributions, places.displayName, places.formattedAddress, places.businessStatus, places.primaryType, places.websiteUri, places.nationalPhoneNumber, nextPageToken` (+ `places.rating` only when a minimum rating is set) | **Text Search Enterprise**. Adding `rating` doesn't change the SKU | discovery, rating filter, website pre-filter | prospect_selection |
+| `DISCOVERY_PRO` (fallback) | Text Search | as above, minus `websiteUri`, `nationalPhoneNumber`, `rating` | Text Search Pro | only when no rating filter is set and the Enterprise cap is reached. Website checks then rely on independent sources only | prospect_selection |
+| `IDS_ONLY` | Text Search | `places.id, places.attributions, nextPageToken` | Essentials (IDs Only) | checking whether a place is still listed | prospect_selection |
+| `LISTING_DISPLAY` | Place Details | `id, attributions, displayName, formattedAddress, businessStatus, googleMapsUri, rating, userRatingCount` | **Place Details Enterprise** (rating, userRatingCount) | live Google Places listing panel | listing_display |
+
+`minRating` is a request **parameter**, not a field. It has no SKU of its own and filters
+server-side within the same Text Search request **[confirmed: 0.0–5.0, 0.5 increments, rounded
+up]**. So the rating filter needs **no separate Place Details call per result**. The fields it
+needs (`rating`, plus `websiteUri` for the website pre-filter) all come back in the same Text
+Search Enterprise response.
+
+Never requested: `regularOpeningHours`, `reviews`, `photos`, `priceLevel`.
+
+**Pagination realities [confirmed]:** `pageSize` 1–20 (default 20). A query returns at most 60
+results across pages. Pages may hold fewer than `pageSize`. Results for identical requests
+aren't guaranteed to be consistent. Follow-up pages must repeat every parameter except
+`pageSize`/`pageToken`. `locationRestriction` (rectangle, categorical queries only) and
+`locationBias` (circle ≤ 50 km or rectangle) are mutually exclusive.
+`includePureServiceAreaBusinesses=true` returns businesses with no storefront, and those omit
+`formattedAddress`.
+**Unconfirmed:** whether a page that returns zero results is billed (we assume it is), and how
+`minRating` treats unrated places (we don't depend on it: §3.6).
+
+Reaching the target count: large cities are split into tiles of ≤ 60 results each, crossed with
+niche synonyms. Requests per campaign are planned with the yield model in
+[API_COST_MODEL §2](docs/API_COST_MODEL.md), not by assuming 20 useful results per request.
 
 ### 5.2 Other providers
 
@@ -356,7 +472,7 @@ is a user action, it is audited, and the UI shows the price.
 
 Full detail in [docs/DATABASE_SCHEMA.md](docs/DATABASE_SCHEMA.md).
 - About 30 tables. `agent_tasks` is both the queue and the execution record.
-- **No table has a column for Google Places content.** Places-derived data is limited to
+- **No table has a column for Google Places content, including rating and review count.** Places-derived data is limited to
   `place_refs.place_id` and an optional `place_refs.lat/lng` with `coords_expires_at` ≤ 30 days.
   A CI schema test fails if new columns match a denylist (`*_name` on `place_refs`,
   `formatted_address`, `rating`, …) on Places-linked tables.
@@ -373,7 +489,9 @@ Implemented as explicit transition tables. `transition()` writes the state chang
 
 **Campaign:** `draft → authorized → queued → discovering → verifying → researching → qualifying → building → qa → preview_deployed → outreach_authorized → completed`; plus `paused`, `cancelled`, `failed`, `requires_human_review` (both resume to a stored state). Stages outside the campaign's scope are skipped. In the combined discovery task, `discovering` and `verifying` overlap per page, and the campaign moves to `verifying` once every page task is done.
 
-**Prospect:** `discovered → identity_verified → website_verified → researched → qualified`, with `rejected` reachable from any non-terminal state.
+**Prospect:** `discovered → identity_verified → website_verified → researched → qualified`, with `rejected` reachable from any non-terminal state and `requires_human_review` for unconfirmed identity or `rating_unknown` (missing-rating policy `include_for_review`). `website_verified` means a persisted availability state other than `WEBSITE_UNKNOWN`.
+
+**Website availability (per prospect):** `WEBSITE_LISTED → WEBSITE_WORKING | WEBSITE_BROKEN | WEBSITE_UNKNOWN`, or (no listing) `→ NO_WEBSITE | WEBSITE_UNKNOWN`. `WEBSITE_UNKNOWN → re-verify → any state`. A `WEBSITE_LISTED` state whose only source is Google is resolved within the task and never persisted.
 
 **Website:** `queued → strategy → generating → building → qa → (repair → building)* → passed → deployed`; plus `failed`, `requires_human_review`, `expired`, `archived`.
 
@@ -472,7 +590,10 @@ More worker replicas, Batches for generation, a second VPS for builds, Supabase 
 
 1. VPS provider and size (recommended: CX23-class, 2 vCPU / 4 GB, ≤ $10/month).
 2. The model routing in §4.1 (Sonnet 5.5 as the main generation model, Opus 5.5 for escalation only).
-3. The Places compliance design (§3.3–3.4, §5.1), including that no-website prospects need an independent or operator-confirmed name and contact before they qualify.
+3. The Places data design (§3.3–3.6, §5.1), including that no-website prospects need an independent or operator-confirmed name and contact before they qualify.
+3a. **Compliance gate (blocker):** obtain written confirmation from Google, or a written opinion from qualified counsel, for the exact use in §3.7. Until then Places discovery, the rating filter and the listing panel stay disabled.
+3b. Whether to open `google_places_technical_testing` (capped adapter tests, no prospect records) before 3a is resolved.
+3c. The default `NO_WEBSITE_MIN_CONFIDENCE` (proposed 0.8) and the missing-rating policy pre-selection (proposed `exclude`).
 4. Deferring Groq.
 5. Voice in Phase 7.
 6. The preview-site policy: noindex, a non-affiliation banner, no logos or photos copied, 30-day expiry.

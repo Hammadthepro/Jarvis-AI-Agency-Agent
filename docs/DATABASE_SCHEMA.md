@@ -1,7 +1,9 @@
 # JARVIS — Database Schema
 
-Status: **Proposed, revision 2.** PostgreSQL 15+ on Supabase. The migrations in
+Status: **Proposed, revision 3.** PostgreSQL 15+ on Supabase. The migrations in
 `database/migrations/` will be the source of truth. This document describes intent.
+
+Revision 3: campaign rating parameters (`minimum_google_rating`, `missing_rating_policy`), the evidence-based `website_state` enum, a `compliance_approvals` table, and ratings/review counts added to the denylist.
 
 Revision 2: `places_cache` removed. Google-derived data is isolated in `place_refs`, which holds
 place_id plus optional lat/lng that expires within 30 days. Added `usage_counters`,
@@ -17,15 +19,15 @@ place_id plus optional lat/lng that expires within 30 days. Added `usage_counter
 - `owner_id uuid references auth.users(id)` on top-level rows. Children inherit ownership through `campaign_id`.
 - **Provenance** on every independently sourced value: `source_type`, `source_ref`, `retrieved_at`, `retention_policy`.
 
-## 2. Google Maps data boundary
+## 2. Google Places API data boundary (Google Maps Content)
 
 | Rule | Enforcement |
 |---|---|
 | Place IDs may be stored indefinitely | `place_refs.place_id` |
 | Lat/lng may be cached for at most 30 consecutive days | `place_refs.lat/lng` are nullable, with `coords_expires_at` checked as `≤ coords_fetched_at + 30 days`. A nightly job sets them to null. Default config: **don't store coordinates at all** (`PLACES_STORE_COORDINATES=false`) |
-| Names, addresses, phone, website, hours, ratings, reviews and photos from Places are never stored | No columns exist for them on Google-linked tables. Task `payload` and `result` JSON for Places-calling tasks are validated by Pydantic models that contain no Places fields, and the write is rejected otherwise. Logs redact Places response bodies |
+| Names, addresses, phone, website, hours, **`rating`, `userRatingCount`**, reviews and photos from Places are never stored. Neither is anything derived from rating per prospect (pass/fail flags, rating bands, scores) | No columns exist for them on Google-linked tables. Task `payload` and `result` JSON for Places-calling tasks are validated by Pydantic models that contain no Places fields, and the write is rejected otherwise. Logs redact Places response bodies |
 | Google-derived and independent data are kept separate | Google-derived data lives only in `place_refs`. Every business attribute lives in `research_facts` / `prospect_contacts` / `website_audits` with a non-Google `source_type`. `source_type = 'google_places'` is **not a valid value** in those tables (check constraint) |
-| Regression protection | A CI schema test introspects tables linked to `place_refs` and fails on columns matching a denylist (`name`, `display_name`, `formatted_address`, `address`, `phone`, `website`, `rating`, `review`, `hours`, `photo`) unless they're on an allow-list of independently sourced tables |
+| Regression protection | A CI schema test introspects tables linked to `place_refs` and fails on columns matching a denylist (`name`, `display_name`, `formatted_address`, `address`, `phone`, `website`, `rating`, `user_rating_count`, `review`, `stars`, `hours`, `photo`) unless they're on an allow-list of independently sourced tables |
 
 ## 3. Tables
 
@@ -55,7 +57,7 @@ place_id plus optional lat/lng that expires within 30 days. Added `usage_counter
 |---|---|---|
 | id, owner_id | | |
 | provider | text | `google_places`, `serp_api`, `firecrawl`, `anthropic`, `cloudflare`, `email` |
-| unit | text | e.g. `text_search_enterprise`, `text_search_pro`, `place_details_pro`, `place_details_enterprise`, `search`, `credit`, `usd_micros` |
+| unit | text | e.g. `text_search_enterprise`, `text_search_pro`, `place_details_enterprise`, `search`, `credit`, `usd_micros` |
 | period | `limit_period` | `day`, `month`, `campaign` |
 | cap | bigint | |
 | free_allowance | bigint null | for display. A cap above this needs `allow_paid=true` |
@@ -72,6 +74,21 @@ Reservation algorithm (one transaction): `select … for update` on every applic
 
 **scoring_rule_sets**: id, owner_id, version, rules jsonb, is_active (partial unique: one active per owner).
 
+### 3.1a Compliance approvals
+
+**compliance_approvals**
+| column | type | notes |
+|---|---|---|
+| id, owner_id | | |
+| scope | `compliance_scope` | `google_places_prospect_selection`, `google_places_listing_display`, `google_places_technical_testing`, `outreach_sending` (reserved) |
+| intended_use_text | text | must equal the versioned PR-4.1 statement for the scope |
+| intended_use_version | int | |
+| approver_type | `approver_type` | `google`, `legal_counsel` (`operator` allowed only for `google_places_technical_testing`) |
+| approver_name / document_ref | text | e.g. counsel name and opinion reference, or the Google case or email ID |
+| approved_at / review_by | timestamptz | the gate closes automatically after `review_by` |
+| revoked_at / revoked_by | | revocation closes the gate immediately |
+Partial unique: one active approval per `(owner_id, scope)`. Service role only, audited.
+
 ### 3.2 Commands, campaigns, tasks
 
 **commands**: id, owner_id, channel (`text`/`voice`), raw_text, parsed_intent jsonb, status (`received`, `parsed`, `needs_clarification`, `awaiting_confirmation`, `executed`, `rejected`), campaign_id.
@@ -83,6 +100,11 @@ Reservation algorithm (one transaction): `select … for update` on every applic
 | niche | text | |
 | location | jsonb | city/state/country; geo tiles are derived at run time |
 | target_count | int | 1–1000 |
+| discovery_provider | `discovery_provider` | `google_places`, `manual_import`, `licensed_business_data` |
+| minimum_google_rating | numeric(2,1) null | **operator input, no default.** Check `minimum_google_rating is null or (minimum_google_rating between 0.5 and 5.0 and minimum_google_rating * 2 = floor(minimum_google_rating * 2))`. Check: only with `discovery_provider = 'google_places'` |
+| missing_rating_policy | `missing_rating_policy` null | `exclude`, `include_for_review`. Check: not null **iff** `minimum_google_rating` is not null |
+| website_filter | `website_filter_value[]` | `NO_WEBSITE`, `WEBSITE_BROKEN`, `WEBSITE_WORKING_OUTDATED`, `ANY` |
+| include_service_area_businesses | boolean | |
 | scope | `campaign_stage[]` | authorised stages |
 | state / resume_state | `campaign_state` | |
 | authorized_at / authorized_by | | |
@@ -134,11 +156,12 @@ Indexes: partial claim index `(priority desc, run_after) where status in ('pendi
 | id, campaign_id | | |
 | place_id | text FK place_refs | |
 | state | `prospect_state` | |
+| review_reason | `review_reason` null | `identity_unconfirmed`, `discovery_filter_unconfirmed` (missing-rating policy `include_for_review`: Google had no rating to check). ⚖ This minimal flag is itself an open question (SECURITY_AND_COMPLIANCE §1.1). It holds no rating value |
 | business_category | text | **our** taxonomy, derived from the campaign niche, not Places types |
 | rejection_reason | text | |
 | deleted_at | | |
 Unique `(campaign_id, place_id)`. Cross-campaign dedupe: unique `(owner_id, place_id)` through `place_refs`.
-The display name and contact details shown in the dashboard come from `research_facts` (independent). Where none are verified yet, the UI shows "Unverified" plus an on-demand **"Show Google Maps listing"** action (live Place Details Pro call, attributed, never stored).
+The display name and contact details shown in the dashboard come from `research_facts` (independent). Where none are verified yet, the UI shows "Unverified" plus an on-demand **"Show Google Places listing"** action (live Place Details **Enterprise** call through `LISTING_DISPLAY`, gated by `google_places_listing_display`, attributed, never stored. The only place a Google rating is shown).
 
 **prospect_sources** (where independent evidence came from)
 | column | type | notes |
@@ -168,8 +191,13 @@ The display name and contact details shown in the dashboard come from `research_
 | column | type | notes |
 |---|---|---|
 | id, prospect_id, task_id | | |
-| status | `website_status` | `functioning`, `broken`, `outdated`, `none_found`, `unverified` |
-| url / final_url | text null | persisted only when our own probe confirms identity (`source_type = http_probe`). A Places `websiteUri` that fails the identity check isn't stored |
+| state | `website_state` | `WEBSITE_LISTED` (only when an independent source lists it), `WEBSITE_WORKING`, `WEBSITE_BROKEN`, `NO_WEBSITE`, `WEBSITE_UNKNOWN` |
+| reason | `website_reason` null | `nxdomain`, `connect_error`, `tls_error`, `http_4xx`, `http_5xx`, `parked`, `expired`, `identity_mismatch`, `insufficient_evidence`, `conflicting_evidence`, `verification_incomplete` |
+| quality | `website_quality` null | `modern`, `outdated`, `unassessed`. Only for `WEBSITE_WORKING` |
+| listing_sources | `listing_source[]` | `directory_page`, `social_page`, `serp_result`, `maps_hint` (`maps_hint` = a Google listing existed; the value isn't stored) |
+| checks | jsonb | `[{check, status: completed/failed/skipped, result}]`. `NO_WEBSITE` requires every required check `completed` (check constraint through a trigger) |
+| url / final_url | text null | persisted only when our own probe confirms identity (`source_type = http_probe`) or an independent source lists it. A Places-only `websiteUri` is never stored |
+| second_probe_at | timestamptz null | required for `WEBSITE_BROKEN` (≥ 10 min after the first) |
 | http_status, redirect_chain, tls_valid, dns_resolves | | |
 | identity_match_score | numeric(3,2) | |
 | quality_signals | jsonb | |
@@ -264,7 +292,16 @@ View `v_usage_reconciliation`: estimated vs reported per provider/period, with t
 `site_state`: queued, strategy, generating, building, qa, repair, passed, deployed, failed, requires_human_review, expired, archived
 `outreach_state`: draft, authorized, queued, sent, replied, follow_up, closed, suppressed, bounced, opted_out, failed
 `task_status`: pending, leased, running, retry_wait, succeeded, failed, cancelled, blocked
-`website_status`: functioning, broken, outdated, none_found, unverified
+`website_state`: WEBSITE_LISTED, WEBSITE_WORKING, WEBSITE_BROKEN, NO_WEBSITE, WEBSITE_UNKNOWN
+`website_reason`: nxdomain, connect_error, tls_error, http_4xx, http_5xx, parked, expired, identity_mismatch, insufficient_evidence, conflicting_evidence, verification_incomplete
+`website_quality`: modern, outdated, unassessed
+`website_filter_value`: NO_WEBSITE, WEBSITE_BROKEN, WEBSITE_WORKING_OUTDATED, ANY
+`listing_source`: directory_page, social_page, serp_result, maps_hint
+`discovery_provider`: google_places, manual_import, licensed_business_data
+`missing_rating_policy`: exclude, include_for_review
+`compliance_scope`: google_places_prospect_selection, google_places_listing_display, google_places_technical_testing, outreach_sending
+`approver_type`: google, legal_counsel, operator
+`review_reason`: identity_unconfirmed, discovery_filter_unconfirmed
 `fact_status`: verified, inferred, unknown, conflicting
 `source_type`: serp_result, official_website, firecrawl_page, directory_page, social_page, licence_register, dns, http_probe, manual
 `retention_policy`: indefinite, days_180, days_90, purge_on_reject
@@ -290,7 +327,7 @@ agent_tasks 1─* api_usage 1─* budget_ledger;  usage_limits ↔ usage_counter
 RLS is enabled on every table, with no default access.
 - `service_role` (API and worker, server-only key): bypasses RLS.
 - `authenticated`: `select` only, on rows owned through `owner_id` or `campaigns.owner_id`. No direct writes. All writes go through the API, so policy can't be bypassed.
-- Service role only (no `authenticated` policy): `place_refs`, `usage_counters`, `budget_ledger`, `api_usage`, `provider_usage_reports`, `suppression_list`, `sending_readiness`.
+- Service role only (no `authenticated` policy): `compliance_approvals`, `place_refs`, `usage_counters`, `budget_ledger`, `api_usage`, `provider_usage_reports`, `suppression_list`, `sending_readiness`.
 - `anon`: nothing.
 
 ## 7. Retention
@@ -299,7 +336,7 @@ RLS is enabled on every table, with no default access.
 |---|---|
 | `place_refs.place_id` | indefinite (permitted) |
 | `place_refs.lat/lng` | ≤ 30 days, off by default |
-| Any other Places content | **never persisted** |
+| Any other Places content, including rating and review count | **never persisted** |
 | SERP queries/results | 180 days |
 | Raw fetched pages (Storage) | 90 days. Extracted facts keep their quote and URL |
 | Facts for rejected prospects | 30 days after rejection |

@@ -1,6 +1,8 @@
 # JARVIS — System Diagrams
 
-Revision 2. Mermaid diagrams, which render on GitHub. Changes in this revision:
+Revision 3. Mermaid diagrams, which render on GitHub. Revision 3 adds: the Google Places API (New) Text Search as the only Google API, the compliance gate, the rating filter, and evidence-based website states.
+
+Revision 2 changes:
 - the VPS is a required component;
 - Workers handle edge handlers only;
 - Places content stays in memory only;
@@ -35,7 +37,7 @@ flowchart LR
   end
 
   subgraph EXT[External APIs]
-    GP[Google Places New]
+    GP[Google Places API New<br/>Text Search · Place Details<br/>gated]
     SE[SerpApi]
     FC[Firecrawl]
     CL[Claude<br/>Haiku · Sonnet · Opus]
@@ -52,7 +54,7 @@ flowchart LR
   W <--> DB
   W <--> ST
   W -- spawn --> SB
-  W --> GP
+  W -- compliance gate --> GP
   W --> SE
   W --> FC
   W --> CL
@@ -116,19 +118,24 @@ sequenceDiagram
   Pol-->>Op: confirmation card (units, est. cost, caps)
   Op->>API: Authorise
   API->>DB: campaign authorized then queued
-  loop each discovery page task (20 places max)
+  Pol->>DB: compliance gate google_places_prospect_selection
+  alt gate closed
+    Pol-->>Op: COMPLIANCE_BLOCKED (campaign stays draft, use manual_import)
+  else gate approved
+  loop each discovery page task (up to 20 places, 60 per query)
     Wk->>Pol: reserve 1 Text Search Enterprise unit
     alt cap would be exceeded
       Pol-->>Wk: BUDGET_BLOCKED (no request sent)
     else reserved
-      Wk->>GP: Text Search, DISCOVERY_ENTERPRISE mask
-      GP-->>Wk: places held in memory only
-      Wk->>Wk: dedupe by place_id, keep OPERATIONAL
-      Wk->>Wk: probe websiteUri hint (SSRF guard, identity match)
-      Wk->>SE: up to 2 searches when needed (hash-only query storage)
-      Wk->>DB: place_refs.place_id, website_audit, independent evidence
-      Wk->>Wk: discard Places data
+      Wk->>GP: places:searchText, DISCOVERY_ENTERPRISE mask, minRating 3.5
+      GP-->>Wk: places with rating, websiteUri, businessStatus (memory only)
+      Wk->>Wk: dedupe, OPERATIONAL, rating check, missing-rating policy
+      Wk->>Wk: probe listed site (SSRF guard, identity, second probe if failing)
+      Wk->>SE: required independent checks when no site is listed
+      Wk->>DB: place_id, availability state + checks + evidence
+      Wk->>Wk: discard Places data incl. rating
     end
+  end
   end
   loop top-N prospects
     Wk->>SE: research queries
@@ -140,7 +147,24 @@ sequenceDiagram
   DB-->>Op: progress via SSE
 ```
 
-## 4. Website production flow
+## 4. Website availability states
+
+```mermaid
+stateDiagram-v2
+  [*] --> WEBSITE_LISTED: a source lists a URL
+  [*] --> no_listing: no URL from any source
+  WEBSITE_LISTED --> WEBSITE_WORKING: responds, identity match
+  WEBSITE_LISTED --> WEBSITE_BROKEN: fails twice, at least 10 min apart
+  WEBSITE_LISTED --> no_listing: URL belongs to another business
+  WEBSITE_LISTED --> WEBSITE_UNKNOWN: checks incomplete
+  no_listing --> NO_WEBSITE: all required independent checks completed, confidence at threshold
+  no_listing --> WEBSITE_UNKNOWN: incomplete, weak or conflicting evidence
+  WEBSITE_UNKNOWN --> WEBSITE_LISTED: re-verify
+  WEBSITE_UNKNOWN --> no_listing: re-verify
+```
+`no_listing` is an in-task step, not a persisted state. A Google-only `WEBSITE_LISTED` is also resolved within the task.
+
+## 5. Website production flow
 
 ```mermaid
 stateDiagram-v2
@@ -162,7 +186,7 @@ stateDiagram-v2
   requires_human_review --> generating: operator approves retry
 ```
 
-## 5. Deployment and outreach flow
+## 6. Deployment and outreach flow
 
 ```mermaid
 sequenceDiagram

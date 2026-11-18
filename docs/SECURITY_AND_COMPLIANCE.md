@@ -1,8 +1,10 @@
 # JARVIS — Security & Compliance
 
-Status: **Proposed, revision 2.** This is an engineering interpretation of the relevant terms and
+Status: **Proposed, revision 3.** This is an engineering interpretation of the relevant terms and
 laws. It isn't legal advice. Items marked **⚖ Review** need your own check, or counsel's, against
 the current official text.
+
+Revision 3: a Places **compliance gate** with the intended use stated precisely; rating filter handling (ratings never persisted, shown only in the attributed listing panel); field masks re-verified, including `rating`, `userRatingCount` and `attributions`; SerpApi Maps engines removed as an "alternative".
 
 Revision 2: Places content is never persisted (only Place IDs and optional 30-day coordinates).
 Attribution rules are documented. Field masks are mapped to SKUs. Google billing protection is
@@ -13,6 +15,20 @@ authenticated-domain requirements. Drafts are always available.
 
 ## 1. Google Maps Platform: Places API (New)
 
+### 1.0 Compliance gate (blocker)
+
+**Intended use, stated precisely (PR-4.1):** use Google Places API (New) Text Search, with
+`minRating` and website-listing data, to find and filter US businesses by Google rating and
+website availability, in order to select potential website-development clients for commercial
+email outreach.
+
+- **Avoiding storage isn't treated as making this use compliant.** The storage rules in §1.1 are necessary, but they don't answer whether the use itself is permitted under the Google Maps Platform Terms of Service, the Service Specific Terms and the Acceptable Use Policy.
+- **Required before enabling:** written confirmation from Google (for example through Google Maps Platform support or sales), **or** a written opinion from qualified legal counsel, covering this exact use. It's recorded in `compliance_approvals` (scope `google_places_prospect_selection`) with the approver, document reference, intended-use text version and review date.
+- **Until approved:** Places discovery, the rating filter and Places-based qualification are **disabled**. The ToolGateway returns `COMPLIANCE_BLOCKED` before any request. The live listing panel needs its own scope (`google_places_listing_display`). Capped technical adapter tests need `google_places_technical_testing` (an operator decision, with no prospect records created).
+- **Provider replaceability:** discovery runs through `DiscoveryProvider`. `manual_import` (an operator-supplied list the operator has the right to use) works now. `licensed_business_data` can be added later under its own licence. **SerpApi's Google Maps or local engines return Google Maps content and fall under the same question. They aren't a workaround.**
+- The rating-filter feature stays in the product design (PR-2) and turns on with the gate.
+
+
 ### 1.1 Storage rules (from Google's Places API policies page, checked 2026-11-18)
 
 | Google rule | JARVIS enforcement |
@@ -21,8 +37,8 @@ authenticated-domain requirements. Drafts are always available.
 | **Place IDs are exempt from caching limits and may be stored indefinitely.** | `place_refs.place_id` is stored. |
 | Latitude/longitude may be cached for **up to 30 consecutive calendar days**, then deleted. | Off by default. If enabled, there's a DB check constraint for ≤ 30 days and a nightly purge. |
 | Don't copy or save business names, addresses or user reviews. | No columns exist for them on Google-linked tables. A CI schema denylist test enforces this. Pydantic payload models for Places-calling tasks contain no Places fields. Logs redact Places response bodies. |
-| Recommended: request only the fields you need, store the place ID, and fetch fresh details when a user interacts with the place. | Fixed field masks (§1.3). The lead detail "Show Google Maps listing" action makes a live Place Details Pro call, shown with attribution and never stored. |
-| Don't create new content from Google Maps Content. | Scores, generated sites and outreach use only independently sourced facts. Ratings and reviews are never requested. The Website Builder, Outreach and Qualification agents can't call the Places adapter (ToolGateway allow-list). |
+| Recommended: request only the fields you need, store the place ID, and fetch fresh details when a user interacts with the place. | Fixed field masks (§1.3). The lead detail "Show Google Places listing" action makes a live Place Details **Enterprise** call (it includes rating and review count), shown with attribution, `Cache-Control: no-store`, never stored. |
+| Don't create new content from Google Maps Content. | Scores, generated sites and outreach use only independently sourced facts. **`rating` and `userRatingCount` are requested only to apply the operator's filter in memory, and to show the live listing panel. They're never persisted, scored, banded, logged or used in site or outreach content.** Reviews and photos are never requested. The Website Builder, Outreach and Qualification agents can't call the Places adapter (ToolGateway allow-list). |
 
 **Independent sourcing.** Business details that JARVIS keeps (name, phone, website, services) must
 come from non-Google-Maps sources: the business's own website, other pages fetched by Firecrawl,
@@ -31,14 +47,17 @@ may be used in memory as *search keys* to find those sources, but they aren't wr
 query strings built from Places values are stored only as a template ID plus a hash.
 
 **⚖ Review: open questions**
-1. Whether using Places search results to choose businesses for commercial outreach is consistent with the current Maps Platform Terms and Service Specific Terms. This is the biggest compliance dependency in the product. The Discovery adapter is swappable: alternatives are SerpApi's local engines (subject to SerpApi's terms) or a licensed business-data provider.
+1. **(Blocker, §1.0)** Whether the precise intended use is permitted. Unresolved. Needs Google or counsel.
+1a. Whether campaign membership itself (a prospect's place_id kept in a campaign whose parameter was "rating ≥ 3.5") counts as a derived record of rating data. JARVIS stores the operator's parameter, never the rating, but counsel should confirm this.
+1b. Whether the `review_reason = discovery_filter_unconfirmed` flag (set when Google had no rating, under the `include_for_review` policy) is acceptable. If not, `include_for_review` is removed and only `exclude` remains.
 2. Whether sending a Places-derived business name to SerpApi as a search query counts as redistribution. We minimise this (name + city only, no addresses) and store only a hash.
 3. Whether persisting a website URL that we independently confirm by fetching the site (first hinted by Places `websiteUri`) is acceptable. We store it only after our own probe confirms identity, with `source_type = http_probe`, and record only that a Maps hint was used.
 
 ### 1.2 Attribution and display requirements
 
-These apply whenever the dashboard shows Places content (the live "Show Google Maps listing"
-panel; Places content is never shown anywhere else):
+These apply whenever the dashboard shows Places content. That happens only in the live
+`<GooglePlacesListingPanel>`, which is the **only** place a Google rating or review count is shown.
+Generated sites, outreach, exports, reports and the leads table never show them:
 
 | Requirement | Implementation |
 |---|---|
@@ -48,29 +67,43 @@ panel; Places content is never shown anywhere else):
 | Text attribution: exact capitalisation, not wrapped, not translated, `translate="no"`, Roboto or sans-serif fallback, weight 400, colour white, #1F1F1F or #5E5E5E, 12–16 sp | Component styles fixed to these values. Visual regression test |
 | Never remove, hide, obscure or alter attribution | The panel can't render without the attribution component (a type-level requirement) |
 | Third-party attributions supplied in the response must be shown, and "Google Maps" alone isn't enough when they exist | The panel renders any `attributions` returned |
-| Visually separate Places content from other content (border, background, whitespace), with attribution in the same container near the top or bottom | A distinct bordered card labelled "From Google Maps", separate from the independently verified data |
+| Visually separate Places content from other content (border, background, whitespace), with attribution in the same container near the top or bottom | A distinct bordered card labelled "Google Maps" (Google's required attribution wording; the data comes from the Places API), separate from the independently verified data |
+| Rating and review count shown as Google Maps content | Shown only inside the attributed panel, as "Google rating 4.3 (127)", next to the `googleMapsUri` link. Not sortable, filterable or exportable. Not copied into other views |
 | Reviews/photos need author attribution and links | Not applicable: we never request reviews or photos |
-| `googleMapsUri` link lets the user view the place on Google Maps | Included in the Pro mask and shown as "View on Google Maps" |
+| `googleMapsUri` link lets the user view the place on Google Maps | Included in the `LISTING_DISPLAY` mask and shown as "View on Google Maps" |
 
 ### 1.3 Field masks and billing SKUs
 
-Confirmed against Google's Text Search (New) and Place Details (New) field tables. The
-highest-tier field sets the SKU for the whole request.
+**Re-verified 2026-11-18** against Google's Text Search (New) page and Place Data Fields (New)
+table. The highest-tier field sets the SKU for the whole request.
 
-| Mask | Endpoint | Fields | SKU |
-|---|---|---|---|
-| `DISCOVERY_ENTERPRISE` | Text Search | id, displayName, formattedAddress, businessStatus, primaryType, types, websiteUri, nationalPhoneNumber, nextPageToken | **Enterprise** (websiteUri, nationalPhoneNumber) |
-| `DISCOVERY_PRO` | Text Search | id, displayName, formattedAddress, businessStatus, primaryType, types, nextPageToken | **Pro** |
-| `IDS_ONLY` | Text Search | id, nextPageToken | **Essentials (IDs Only)** |
-| `DETAILS_DISPLAY` | Place Details | id, displayName, formattedAddress, businessStatus, googleMapsUri | **Pro** (displayName, businessStatus, googleMapsUri. formattedAddress alone would be Essentials) |
-| `DETAILS_CONTACT` | Place Details | DETAILS_DISPLAY + websiteUri, nationalPhoneNumber | **Enterprise** |
+| Field | Text Search SKU | Place Details SKU |
+|---|---|---|
+| `rating` | Enterprise | Enterprise |
+| `userRatingCount` | Enterprise | Enterprise |
+| `websiteUri` | Enterprise | Enterprise |
+| `displayName` | Pro | Pro |
+| `businessStatus` | Pro | Pro |
+| `attributions` | Essentials (IDs Only) | Essentials (IDs Only) |
 
-Never requested: rating, userRatingCount, regularOpeningHours (Enterprise), reviews/photos
-(Enterprise + Atmosphere). A unit test asserts mask → SKU for every constant.
+| Mask | Endpoint | Fields | SKU | Gate scope |
+|---|---|---|---|---|
+| `DISCOVERY_ENTERPRISE` | Text Search | `places.id, places.attributions, places.displayName, places.formattedAddress, places.businessStatus, places.primaryType, places.websiteUri, places.nationalPhoneNumber, nextPageToken` (+ `places.rating` when a minimum rating is set) | **Enterprise** | prospect_selection |
+| `DISCOVERY_PRO` | Text Search | `places.id, places.attributions, places.displayName, places.formattedAddress, places.businessStatus, places.primaryType, nextPageToken` | **Pro** | prospect_selection |
+| `IDS_ONLY` | Text Search | `places.id, places.attributions, nextPageToken` | **Essentials (IDs Only)** | prospect_selection |
+| `LISTING_DISPLAY` | Place Details | `id, attributions, displayName, formattedAddress, businessStatus, googleMapsUri, rating, userRatingCount` | **Enterprise** | listing_display |
+
+`minRating` is a Text Search request parameter (0.0–5.0, 0.5 increments, rounded up), applied
+server-side within the same request. **No per-result Place Details call is needed to filter by
+rating.** How `minRating` treats unrated places isn't documented, so JARVIS re-checks every
+result in memory and applies its explicit missing-rating policy.
+Never requested: `regularOpeningHours`, `priceLevel`, `reviews`, `photos`. A unit test asserts
+mask → SKU for every constant.
 
 ### 1.4 Billing protection
 
 **Google Cloud budget alerts don't cap spending. They only notify.** Controls:
+0. **Compliance gate:** no request at all while the relevant scope is closed.
 1. **App-level hard stop (primary):** before every Places request, the ToolGateway reserves one unit on the per-SKU daily and monthly counters and the campaign counter, under a row lock. If any cap would be exceeded, the request is **not sent** (`BUDGET_BLOCKED`). Default caps sit below the free allowances.
 2. **Provider-side hard stop:** Cloud Console → Google Maps Platform → Quotas → per-day request limits on the Text Search and Place Details methods, set *below* the app caps, because quota enforcement has some latency.
 3. **Warnings:** Cloud Billing budget alerts at $1 and $5, and an in-app alert at 80% of any cap.

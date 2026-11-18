@@ -1,6 +1,8 @@
 # JARVIS — API Cost Model
 
-Status: **Proposed, revision 2.** Prices researched 2026-11-18.
+Status: **Proposed, revision 3.** Prices researched 2026-11-18. Field and SKU mapping re-verified 2026-11-18.
+
+Revision 3: Places estimates now use a **yield model** based on confirmed pagination limits, not the assumption of 20 useful results per request. `NO_WEBSITE` and rating-filtered campaigns cost far more SERP and Firecrawl usage than revision 2 assumed. The listing panel is now a Place Details Enterprise call (it shows the rating). All Places spend depends on the compliance gate.
 
 Revision 2: VPS is now a mandatory recurring cost. The domain was removed from the mandatory
 budget. Claude routing changed (Haiku / Sonnet, with Opus for escalation only). Places costs were
@@ -23,30 +25,53 @@ needs an explicit, audited `allow_paid` change.
 
 ## 1. Provider reference
 
-### 1.1 Google Maps Places API (New)
+### 1.1 Google Places API (New)  (a Google Maps Platform API)
+
+**Only usable after the compliance gate is approved (ARCHITECTURE §3.7).** Until then, Places spend is $0 because no Places calls are made.
 
 Free monthly allowance per SKU, in place of the old $200 credit **[V]**. The highest-tier field in
-the field mask sets the SKU **[V]**. Field-to-SKU mapping confirmed from Google's Text Search (New)
-and Place Details (New) documentation **[V]**.
+the mask sets the SKU **[V]**. Per-field SKUs re-verified on Google's Place Data Fields table
+**[V]**: `rating`, `userRatingCount`, `websiteUri` and `nationalPhoneNumber` are Enterprise;
+`displayName` and `businessStatus` are Pro; `attributions` and `id` are Essentials (IDs Only).
 
 | SKU | Free / month | Price per 1,000 beyond free | JARVIS mask |
 |---|---|---|---|
 | Text Search Essentials (IDs Only) | unlimited **[S]** | $0 | `IDS_ONLY` |
 | Text Search Pro | 5,000 **[V]** | ≈ $32 **[S]** | `DISCOVERY_PRO` (fallback) |
-| Text Search Enterprise | 1,000 **[V]** | ≈ $35 **[S]** | `DISCOVERY_ENTERPRISE` (primary) |
-| Place Details Pro | 5,000 **[V/S]** | ≈ $17 **[S/E]** | `DETAILS_DISPLAY` (on demand) |
-| Place Details Enterprise | 1,000 **[V]** | ≈ $20 **[S/E]** | `DETAILS_CONTACT` (on demand, rare) |
+| Text Search Enterprise | 1,000 **[V]** | ≈ $35 **[S]** | `DISCOVERY_ENTERPRISE` (primary, incl. rating) |
+| Place Details Enterprise | 1,000 **[V]** | ≈ $20 **[S/E]** | `LISTING_DISPLAY` (on demand, shows rating) |
 
-Text Search is billed **per request**, and each request returns up to 20 places **[V]**. Discovery
-therefore uses one Enterprise request per page of 20 results, instead of a Details call per place.
+`minRating` is a request parameter, applied server-side inside the same Text Search request
+**[V]**. Rating, website and phone all come back in that one Enterprise response **[V]**, so
+**there is no per-result Place Details call** for filtering.
 
-Per 100 qualified-candidate prospects: about 200 raw results are needed after filtering for
-non-operational listings, duplicates and off-niche results, plus overhead for splitting large
-cities into tiles. That's **≈ 12 Text Search Enterprise requests [E]**.
-**Free capacity: ≈ 8,000 prospects/month at $0.** Paid equivalent: ≈ $0.42 per 100 prospects.
+#### Yield model (requests needed per 100 prospects) [E unless marked]
 
-Default caps (`usage_limits`): Text Search Enterprise 900/month, 60/day. Details Pro 300/month.
-Details Enterprise 50/month. The Google Cloud per-day quota is set below these (§3).
+Confirmed constraints: ≤ 20 results per request, ≤ 60 per query across pages **[V]**. Pages can
+hold fewer results, and identical requests may return different results **[V]**. Zero-result
+requests are assumed to be billed (unconfirmed).
+
+| Symbol | Meaning | Assumption |
+|---|---|---|
+| R | average places actually returned per request (≤ 20) | 15 without `minRating`. **12 with `minRating`** (server-side filtering thins pages) |
+| d | share operational, in-niche, not duplicate | 0.70 |
+| u | share passing the in-memory rating check or kept as unrated under `include_for_review` (only when `minRating` isn't sent) | 0.75 |
+| w | share with no listed website anywhere (`NO_WEBSITE` candidates) | **0.20 (highly uncertain; varies by niche and city; measured in Phase 4)** |
+| v | share of no-listing candidates confirmed `NO_WEBSITE` after the independent checks | 0.60 |
+
+Requests ≈ `N / (R × d × [u] × [w × v])`. Every query is capped at 3 pages (60 results), so a campaign needs ≥ requests ÷ 3 distinct tile × synonym queries.
+
+| Campaign type (N = 100) | Requests | Distinct queries | Within the 900/month cap? |
+|---|---|---|---|
+| Any website status, no rating | ≈ 10 | ≥ 4 | yes (≈ 9,000 prospects/month) |
+| Min rating, policy `exclude` | ≈ 12 | ≥ 4 | yes |
+| `NO_WEBSITE`, no rating | ≈ 80 | ≥ 27 | yes (≈ 1,100/month) |
+| `NO_WEBSITE` + min rating, `exclude` | ≈ 100 | ≥ 34 | yes (≈ 900/month) |
+| `NO_WEBSITE` + min rating, `include_for_review` | ≈ 106 | ≥ 36 | yes (≈ 850/month) |
+
+At paid rates, 100 requests ≈ $3.50. Default caps (`usage_limits`): Text Search Enterprise
+900/month, 60/day. Listing panel (Details Enterprise) 100/month. The Google Cloud per-day quota is
+set below these (§3). Phase 4 replaces the assumptions with measured values per niche.
 
 ### 1.2 SerpApi
 
@@ -57,9 +82,12 @@ Details Enterprise 50/month. The Google Cloud per-day quota is set below these (
 | Developer | $75 | 5,000 **[S]** | optional |
 
 There's no overage billing: requests fail at the cap. Cached repeats are free **[S]**.
-Per 100 prospects: verification ≈ 100 searches (≈ 50–60 prospects without a confirmed Maps website,
-≤ 2 queries each) + research of the top 20 at 2 each = 40. **≈ 140 searches [E].**
-Free capacity ≈ 175 prospects/month. Default cap: 240/month, 45/hour.
+
+Per 100 prospects **[E]**:
+- **Any-status campaigns:** verification ≈ 100 searches (prospects without a confirmed listed site, ≤ 2 queries each) + research of the top 20 at 2 each = **≈ 140**. Free capacity ≈ 175 prospects/month.
+- **`NO_WEBSITE` campaigns:** ≈ 167 candidates (100 ÷ v) × 2 required queries = 333, plus research of 40 = **≈ 375**. **The free 250/month covers only ≈ 65 confirmed no-website prospects.** "Find 100 plumbers … no website" needs either the optional Starter plan or two months of free quota. JARVIS blocks at the cap. It doesn't charge.
+
+Default cap: 240/month, 45/hour.
 
 ### 1.3 Firecrawl
 
@@ -70,9 +98,12 @@ Free capacity ≈ 175 prospects/month. Default cap: 240/month, 45/hour.
 
 It returns HTTP 402 when credits run out. We use plain scrapes (≈ 1 credit/page) and run
 extraction with Haiku.
-Per 100 prospects: identity scrapes ≈ 20, independent identity pages for no-website prospects in
-the top-20 ≈ 30, research crawls of functioning sites ≈ 50. **≈ 100 credits [E].** Free capacity
-≈ 1,000 prospects/month. Default cap: 950/month.
+
+Per 100 prospects **[E]**:
+- **Any-status:** ≈ 100 credits.
+- **`NO_WEBSITE`:** ≈ 167 candidates × ≈ 1.5 independent profile pages (PR-3.3 check 2, and independent identity) = 250, plus research 40 = **≈ 290 credits**. Free capacity ≈ 340 no-website prospects/month.
+
+Default cap: 950/month.
 
 ### 1.4 Claude API
 
@@ -149,13 +180,16 @@ Drafts work without any email setup.
 
 ### 2.1 Per 100 prospects (discover → verify → research top 20 → score)
 
-| Item | Within free tiers | At paid rates |
-|---|---|---|
-| Places (≈ 12 Text Search Enterprise) | $0 | ≈ $0.42 |
-| SerpApi (≈ 140) | $0 (≤ 250/month) | ≈ $3.50 (Starter effective $0.025) |
-| Firecrawl (≈ 100 credits) | $0 | ≈ $0.38 |
-| Claude Haiku | ≈ $0.20 | ≈ $0.20 |
-| **Total** | **≈ $0.20** | **≈ $4.50** |
+| Item | Any-status, within free | Any-status, paid rates | `NO_WEBSITE` + rating, within free | `NO_WEBSITE` + rating, paid rates |
+|---|---|---|---|---|
+| Places Text Search Enterprise | ≈ 10 req → $0 | ≈ $0.35 | ≈ 100 req → $0 | ≈ $3.50 |
+| SerpApi | ≈ 140 → $0 | ≈ $3.50 | ≈ 375 → **over free 250** | ≈ $9.40 (Starter effective $0.025) |
+| Firecrawl | ≈ 100 → $0 | ≈ $0.38 | ≈ 290 → $0 | ≈ $1.10 |
+| Claude Haiku (extraction) | ≈ $0.20 | ≈ $0.20 | ≈ $0.30 | ≈ $0.30 |
+| **Total** | **≈ $0.20** | **≈ $4.40** | **≈ $0.30 + SerpApi plan** | **≈ $14.30** |
+
+With `manual_import` discovery (before the Places gate is approved) the Places row is $0 and the
+other rows are unchanged.
 
 ### 2.2 Per generated website
 | Item | Cost |
@@ -171,7 +205,7 @@ Drafts work without any email setup.
 
 | Provider | App-level hard stop (before the request) | Provider-side hard stop | Warning only |
 |---|---|---|---|
-| Google Places | `usage_limits` per SKU/day/month (below the free allowance) + per-campaign caps | **Cloud Console quota:** per-day request limits on `SearchText` (e.g. 50/day) and `GetPlace` (e.g. 20/day), below the app caps to allow for enforcement lag | Cloud Billing budget alerts at $1 / $5. **Alerts don't cap spend** |
+| Google Places | **compliance gate** (no request while closed) + `usage_limits` per SKU/day/month (below the free allowance) + per-campaign caps | **Cloud Console quota:** per-day request limits on `SearchText` (e.g. 50/day) and `GetPlace` (e.g. 20/day), below the app caps to allow for enforcement lag | Cloud Billing budget alerts at $1 / $5. **Alerts don't cap spend** |
 | SerpApi | monthly and hourly caps below the plan limit | plan limit (no overage) | 80% alert |
 | Firecrawl | monthly credit cap | plan credits (auto-recharge **off**) | 80% alert |
 | Claude | per-call `max_tokens` → worst-case reservation, per-site cap, daily and monthly caps, Opus escalation caps | Console workspace spend limit | 80% alert |
@@ -195,23 +229,25 @@ Usage display: the Activity → Costs view shows **Estimated (JARVIS ledger)** a
 | Reply-classification eval | Haiku | ≈ $0.05 |
 | Website builder prompt development (~20 iterative builds) | Sonnet/Opus | ≈ $16 |
 | Cross-niche diversity dataset run (12 sites, plan §Testing) | Sonnet/Opus | ≈ $10 |
-| Capped live integration tests (all phases) | Places ≤ 30 req, SerpApi ≤ 60, Firecrawl ≤ 60, Claude ≤ $3, Cloudflare ≤ 20 deploys | ≈ $3 (Places/SerpApi/Firecrawl within free) |
+| Capped live integration tests (all phases) | Places ≤ 10 req (only if `google_places_technical_testing` is approved; otherwise 0), SerpApi ≤ 60, Firecrawl ≤ 60, Claude ≤ $3, Cloudflare ≤ 20 deploys | ≈ $3 (Places/SerpApi/Firecrawl within free) |
 | **Development total** | | **≈ $29** |
 
 ---
 
 ## 5. Monthly operating scenarios (after development)
 
+Prospects here are `NO_WEBSITE`-filtered (the core product use), because that's the most
+expensive case. Places costs apply only after the gate is approved. Before that, discovery is
+`manual_import`.
+
 | Scenario | Volume | VPS (mand.) | Claude (mand.) | Places | SerpApi | Firecrawl | Supabase | Email | **Mandatory** | **Optional** |
 |---|---|---|---|---|---|---|---|---|---|---|
-| A. Pilot | 150 prospects, 5 sites | $10 | ≈ $5 | $0 | $0 (free) | $0 | $0 | $0 (drafts) | **≈ $15** | $0 |
-| B. Working | 500 prospects, 25 sites | $10 | ≈ $25 | $0 | Starter $25 | $0 | $0 | $0 | **≈ $35** | ≈ $25 |
-| C. Growth | 2,000 prospects, 100 sites | $15–20 | ≈ $98 | $0 | Developer $75 | Hobby $19 | Pro $25 (recommended) | $0 (Resend free) + domain ≈ $1/mo | **≈ $113–118** | ≈ $120 |
+| A. Pilot | 50 no-website prospects, 5 sites | $10 | ≈ $5 | $0 (≈ 50 req) | $0 (≈ 190, free) | $0 (≈ 145) | $0 | $0 (drafts) | **≈ $15** | $0 |
+| B. Working | 250 no-website prospects, 25 sites | $10 | ≈ $25 | $0 (≈ 250 req) | Starter $25 (≈ 940) | $0 (≈ 725) | $0 | $0 | **≈ $35** | ≈ $25 |
+| C. Growth | 1,000 no-website prospects, 100 sites | $15–20 | ≈ $100 | ≈ $4 beyond the free 900 (needs `allow_paid`) | Developer $75 (≈ 3,750) | Hobby $19 (≈ 2,900) | Pro $25 (recommended) | $0 + domain ≈ $1/mo | **≈ $115–120** | ≈ $125 |
 
-Claude figures include +20% for retries. Without the optional SerpApi plan, scenario B is limited
-to about 175 prospects/month by the free 250 searches. The app blocks at the cap; it doesn't charge.
-
----
+Claude figures include +20% for retries. Without the optional SerpApi plan, the free tier limits
+throughput to about 65 confirmed no-website prospects a month.
 
 ## 6. Final $100 budget breakdown (initial period)
 
@@ -221,15 +257,15 @@ to about 175 prospects/month by the free 250 searches. The app blocks at the cap
 |---|---|---|
 | VPS, month 1 | $10 | recurring $10/month after that |
 | Claude API credits, development and testing | $29 | §4 |
-| Claude API credits, first pilot campaign | $6 | Scenario A (5 sites + research) |
-| Google Places / SerpApi / Firecrawl / Cloudflare / Supabase / LiveKit / GitHub | $0 | free tiers. App caps below each allowance. Google requires a billing account on file |
+| Claude API credits, first pilot campaign | $6 | Scenario A (5 sites + research). Uses `manual_import` discovery until the Places gate is approved |
+| Google Places / SerpApi / Firecrawl / Cloudflare / Supabase / LiveKit / GitHub | $0 | free tiers. App caps below each allowance. Places isn't called until the compliance gate (or the technical-testing scope) is approved. Google requires a billing account on file before any Places call |
 | **Mandatory total** | **$45** | |
 
 ### 6.2 Optional (only with your explicit approval, never automatic)
 
 | Item | Amount | Trigger |
 |---|---|---|
-| SerpApi Starter | $25/month | a real campaign is blocked by the 250-search cap |
+| SerpApi Starter | $25/month | a real campaign is blocked by the 250-search cap (a `NO_WEBSITE` campaign above ≈ 65 prospects/month) |
 | Firecrawl Hobby | $19/month | 1,000 credits/month isn't enough |
 | Supabase Pro | $25/month | regular production use (removes the pause, adds managed backups) |
 | Sending domain | ≈ $10–12/year | you want outreach to send, and don't already have a domain |
