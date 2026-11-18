@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink-950: #07080c;
+  --color-ink-900: #0c0e14;
+  --color-ink-850: #10131b;
+  --color-ink-800: #151924;
+  --color-ink-700: #1f2533;
+  --color-ink-600: #2c3445;
+  --color-ink-500: #4a5468;
+  --color-ink-400: #7a849a;
+  --color-ink-300: #a4adc0;
+  --color-ink-200: #c9cfdb;
+  --color-ink-100: #e7eaf1;
+  --color-signal-500: #6d8bff;
+  --color-signal-400: #8aa2ff;
+  --color-signal-300: #b0c0ff;
+  --color-ok-500: #35c28b;
+  --color-warn-500: #f0b04a;
+  --color-bad-500: #f0616d;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+
+html, body, #root { height: 100%; }
+body { font-family: var(--font-sans); -webkit-font-smoothing: antialiased; background: var(--color-ink-950); }
+::selection { background: color-mix(in oklab, var(--color-signal-500) 40%, transparent); }
+.hairline { border-color: color-mix(in oklab, var(--color-ink-600) 60%, transparent); }
+.glow { box-shadow: 0 0 0 1px color-mix(in oklab, var(--color-signal-500) 35%, transparent), 0 8px 40px -12px color-mix(in oklab, var(--color-signal-500) 45%, transparent); }
+.scroll-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+.scroll-thin::-webkit-scrollbar-thumb { background: var(--color-ink-700); border-radius: 8px; }

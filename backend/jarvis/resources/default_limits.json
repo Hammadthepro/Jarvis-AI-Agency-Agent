@@ -1,0 +1,15 @@
+{
+  "notes": "Seeded per workspace at creation. Operator-editable in Settings > Usage & cost. Unit caps default BELOW each provider's free allowance with allow_paid=false. Final financial caps are an operator decision.",
+  "limits": [
+    {"scope": "global", "provider": null, "unit": "usd_micros", "period": "day", "cap": 5000000},
+    {"scope": "global", "provider": null, "unit": "usd_micros", "period": "month", "cap": 35000000},
+    {"scope": "provider", "provider": "google_places", "unit": "text_search_enterprise", "period": "month", "cap": 900, "free_allowance": 1000},
+    {"scope": "provider", "provider": "google_places", "unit": "text_search_enterprise", "period": "day", "cap": 60, "free_allowance": 1000},
+    {"scope": "provider", "provider": "google_places", "unit": "place_details_enterprise", "period": "month", "cap": 100, "free_allowance": 1000},
+    {"scope": "provider", "provider": "serp_api", "unit": "search", "period": "month", "cap": 240, "free_allowance": 250},
+    {"scope": "provider", "provider": "firecrawl", "unit": "credit", "period": "month", "cap": 950, "free_allowance": 1000},
+    {"scope": "provider", "provider": "anthropic", "unit": "usd_micros", "period": "month", "cap": 35000000}
+  ],
+  "campaign_default_cap_micros": 5000000,
+  "site_default_cap_micros": 2000000
+}

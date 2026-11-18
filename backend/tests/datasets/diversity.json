@@ -1,0 +1,590 @@
+[
+ {
+  "campaign": "D1",
+  "seed": "diversity-0",
+  "niche": "plumbing",
+  "city": "Houston",
+  "state": "TX",
+  "business_name": "Bayou City Plumbing Co",
+  "phone": "7135550142",
+  "content": {
+   "meta_title": "Bayou City Plumbing Co | Houston",
+   "meta_description": "Call a local plumber who explains the fix before the work starts.",
+   "eyebrow": "Plumbing \u00b7 Houston",
+   "headline": "Fast answers for Houston plumbing problems",
+   "subheadline": "Call a local plumber who explains the fix before the work starts.",
+   "primary_cta": "Call now",
+   "services_heading": "Services",
+   "services": [
+    {
+     "name": "Drain cleaning",
+     "description": "Drain cleaning for Houston and Harris County."
+    },
+    {
+     "name": "Water heater repair",
+     "description": "Water heater repair for Houston and Harris County."
+    },
+    {
+     "name": "Leak detection",
+     "description": "Leak detection for Houston and Harris County."
+    }
+   ],
+   "about_heading": "About Bayou City Plumbing Co",
+   "about": [
+    "Bayou City Plumbing Co works across Houston and Harris County with a warm approach."
+   ],
+   "service_area": "Houston and Harris County",
+   "service_area_short": "Houston and Harris County",
+   "faq": [
+    {
+     "q": "Where do you work?",
+     "a": "Houston and Harris County"
+    }
+   ],
+   "cta_heading": "Ready when you are",
+   "cta_body": "Call to talk it through.",
+   "email": null,
+   "address": null,
+   "hours": null
+  }
+ },
+ {
+  "campaign": "D1",
+  "seed": "diversity-1",
+  "niche": "plumbing",
+  "city": "Houston",
+  "state": "TX",
+  "business_name": "Heights Pipe & Drain",
+  "phone": "7135550143",
+  "content": {
+   "meta_title": "Heights Pipe & Drain | Houston",
+   "meta_description": "Repiping and sewer work for older Heights homes, scheduled around your day.",
+   "eyebrow": "Plumbing \u00b7 Houston",
+   "headline": "Old-house plumbing, handled carefully",
+   "subheadline": "Repiping and sewer work for older Heights homes, scheduled around your day.",
+   "primary_cta": "Book a visit",
+   "services_heading": "What we do",
+   "services": [
+    {
+     "name": "Sewer line repair",
+     "description": "Sewer line repair for The Heights and Montrose."
+    },
+    {
+     "name": "Repiping",
+     "description": "Repiping for The Heights and Montrose."
+    },
+    {
+     "name": "Fixture installation",
+     "description": "Fixture installation for The Heights and Montrose."
+    }
+   ],
+   "about_heading": "About Heights Pipe & Drain",
+   "about": [
+    "Heights Pipe & Drain works across The Heights and Montrose with a precise approach."
+   ],
+   "service_area": "The Heights and Montrose",
+   "service_area_short": "The Heights and Montrose",
+   "faq": [
+    {
+     "q": "Where do you work?",
+     "a": "The Heights and Montrose"
+    }
+   ],
+   "cta_heading": "Questions first?",
+   "cta_body": "Call to talk it through.",
+   "email": null,
+   "address": null,
+   "hours": null
+  }
+ },
+ {
+  "campaign": "D1",
+  "seed": "diversity-2",
+  "niche": "roofing",
+  "city": "Houston",
+  "state": "TX",
+  "business_name": "Gulf Coast Roof Works",
+  "phone": "7135550144",
+  "content": {
+   "meta_title": "Gulf Coast Roof Works | Houston",
+   "meta_description": "Inspections and repairs after storms, plus full replacements when it is time.",
+   "eyebrow": "Roofing \u00b7 Houston",
+   "headline": "Roofs built for Gulf Coast weather",
+   "subheadline": "Inspections and repairs after storms, plus full replacements when it is time.",
+   "primary_cta": "Get help today",
+   "services_heading": "How we help",
+   "services": [
+    {
+     "name": "Shingle roof replacement",
+     "description": "Shingle roof replacement for Greater Houston."
+    },
+    {
+     "name": "Storm damage repair",
+     "description": "Storm damage repair for Greater Houston."
+    },
+    {
+     "name": "Roof inspections",
+     "description": "Roof inspections for Greater Houston."
+    }
+   ],
+   "about_heading": "About Gulf Coast Roof Works",
+   "about": [
+    "Gulf Coast Roof Works works across Greater Houston with a confident approach."
+   ],
+   "service_area": "Greater Houston",
+   "service_area_short": "Greater Houston",
+   "faq": [
+    {
+     "q": "Where do you work?",
+     "a": "Greater Houston"
+    }
+   ],
+   "cta_heading": "Let's get started",
+   "cta_body": "Call to talk it through.",
+   "email": null,
+   "address": null,
+   "hours": null
+  }
+ },
+ {
+  "campaign": "D2",
+  "seed": "diversity-3",
+  "niche": "hvac",
+  "city": "Phoenix",
+  "state": "AZ",
+  "business_name": "Desert Air Comfort",
+  "phone": "6025550151",
+  "content": {
+   "meta_title": "Desert Air Comfort | Phoenix",
+   "meta_description": "AC repair and heat pump installs from a team that works in the heat every day.",
+   "eyebrow": "Hvac \u00b7 Phoenix",
+   "headline": "Keep cool through a Phoenix summer",
+   "subheadline": "AC repair and heat pump installs from a team that works in the heat every day.",
+   "primary_cta": "Talk to us",
+   "services_heading": "Our work",
+   "services": [
+    {
+     "name": "AC repair",
+     "description": "AC repair for Phoenix and Tempe."
+    },
+    {
+     "name": "Heat pump installation",
+     "description": "Heat pump installation for Phoenix and Tempe."
+    },
+    {
+     "name": "Duct cleaning",
+     "description": "Duct cleaning for Phoenix and Tempe."
+    }
+   ],
+   "about_heading": "About Desert Air Comfort",
+   "about": [
+    "Desert Air Comfort works across Phoenix and Tempe with a plain-spoken approach."
+   ],
+   "service_area": "Phoenix and Tempe",
+   "service_area_short": "Phoenix and Tempe",
+   "faq": [
+    {
+     "q": "Where do you work?",
+     "a": "Phoenix and Tempe"
+    }
+   ],
+   "cta_heading": "Need a hand?",
+   "cta_body": "Call to talk it through.",
+   "email": null,
+   "address": null,
+   "hours": null
+  }
+ },
+ {
+  "campaign": "D2",
+  "seed": "diversity-4",
+  "niche": "landscaping",
+  "city": "Phoenix",
+  "state": "AZ",
+  "business_name": "Saguaro Yard Design",
+  "phone": "6025550152",
+  "content": {
+   "meta_title": "Saguaro Yard Design | Phoenix",
+   "meta_description": "Desert landscaping and drip irrigation designed to use less water.",
+   "eyebrow": "Landscaping \u00b7 Phoenix",
+   "headline": "Water-wise yards for the desert",
+   "subheadline": "Desert landscaping and drip irrigation designed to use less water.",
+   "primary_cta": "Call now",
+   "services_heading": "Services",
+   "services": [
+    {
+     "name": "Desert landscaping",
+     "description": "Desert landscaping for Phoenix metro."
+    },
+    {
+     "name": "Irrigation installation",
+     "description": "Irrigation installation for Phoenix metro."
+    },
+    {
+     "name": "Gravel and paver work",
+     "description": "Gravel and paver work for Phoenix metro."
+    }
+   ],
+   "about_heading": "About Saguaro Yard Design",
+   "about": [
+    "Saguaro Yard Design works across Phoenix metro with a calm approach."
+   ],
+   "service_area": "Phoenix metro",
+   "service_area_short": "Phoenix metro",
+   "faq": [
+    {
+     "q": "Where do you work?",
+     "a": "Phoenix metro"
+    }
+   ],
+   "cta_heading": "Ready when you are",
+   "cta_body": "Call to talk it through.",
+   "email": null,
+   "address": null,
+   "hours": null
+  }
+ },
+ {
+  "campaign": "D2",
+  "seed": "diversity-5",
+  "niche": "dentist",
+  "city": "Phoenix",
+  "state": "AZ",
+  "business_name": "Camelback Family Dental",
+  "phone": "6025550153",
+  "content": {
+   "meta_title": "Camelback Family Dental | Phoenix",
+   "meta_description": "Cleanings, fillings and whitening with appointments that start on time.",
+   "eyebrow": "Dentist \u00b7 Phoenix",
+   "headline": "Unhurried dental care in Arcadia",
+   "subheadline": "Cleanings, fillings and whitening with appointments that start on time.",
+   "primary_cta": "Book a visit",
+   "services_heading": "What we do",
+   "services": [
+    {
+     "name": "Cleanings and exams",
+     "description": "Cleanings and exams for Arcadia and Camelback."
+    },
+    {
+     "name": "Fillings",
+     "description": "Fillings for Arcadia and Camelback."
+    },
+    {
+     "name": "Teeth whitening",
+     "description": "Teeth whitening for Arcadia and Camelback."
+    }
+   ],
+   "about_heading": "About Camelback Family Dental",
+   "about": [
+    "Camelback Family Dental works across Arcadia and Camelback with a gentle approach."
+   ],
+   "service_area": "Arcadia and Camelback",
+   "service_area_short": "Arcadia and Camelback",
+   "faq": [
+    {
+     "q": "Where do you work?",
+     "a": "Arcadia and Camelback"
+    }
+   ],
+   "cta_heading": "Questions first?",
+   "cta_body": "Call to talk it through.",
+   "email": null,
+   "address": null,
+   "hours": null
+  }
+ },
+ {
+  "campaign": "D3",
+  "seed": "diversity-6",
+  "niche": "auto repair",
+  "city": "Atlanta",
+  "state": "GA",
+  "business_name": "Peachtree Auto Clinic",
+  "phone": "4045550161",
+  "content": {
+   "meta_title": "Peachtree Auto Clinic | Atlanta",
+   "meta_description": "Diagnostics first, then a clear quote for brakes, engines and routine service.",
+   "eyebrow": "Auto Repair \u00b7 Atlanta",
+   "headline": "Straight answers about your car",
+   "subheadline": "Diagnostics first, then a clear quote for brakes, engines and routine service.",
+   "primary_cta": "Get help today",
+   "services_heading": "How we help",
+   "services": [
+    {
+     "name": "Brake service",
+     "description": "Brake service for Midtown Atlanta."
+    },
+    {
+     "name": "Engine diagnostics",
+     "description": "Engine diagnostics for Midtown Atlanta."
+    },
+    {
+     "name": "Oil changes",
+     "description": "Oil changes for Midtown Atlanta."
+    }
+   ],
+   "about_heading": "About Peachtree Auto Clinic",
+   "about": [
+    "Peachtree Auto Clinic works across Midtown Atlanta with a direct approach."
+   ],
+   "service_area": "Midtown Atlanta",
+   "service_area_short": "Midtown Atlanta",
+   "faq": [
+    {
+     "q": "Where do you work?",
+     "a": "Midtown Atlanta"
+    }
+   ],
+   "cta_heading": "Let's get started",
+   "cta_body": "Call to talk it through.",
+   "email": null,
+   "address": null,
+   "hours": null
+  }
+ },
+ {
+  "campaign": "D3",
+  "seed": "diversity-7",
+  "niche": "hair salon",
+  "city": "Atlanta",
+  "state": "GA",
+  "business_name": "Little Five Hair Studio",
+  "phone": "4045550162",
+  "content": {
+   "meta_title": "Little Five Hair Studio | Atlanta",
+   "meta_description": "A neighborhood studio for precise cuts, color and blowouts.",
+   "eyebrow": "Hair Salon \u00b7 Atlanta",
+   "headline": "Cuts and color in Little Five Points",
+   "subheadline": "A neighborhood studio for precise cuts, color and blowouts.",
+   "primary_cta": "Talk to us",
+   "services_heading": "Our work",
+   "services": [
+    {
+     "name": "Cuts and styling",
+     "description": "Cuts and styling for Little Five Points."
+    },
+    {
+     "name": "Color",
+     "description": "Color for Little Five Points."
+    },
+    {
+     "name": "Blowouts",
+     "description": "Blowouts for Little Five Points."
+    }
+   ],
+   "about_heading": "About Little Five Hair Studio",
+   "about": [
+    "Little Five Hair Studio works across Little Five Points with a playful approach."
+   ],
+   "service_area": "Little Five Points",
+   "service_area_short": "Little Five Points",
+   "faq": [
+    {
+     "q": "Where do you work?",
+     "a": "Little Five Points"
+    }
+   ],
+   "cta_heading": "Need a hand?",
+   "cta_body": "Call to talk it through.",
+   "email": null,
+   "address": null,
+   "hours": null
+  }
+ },
+ {
+  "campaign": "D3",
+  "seed": "diversity-8",
+  "niche": "bakery",
+  "city": "Atlanta",
+  "state": "GA",
+  "business_name": "Sweet Auburn Bakehouse",
+  "phone": "4045550163",
+  "content": {
+   "meta_title": "Sweet Auburn Bakehouse | Atlanta",
+   "meta_description": "Sourdough, pastries and custom cakes from a small Sweet Auburn kitchen.",
+   "eyebrow": "Bakery \u00b7 Atlanta",
+   "headline": "Bread and pastries baked every morning",
+   "subheadline": "Sourdough, pastries and custom cakes from a small Sweet Auburn kitchen.",
+   "primary_cta": "Call now",
+   "services_heading": "Services",
+   "services": [
+    {
+     "name": "Sourdough bread",
+     "description": "Sourdough bread for Sweet Auburn."
+    },
+    {
+     "name": "Custom cakes",
+     "description": "Custom cakes for Sweet Auburn."
+    },
+    {
+     "name": "Morning pastries",
+     "description": "Morning pastries for Sweet Auburn."
+    }
+   ],
+   "about_heading": "About Sweet Auburn Bakehouse",
+   "about": [
+    "Sweet Auburn Bakehouse works across Sweet Auburn with a cozy approach."
+   ],
+   "service_area": "Sweet Auburn",
+   "service_area_short": "Sweet Auburn",
+   "faq": [
+    {
+     "q": "Where do you work?",
+     "a": "Sweet Auburn"
+    }
+   ],
+   "cta_heading": "Ready when you are",
+   "cta_body": "Call to talk it through.",
+   "email": null,
+   "address": null,
+   "hours": null
+  }
+ },
+ {
+  "campaign": "D4",
+  "seed": "diversity-9",
+  "niche": "electrician",
+  "city": "Denver",
+  "state": "CO",
+  "business_name": "Mile High Electric Service",
+  "phone": "3035550171",
+  "content": {
+   "meta_title": "Mile High Electric Service | Denver",
+   "meta_description": "Licensed-trade electrical work, from panel upgrades to home EV charging.",
+   "eyebrow": "Electrician \u00b7 Denver",
+   "headline": "Panel upgrades and EV chargers in Denver",
+   "subheadline": "Licensed-trade electrical work, from panel upgrades to home EV charging.",
+   "primary_cta": "Book a visit",
+   "services_heading": "What we do",
+   "services": [
+    {
+     "name": "Panel upgrades",
+     "description": "Panel upgrades for Denver and Aurora."
+    },
+    {
+     "name": "EV charger installation",
+     "description": "EV charger installation for Denver and Aurora."
+    },
+    {
+     "name": "Lighting",
+     "description": "Lighting for Denver and Aurora."
+    }
+   ],
+   "about_heading": "About Mile High Electric Service",
+   "about": [
+    "Mile High Electric Service works across Denver and Aurora with a technical approach."
+   ],
+   "service_area": "Denver and Aurora",
+   "service_area_short": "Denver and Aurora",
+   "faq": [
+    {
+     "q": "Where do you work?",
+     "a": "Denver and Aurora"
+    }
+   ],
+   "cta_heading": "Questions first?",
+   "cta_body": "Call to talk it through.",
+   "email": null,
+   "address": null,
+   "hours": null
+  }
+ },
+ {
+  "campaign": "D4",
+  "seed": "diversity-10",
+  "niche": "pest control",
+  "city": "Denver",
+  "state": "CO",
+  "business_name": "Front Range Pest Control",
+  "phone": "3035550172",
+  "content": {
+   "meta_title": "Front Range Pest Control | Denver",
+   "meta_description": "Inspections first, then targeted rodent and wasp treatment.",
+   "eyebrow": "Pest Control \u00b7 Denver",
+   "headline": "Pest problems handled, room by room",
+   "subheadline": "Inspections first, then targeted rodent and wasp treatment.",
+   "primary_cta": "Get help today",
+   "services_heading": "How we help",
+   "services": [
+    {
+     "name": "Rodent control",
+     "description": "Rodent control for Front Range."
+    },
+    {
+     "name": "Wasp removal",
+     "description": "Wasp removal for Front Range."
+    },
+    {
+     "name": "Home inspections",
+     "description": "Home inspections for Front Range."
+    }
+   ],
+   "about_heading": "About Front Range Pest Control",
+   "about": [
+    "Front Range Pest Control works across Front Range with a reassuring approach."
+   ],
+   "service_area": "Front Range",
+   "service_area_short": "Front Range",
+   "faq": [
+    {
+     "q": "Where do you work?",
+     "a": "Front Range"
+    }
+   ],
+   "cta_heading": "Let's get started",
+   "cta_body": "Call to talk it through.",
+   "email": null,
+   "address": null,
+   "hours": null
+  }
+ },
+ {
+  "campaign": "D4",
+  "seed": "diversity-11",
+  "niche": "plumbing",
+  "city": "Denver",
+  "state": "CO",
+  "business_name": "Cherry Creek Plumbing",
+  "phone": "3035550173",
+  "content": {
+   "meta_title": "Cherry Creek Plumbing | Denver",
+   "meta_description": "Water heaters, drains and gas lines, with tidy work and clear scheduling.",
+   "eyebrow": "Plumbing \u00b7 Denver",
+   "headline": "Plumbing for Cherry Creek homes",
+   "subheadline": "Water heaters, drains and gas lines, with tidy work and clear scheduling.",
+   "primary_cta": "Talk to us",
+   "services_heading": "Our work",
+   "services": [
+    {
+     "name": "Water heater replacement",
+     "description": "Water heater replacement for Cherry Creek and Glendale."
+    },
+    {
+     "name": "Drain cleaning",
+     "description": "Drain cleaning for Cherry Creek and Glendale."
+    },
+    {
+     "name": "Gas line repair",
+     "description": "Gas line repair for Cherry Creek and Glendale."
+    }
+   ],
+   "about_heading": "About Cherry Creek Plumbing",
+   "about": [
+    "Cherry Creek Plumbing works across Cherry Creek and Glendale with a polished approach."
+   ],
+   "service_area": "Cherry Creek and Glendale",
+   "service_area_short": "Cherry Creek and Glendale",
+   "faq": [
+    {
+     "q": "Where do you work?",
+     "a": "Cherry Creek and Glendale"
+    }
+   ],
+   "cta_heading": "Need a hand?",
+   "cta_body": "Call to talk it through.",
+   "email": null,
+   "address": null,
+   "hours": null
+  }
+ }
+]

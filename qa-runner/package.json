@@ -1,0 +1,11 @@
+{
+  "name": "jarvis-qa-runner",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Browser QA for generated preview sites (Playwright + axe-core). Runs offline in a sandbox.",
+  "dependencies": {
+    "@axe-core/playwright": "4.11.0",
+    "playwright": "1.63.0"
+  }
+}

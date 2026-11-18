@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{{ c.meta_title }}</title>
+<meta name="description" content="{{ c.meta_description }}">
+<meta property="og:title" content="{{ c.meta_title }}">
+<meta property="og:description" content="{{ c.meta_description }}">
+<link rel="stylesheet" href="/styles.css">
+<script type="application/ld+json">{{ jsonld | safe }}</script>
+</head>
+<body class="arch-{{ t.archetype }} hero-{{ t.hero }} nav-{{ t.nav }} motif-{{ d.motif }}">
+<a class="skip" href="#main">Skip to content</a>
+<div class="preview-banner" role="note">Concept preview prepared by {{ agency }}. Not affiliated with or endorsed by {{ c.business_name }}.</div>
+<header class="site-header">
+  <div class="wrap header-inner">
+    <a class="brand" href="#top">{{ c.business_name }}</a>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">Menu</button>
+    <nav id="site-nav" class="site-nav" aria-label="Main">
+      <ul>
+      {% for s in t.order if s in nav_labels %}<li><a href="#{{ s }}">{{ nav_labels[s] }}</a></li>{% endfor %}
+      </ul>
+    </nav>
+    {% if c.phone_display %}<a class="btn btn-small header-call" href="tel:{{ c.phone_tel }}">Call {{ c.phone_display }}</a>{% endif %}
+  </div>
+</header>
+<main id="main">
+{% for section in t.order %}
+{% if section == "hero" %}
+<section id="top" class="hero">
+  <div class="wrap hero-grid">
+    <div class="hero-copy">
+      {% if c.eyebrow %}<p class="eyebrow">{{ c.eyebrow }}</p>{% endif %}
+      <h1>{{ c.headline }}</h1>
+      <p class="lede">{{ c.subheadline }}</p>
+      <div class="hero-actions">
+        {% if c.phone_display %}<a class="btn btn-primary" href="tel:{{ c.phone_tel }}">{{ c.primary_cta }}</a>{% endif %}
+        <a class="btn btn-ghost" href="#services">See services</a>
+      </div>
+    </div>
+    <div class="hero-art" aria-hidden="true">{{ art | safe }}</div>
+  </div>
+</section>
+{% elif section == "services" and c.services %}
+<section id="services" class="services services-{{ t.services }}">
+  <div class="wrap">
+    <h2>{{ c.services_heading }}</h2>
+    <ol class="service-list">
+      {% for s in c.services %}<li class="service"><span class="service-index" aria-hidden="true">{{ "%02d"|format(loop.index) }}</span><h3>{{ s.name }}</h3>{% if s.description %}<p>{{ s.description }}</p>{% endif %}</li>{% endfor %}
+    </ol>
+  </div>
+</section>
+{% elif section == "about" and c.about %}
+<section id="about" class="about">
+  <div class="wrap narrow">
+    <h2>{{ c.about_heading }}</h2>
+    {% for p in c.about %}<p>{{ p }}</p>{% endfor %}
+  </div>
+</section>
+{% elif section == "area" and c.service_area %}
+<section id="area" class="area">
+  <div class="wrap narrow">
+    <h2>Where we work</h2>
+    <p>{{ c.service_area }}</p>
+  </div>
+</section>
+{% elif section == "faq" and c.faq %}
+<section id="faq" class="faq">
+  <div class="wrap narrow">
+    <h2>Questions</h2>
+    {% for q in c.faq %}<details><summary>{{ q.q }}</summary><p>{{ q.a }}</p></details>{% endfor %}
+  </div>
+</section>
+{% elif section == "cta" %}
+<section class="cta-band" aria-label="Get in touch">
+  <div class="wrap cta-inner">
+    <h2>{{ c.cta_heading }}</h2>
+    <p>{{ c.cta_body }}</p>
+    {% if c.phone_display %}<a class="btn btn-accent" href="tel:{{ c.phone_tel }}">{{ c.primary_cta }}</a>{% endif %}
+  </div>
+</section>
+{% elif section == "contact" %}
+<section id="contact" class="contact">
+  <div class="wrap contact-grid">
+    <div>
+      <h2>Contact</h2>
+      {% if c.phone_display %}<p class="contact-line">Phone: <a href="tel:{{ c.phone_tel }}">{{ c.phone_display }}</a></p>{% endif %}
+      {% if c.email %}<p class="contact-line">Email: <a href="mailto:{{ c.email }}">{{ c.email }}</a></p>{% endif %}
+      {% if c.address %}<p class="contact-line">{{ c.address }}</p>{% endif %}
+      {% if c.hours %}<p class="contact-line">Hours: {{ c.hours }}</p>{% endif %}
+    </div>
+    <form class="contact-form" action="#" method="post" aria-describedby="form-note">
+      <p id="form-note" class="form-note">This is a preview. The form is disabled and sends nothing.</p>
+      <label for="f-name">Name</label><input id="f-name" name="name" type="text" autocomplete="name" disabled>
+      <label for="f-phone">Phone</label><input id="f-phone" name="phone" type="tel" autocomplete="tel" disabled>
+      <label for="f-msg">How can we help?</label><textarea id="f-msg" name="message" rows="4" disabled></textarea>
+      <button class="btn btn-primary" type="submit" disabled>Send request</button>
+    </form>
+  </div>
+</section>
+{% endif %}
+{% endfor %}
+</main>
+<footer class="site-footer">
+  <div class="wrap">
+    <p>{{ c.business_name }}{% if c.service_area_short %} · {{ c.service_area_short }}{% endif %}</p>
+    <p class="fine">Preview only. Content is based on publicly available information about this business.</p>
+  </div>
+</footer>
+<script src="/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,77 @@
+"""FastAPI application factory."""
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+
+import structlog
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from jarvis.agents.deps import Deps
+from jarvis.api.auth import RateLimiter, TokenVerifier
+from jarvis.api.routes import campaigns, ops, records
+from jarvis.config import Settings, get_settings
+from jarvis.core.errors import JarvisError
+from jarvis.db.pool import Database
+from jarvis.integrations.livekit import LiveKitClient
+from jarvis.observability.logging import configure_logging
+
+log = structlog.get_logger(__name__)
+
+
+def create_app(settings: Settings | None = None, deps: Deps | None = None) -> FastAPI:
+    settings = settings or get_settings()
+    configure_logging(settings.jarvis_log_level)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        try:
+            await app.state.db.connect()
+        except Exception as exc:  # API still starts; /ready reports the outage
+            log.warning("db.initial_connect_failed", error=str(exc))
+        yield
+        await app.state.db.close()
+
+    app = FastAPI(title="JARVIS API", version="0.1.0", lifespan=lifespan)
+    db = deps.db if deps else Database(settings.database_url, pool_size=settings.database_pool_size,
+                                       max_backoff_s=settings.db_reconnect_max_backoff_s)
+    app.state.settings = settings
+    app.state.db = db
+    app.state.deps = deps or Deps.build(settings, db)
+    app.state.verifier = TokenVerifier(settings)
+    app.state.limiter = RateLimiter()
+    app.state.livekit = LiveKitClient(settings)
+    app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False,
+                       allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Authorization", "Content-Type",
+                                                                                     "X-Workspace-Id", "Idempotency-Key", "Last-Event-ID"])
+
+    @app.exception_handler(JarvisError)
+    async def _jarvis_error(_req: Request, exc: JarvisError):
+        return JSONResponse(status_code=exc.http_status,
+                            content={"error": {"code": exc.code, "message": exc.message, "details": exc.details}})
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        resp = await call_next(request)
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault("Referrer-Policy", "no-referrer")
+        resp.headers.setdefault("Cache-Control", "no-store")
+        return resp
+
+    app.include_router(ops.public)
+    app.include_router(campaigns.router)
+    app.include_router(records.router)
+    app.include_router(ops.router)
+    return app
+
+
+app = None
+
+
+def get_app() -> FastAPI:
+    global app
+    if app is None:
+        app = create_app()
+    return app

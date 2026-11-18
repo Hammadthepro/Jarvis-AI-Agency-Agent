@@ -1,0 +1,20 @@
+{
+  "version": "2026-11-18",
+  "notes": "Unit prices in micro-dollars. Values tagged secondary-source in docs/API_COST_MODEL.md must be verified on official pricing pages. Override per deployment with PRICING_OVERRIDES_JSON.",
+  "google_places": {
+    "text_search_enterprise": 35000,
+    "text_search_pro": 32000,
+    "text_search_ids_only": 0,
+    "place_details_enterprise": 20000
+  },
+  "serp_api": {"search": 25000},
+  "firecrawl": {"credit": 3800},
+  "cloudflare": {"deployment": 0},
+  "resend": {"email": 0},
+  "livekit": {"agent_minute": 10000},
+  "anthropic": {
+    "claude-haiku-5-5": {"input_per_mtok": 100000, "output_per_mtok": 500000},
+    "claude-sonnet-5-5": {"input_per_mtok": 2000000, "output_per_mtok": 10000000},
+    "claude-opus-5-5": {"input_per_mtok": 4000000, "output_per_mtok": 20000000}
+  }
+}
