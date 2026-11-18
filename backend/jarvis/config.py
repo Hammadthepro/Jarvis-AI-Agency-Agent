@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     livekit_url: str | None = None
     livekit_api_key: SecretStr | None = None
     livekit_api_secret: SecretStr | None = None
+    voice_agent_shared_secret: SecretStr | None = None
 
     # Verification policy
     no_website_min_confidence: float = Field(0.8, ge=0.5, le=1.0)

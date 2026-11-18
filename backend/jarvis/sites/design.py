@@ -114,7 +114,7 @@ def lighten(h: str, amt: float) -> str:
     r, g, b = _rgb(h)
     hh, ll, ss = colorsys.rgb_to_hls(r, g, b)
     r, g, b = colorsys.hls_to_rgb(hh, min(1, ll + amt), ss)
-    return "#{:02X}{:02X}{:02X}".format(int(r * 255), int(g * 255), int(b * 255))
+    return f"#{int(r * 255):02X}{int(g * 255):02X}{int(b * 255):02X}"
 
 
 def _palette_distance(a: str, b: str) -> float:

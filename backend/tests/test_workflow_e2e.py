@@ -176,3 +176,17 @@ async def test_places_not_configured_blocks_campaign(client, deps, web):
     reason = await deps.db.fetchval("select blocked_reason from campaigns where id=$1", cid)
     assert reason.startswith("NOT_CONFIGURED") and "GOOGLE_PLACES_API_KEY" in reason
     _ = json
+
+
+async def test_missing_serpapi_blocks_campaign_honestly(client, deps, web):
+    """T8-adjacent: verification can't complete without SerpApi -> campaign BLOCKED with the exact reason (not 'completed')."""
+    a = await login(client, "noserp@t.dev")
+    deps.serp.settings = deps.settings.model_copy(update={"serpapi_api_key": None})
+    r = await client.post("/campaigns/import", headers=a["headers"], json={
+        "niche": "plumbing", "location": {"city": "Houston", "state": "TX"}, "rights_attestation": True,
+        "website_filter": ["NO_WEBSITE"], "rows": [{"business_name": "Bayou City Plumbing Co", "phone": "(713) 555-0142"}]})
+    cid = r.json()["campaign_id"]
+    assert await run_until(deps, cid) == "blocked"
+    reason = await deps.db.fetchval("select blocked_reason from campaigns where id=$1", cid)
+    assert reason.startswith("NOT_CONFIGURED") and "SERPAPI_API_KEY" in reason
+    assert await deps.db.fetchval("select count(*) from website_verifications w join prospects p on p.id=w.prospect_id where p.campaign_id=$1", cid) == 0

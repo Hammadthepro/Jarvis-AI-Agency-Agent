@@ -17,8 +17,16 @@ from pydantic import BaseModel, Field
 from jarvis.agents import outreach
 from jarvis.api.auth import CurrentPrincipal, Principal, create_workspace
 from jarvis.core.compliance import INTENDED_USE, gate_status
-from jarvis.core.errors import (ComplianceBlocked, Forbidden, InvalidTransition, IntegrationState, JarvisError, NotFound,
-                                ProviderError, ValidationFailed)
+from jarvis.core.errors import (
+    ComplianceBlocked,
+    Forbidden,
+    IntegrationState,
+    InvalidTransition,
+    JarvisError,
+    NotFound,
+    ProviderError,
+    ValidationFailed,
+)
 from jarvis.db.audit import audit
 from jarvis.integrations.base import CallContext
 from jarvis.integrations.google_places import IDS_ONLY
@@ -151,10 +159,21 @@ class SettingsIn(BaseModel):
 async def get_settings_(request: Request, me: Principal = CurrentPrincipal):
     s = request.app.state.settings
     row = await request.app.state.db.fetchrow("select * from system_settings where workspace_id=$1", me.workspace_id)
+    b = await request.app.state.db.fetchrow("select status, offsite, finished_at from backup_runs order by started_at desc limit 1")
+    if b is None:
+        backup = "NO_BACKUP_RECORDED"
+    elif b["status"] != "succeeded":
+        backup = "BACKUP_FAILED"
+    elif not b["offsite"]:
+        backup = "BACKUP_NOT_PROTECTED"
+    elif (await request.app.state.db.fetchval("select $1::timestamptz < now() - interval '36 hours'", b["finished_at"])):
+        backup = "BACKUP_STALE"
+    else:
+        backup = "PROTECTED"
     return J({"settings": dict(row) if row else {}, "models": {"fast": s.claude_model_fast, "build": s.claude_model_build,
               "escalation": s.claude_model_escalation}, "environment": s.jarvis_env, "qa_runner_mode": s.qa_runner_mode,
               "preview_project": s.cloudflare_pages_preview_project, "preview_ttl_days": s.preview_ttl_days,
-              "backup": "PROTECTED" if s.backup_offsite_configured else "BACKUP_NOT_PROTECTED"})
+              "backup": backup, "last_backup": dict(b) if b else None})
 
 
 @router.put("/settings")
@@ -553,3 +572,33 @@ async def notifications(request: Request, me: Principal = CurrentPrincipal):
 
 
 _ = timedelta
+
+
+@router.get("/system/readiness")
+async def system_readiness(request: Request, me: Principal = CurrentPrincipal):
+    """Production-readiness checklist computed from real configuration and records."""
+    deps, db, s = request.app.state.deps, request.app.state.db, request.app.state.settings
+    async with db.acquire() as conn:
+        gate = await gate_status(conn, me.workspace_id, "google_places_prospect_selection")
+    st = await db.fetchrow("select terms_of_use_url, privacy_policy_url, agency_name from system_settings where workspace_id=$1", me.workspace_id)
+    b = await db.fetchrow("select offsite, status, finished_at from backup_runs order by started_at desc limit 1")
+    workers = await db.fetchval("select count(*) from worker_heartbeats where last_seen_at > now() - interval '2 minutes'")
+    items = [
+        ("database", db.state == "healthy", db.state),
+        ("worker_alive", workers > 0, f"{workers} live worker(s)"),
+        ("auth_production", s.jarvis_env != "production" or bool(s.supabase_jwks_url or s.supabase_jwt_secret), "Supabase JWT verification configured"),
+        ("claude_api", deps.claude.configured, "ANTHROPIC_API_KEY"),
+        ("discovery_provider", gate["open"] and deps.places.configured,
+         "Google Places API (New) approved + configured" if gate["open"] else f"BLOCKED_PENDING_APPROVAL: {gate['reason']}"),
+        ("search_provider", deps.serp.configured, "SERPAPI_API_KEY"),
+        ("extraction_provider", deps.firecrawl.configured, "FIRECRAWL_API_KEY"),
+        ("preview_deployment", deps.cloudflare.configured, "CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID"),
+        ("voice", request.app.state.livekit.configured and bool(s.voice_agent_shared_secret), "LiveKit + VOICE_AGENT_SHARED_SECRET"),
+        ("terms_of_use_published", bool(st and st["terms_of_use_url"]), "Public Terms of Use URL"),
+        ("privacy_policy_published", bool(st and st["privacy_policy_url"]), "Public Privacy Policy URL"),
+        ("offsite_backup", bool(b and b["offsite"] and b["status"] == "succeeded"),
+         "PROTECTED" if b and b["offsite"] else "BACKUP_NOT_PROTECTED"),
+    ]
+    outreach_ready = (await outreach.readiness(deps, me.workspace_id))["ready"]
+    items.append(("outreach_sending", outreach_ready, "sender readiness checklist (see Outreach)"))
+    return {"ready": all(ok for _k, ok, _d in items), "items": [{"key": k, "ok": ok, "detail": d} for k, ok, d in items]}

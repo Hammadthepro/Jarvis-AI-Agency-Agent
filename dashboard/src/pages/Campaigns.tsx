@@ -83,15 +83,15 @@ function ImportForm({ onDone }: { onDone: () => void }) {
   return (
     <Card title="Import business list" className="mb-6">
       <form onSubmit={submit} className="grid gap-3 md:grid-cols-3">
-        <label className="text-sm text-ink-300">Business type<Input value={form.niche} onChange={(e) => setForm({ ...form, niche: e.target.value })} /></label>
-        <label className="text-sm text-ink-300">City<Input value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} /></label>
-        <label className="text-sm text-ink-300">State (2 letters)<Input value={form.state} maxLength={2} onChange={(e) => setForm({ ...form, state: e.target.value })} /></label>
+        <div className="text-sm text-ink-300"><label htmlFor="imp-niche">Business type</label><Input id="imp-niche" value={form.niche} onChange={(e) => setForm({ ...form, niche: e.target.value })} /></div>
+        <div className="text-sm text-ink-300"><label htmlFor="imp-city">City</label><Input id="imp-city" value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} /></div>
+        <div className="text-sm text-ink-300"><label htmlFor="imp-state">State (2 letters)</label><Input id="imp-state" value={form.state} maxLength={2} onChange={(e) => setForm({ ...form, state: e.target.value })} /></div>
         <label className="text-sm text-ink-300 md:col-span-3">CSV (business_name, phone, city, state, website)
-          <textarea value={form.csv} onChange={(e) => setForm({ ...form, csv: e.target.value })} rows={6}
+          <textarea aria-label="CSV rows" value={form.csv} onChange={(e) => setForm({ ...form, csv: e.target.value })} rows={6}
             className="mt-1 w-full rounded-lg border hairline bg-ink-850 p-2 font-mono text-xs text-ink-100" /></label>
         <label className="flex items-center gap-2 text-sm text-ink-300"><input type="checkbox" checked={form.noSiteOnly} onChange={(e) => setForm({ ...form, noSiteOnly: e.target.checked })} />
           Keep only verified no-website / broken-website businesses</label>
-        <label className="text-sm text-ink-300">Sites to build<Input type="number" min={0} max={50} value={form.sites} onChange={(e) => setForm({ ...form, sites: Number(e.target.value) })} /></label>
+        <label className="text-sm text-ink-300">Sites to build<Input aria-label="Sites to build" type="number" min={0} max={50} value={form.sites} onChange={(e) => setForm({ ...form, sites: Number(e.target.value) })} /></label>
         <label className="flex items-center gap-2 text-sm text-ink-300 md:col-span-3"><input type="checkbox" checked={form.rights} onChange={(e) => setForm({ ...form, rights: e.target.checked })} />
           I confirm I have the right to use this business list for prospecting.</label>
         <div className="md:col-span-3 flex items-center gap-3"><Button type="submit" disabled={m.isPending}>Create campaign</Button>
@@ -111,7 +111,10 @@ export function CampaignDetailPage() {
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["campaign", id], queryFn: () => api<Detail>(`/campaigns/${id}`), refetchInterval: 4000 });
   const [events, setEvents] = useState<JarvisEvent[]>([]);
-  useEffect(() => subscribeEvents((e) => setEvents((p) => [e, ...p].slice(0, 100)), { campaignId: id }), [id]);
+  useEffect(() => subscribeEvents((e) => {
+    setEvents((p) => [e, ...p].slice(0, 100));
+    if (e.event_type === "state" || e.event_type === "error") void qc.invalidateQueries({ queryKey: ["campaign", id] });
+  }, { campaignId: id }), [id, qc]);
   const act = useMutation({ mutationFn: (a: string) => api(`/campaigns/${id}/${a}`, { method: "POST" }), onSuccess: () => qc.invalidateQueries({ queryKey: ["campaign", id] }) });
   if (q.error) return <Page title="Campaign"><ErrorState error={q.error} /></Page>;
   if (!q.data) return <Page title="Campaign"><Loading /></Page>;

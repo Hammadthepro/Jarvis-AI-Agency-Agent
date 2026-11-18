@@ -23,7 +23,7 @@ class QaRunnerError(Exception):
 def docker_command(settings: Settings, site_dir: Path, out_dir: Path, facts: Path) -> list[str]:
     return ["docker", "run", "--rm", "--network", "none", "--read-only", "--user", "10001:10001",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "512",
-            "--cpus", "1", "--memory", "1g", "--tmpfs", "/tmp:rw,size=256m",
+            "--cpus", "1", "--memory", "1g", "--tmpfs", "/tmp:rw,size=256m",  # noqa: S108 - tmpfs inside the sandbox container
             "-e", "HOME=/tmp", "-v", f"{site_dir}:/site:ro", "-v", f"{facts}:/facts.json:ro", "-v", f"{out_dir}:/out:rw",
             settings.sandbox_image, "node", "/runner/run.mjs", "/site", "/out", "/facts.json"]
 

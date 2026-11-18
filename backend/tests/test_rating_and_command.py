@@ -5,8 +5,15 @@ import pytest
 
 from jarvis.agents.command import CampaignParameters, apply_answers, deterministic_parse
 from jarvis.core.errors import ValidationFailed
-from jarvis.integrations.google_places import (DISCOVERY_ENTERPRISE, DISCOVERY_ENTERPRISE_WITH_RATING, DISCOVERY_PRO, IDS_ONLY,
-                                               LISTING_DISPLAY, mask_sku, validate_min_rating)
+from jarvis.integrations.google_places import (
+    DISCOVERY_ENTERPRISE,
+    DISCOVERY_ENTERPRISE_WITH_RATING,
+    DISCOVERY_PRO,
+    IDS_ONLY,
+    LISTING_DISPLAY,
+    mask_sku,
+    validate_min_rating,
+)
 
 
 def fields(r):

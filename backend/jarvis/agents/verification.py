@@ -35,6 +35,8 @@ DIRECTORY_DOMAINS = {
 SOCIAL_DOMAINS = {"facebook.com", "instagram.com", "linkedin.com", "x.com", "twitter.com", "tiktok.com", "youtube.com", "pinterest.com"}
 GENERIC_NAME_TOKENS = {"llc", "inc", "co", "company", "corp", "corporation", "ltd", "the", "and", "&", "services", "service",
                        "of", "pllc", "pc", "group"}
+BLOCKING_STATES = {IntegrationState.NOT_CONFIGURED, IntegrationState.INVALID_CREDENTIALS, IntegrationState.PERMISSION_DENIED,
+                   IntegrationState.QUOTA_EXCEEDED, IntegrationState.DISABLED, IntegrationState.BLOCKED_PENDING_APPROVAL}
 PARKED_MARKERS = ("domain is for sale", "buy this domain", "this domain may be for sale", "domain parking",
                   "parked free", "hugedomains", "sedo.com", "dan.com", "afternic", "this domain has expired",
                   "domain has expired", "is parked")
@@ -247,6 +249,8 @@ class WebsiteVerifier:
             try:
                 resp = await self.deps.serp.search(ctx, q, location=", ".join(x for x in (c.city, c.state) if x) or None)
             except ProviderError as exc:
+                if exc.state in BLOCKING_STATES:
+                    raise  # missing credentials/quota must surface as a blocked task, not a silent "failed check"
                 out.checks.append(Check(label, "failed", exc.state.value, {"error": exc.message[:200]}))
                 continue
             out.checks.append(Check(label, "completed", f"{len(resp.results)} results",
@@ -408,5 +412,3 @@ def satisfies_filter(status: str, health: str | None, website_filter: list[str])
         ok |= status == "VERIFIED_HAS_WEBSITE" and health == "outdated"
     return ok
 
-
-_ = IntegrationState

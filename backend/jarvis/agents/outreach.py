@@ -130,12 +130,17 @@ def unsubscribe_token(key: str, workspace_id: UUID, email: str, ts: int | None =
 
 
 def parse_unsubscribe_token(key: str, token: str, max_age_s: int = 3 * 365 * 86400) -> tuple[UUID, str]:
-    raw = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode()
-    ws, email, ts, sig = raw.rsplit("|", 3)
-    exp = hmac.new(key.encode(), f"{ws}|{email}|{ts}".encode(), hashlib.sha256).hexdigest()[:32]
-    if not hmac.compare_digest(exp, sig) or time.time() - int(ts) > max_age_s:
+    try:
+        raw = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode()
+        ws, email, ts, sig = raw.rsplit("|", 3)
+        exp = hmac.new(key.encode(), f"{ws}|{email}|{ts}".encode(), hashlib.sha256).hexdigest()[:32]
+        ok = hmac.compare_digest(exp, sig) and time.time() - int(ts) <= max_age_s
+        ws_id = UUID(ws)
+    except (ValueError, TypeError) as exc:
+        raise ValidationFailed("invalid or expired unsubscribe token") from exc
+    if not ok:
         raise ValidationFailed("invalid or expired unsubscribe token")
-    return UUID(ws), email
+    return ws_id, email
 
 
 async def suppress(conn, workspace_id: UUID, kind: str, value: str, reason: str, source: str) -> None:

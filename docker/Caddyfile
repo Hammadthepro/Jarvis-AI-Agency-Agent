@@ -1,0 +1,17 @@
+{
+	email {$CADDY_ACME_EMAIL}
+}
+
+{$API_HOSTNAME} {
+	encode gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		-Server
+	}
+	# SSE needs unbuffered proxying
+	reverse_proxy /events* api:8000 {
+		flush_interval -1
+	}
+	reverse_proxy api:8000
+}

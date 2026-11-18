@@ -1,25 +1,84 @@
 # JARVIS
 
-An autonomous AI employee for a website-development agency serving US businesses. JARVIS finds
-prospects, checks whether they have a website, researches them, scores them, builds a
-personalised preview site, tests it, deploys it to a temporary URL and handles outreach within
-the limits you authorise.
+An autonomous AI employee for a website-development agency serving US businesses. JARVIS takes a
+natural-language (text or voice) command, finds and verifies prospects, researches them from real
+sources, scores them deterministically, builds personalised preview websites, tests them in a real
+browser inside an isolated sandbox, deploys them to Cloudflare Pages, and prepares outreach drafts.
+Sending is gated behind compliance checks and explicit authorization.
 
-**Status: architecture review, revision 3. No application code yet.** See [CHANGELOG.md](CHANGELOG.md).
+**Status:** implemented and tested locally. See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md)
+for exactly what works, what is NOT_CONFIGURED, and what is blocked pending approval.
 
-| Document | Contents |
+## Repository layout
+
+| Path | What |
 |---|---|
-| [docs/PRODUCT_REQUIREMENTS.md](docs/PRODUCT_REQUIREMENTS.md) | Product requirements: commands, rating filter, website availability states, compliance gate |
-| [docs/API_CONTRACTS.md](docs/API_CONTRACTS.md) | REST and internal adapter contracts, error codes, command-parsing fixtures |
-| [docs/VERIFICATION_REGISTER.md](docs/VERIFICATION_REGISTER.md) | Confirmed facts, estimates and open legal questions |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | System design, agents, data flow, state machines, topology, failure recovery |
-| [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) | Phases, tasks, acceptance criteria, tests, deployment, risks |
-| [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md) | Every variable, with purpose, source, consumer, classification and validation |
-| [docs/API_COST_MODEL.md](docs/API_COST_MODEL.md) | Provider pricing, unit economics, monthly scenarios, $100 allocation |
-| [docs/DATABASE_SCHEMA.md](docs/DATABASE_SCHEMA.md) | Tables, constraints, indexes, RLS, retention and provenance |
-| [docs/SECURITY_AND_COMPLIANCE.md](docs/SECURITY_AND_COMPLIANCE.md) | Google Maps Platform terms for the Places API, crawling, sandboxing, secrets, CAN-SPAM, autonomy limits |
-| [docs/SYSTEM_DIAGRAM.md](docs/SYSTEM_DIAGRAM.md) | Mermaid diagrams |
+| `backend/jarvis/` | FastAPI API, durable worker, agents, provider adapters, security, site renderer |
+| `backend/tests/` | pytest suite (real Postgres, real Chromium, provider test doubles), `tests/live/` capped live tests |
+| `database/migrations/` | SQL migrations (schema, RLS) applied by `python -m jarvis.db.migrate` |
+| `dashboard/` | React + Vite + TypeScript + Tailwind dashboard (Vitest tests, `e2e/` real-stack browser test) |
+| `qa-runner/` | Playwright + axe-core browser QA runner executed in the sandbox |
+| `apps/voice/` | LiveKit voice agent (same command pipeline as text) |
+| `docker/`, `docker-compose*.yml` | App, QA sandbox, voice images; Caddy; production compose |
+| `scripts/` | VPS setup, pinned-host-key deploy, encrypted backup, restore |
+| `docs/` | Architecture, requirements, contracts, schema, security/compliance, cost model |
 
-Planned stack: React/Vite/TS dashboard and pages.dev previews on Cloudflare Pages · FastAPI,
-Python workers, Playwright and the build sandbox on a required VPS · Supabase (Postgres, Auth, Storage) · Google Places API (New) Text Search (the only Google Maps Platform API used; gated) · SerpApi ·
-Firecrawl · Claude API (Haiku 5.5 / Sonnet 5.5, Opus 5.5 for escalation) · Playwright · Cloudflare Pages previews · LiveKit (voice, later).
+## Run locally
+
+Prerequisites: Python 3.12, Node 22, Docker, PostgreSQL 15+ (or `docker compose -f docker-compose.dev.yml up -d db`).
+
+```bash
+cd backend && python -m venv .venv && .venv/bin/pip install -e ".[dev]"
+```
+
+```bash
+export DATABASE_URL=postgresql://postgres:jarvis@localhost:5432/jarvis JARVIS_ENV=local SUPABASE_JWT_SECRET=$(openssl rand -hex 32)
+```
+
+```bash
+cd backend && .venv/bin/python -m jarvis.db.migrate
+```
+
+```bash
+cd backend && .venv/bin/uvicorn jarvis.api.app:get_app --factory --port 8000
+```
+
+```bash
+cd backend && .venv/bin/python -m jarvis.worker.main
+```
+
+```bash
+cd qa-runner && npm ci && npx playwright install chromium
+```
+
+```bash
+docker build -f docker/qa-sandbox.Dockerfile -t jarvis-qa-sandbox:latest .
+```
+
+```bash
+cd dashboard && npm ci && VITE_API_BASE_URL=http://localhost:8000 npm run dev
+```
+
+Without provider credentials every integration shows `NOT_CONFIGURED`, and campaigns stop with a
+`blocked` state that names the missing credential. Nothing is simulated.
+
+## Tests
+
+```bash
+cd backend && .venv/bin/pytest -q
+```
+
+```bash
+cd dashboard && npm run typecheck && npm test
+```
+
+```bash
+cd backend && JARVIS_LIVE_TESTS=1 .venv/bin/pytest -q tests/live -rs
+```
+
+The last command runs the capped live provider tests, and needs real credentials.
+
+## Deploy
+
+See [docs/OPERATIONS.md](docs/OPERATIONS.md): VPS setup, `.env`, `scripts/deploy.sh` (pinned SSH host key),
+Cloudflare Pages for the dashboard, backups and restore drills.

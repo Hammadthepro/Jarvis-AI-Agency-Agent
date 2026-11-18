@@ -62,6 +62,10 @@ async def set_campaign_state(deps: Deps, campaign_id: UUID, state: str, *, stage
                     data={"stage": stage, "reason": reason})
         await emit(conn, workspace_id=prev["workspace_id"], campaign_id=campaign_id, event_type="state",
                    message=f"Campaign {state}" + (f" ({stage})" if stage else "") + (f": {reason}" if reason else ""))
+        if state in ("blocked", "failed", "requires_human_review", "completed"):
+            await conn.execute("""insert into notifications(workspace_id, level, title, body) values ($1,$2,$3,$4)""",
+                               prev["workspace_id"], "info" if state == "completed" else "warning",
+                               f"Campaign {state}", reason or f"Campaign reached state {state}.")
 
 
 def discovery_queries(niche: str, location: dict) -> list[str]:
@@ -294,7 +298,9 @@ async def advance(deps: Deps, campaign_id: UUID) -> str | None:
     done = {r["task_type"] for r in await db.fetch("select distinct task_type from tasks where campaign_id = $1", campaign_id)}
     stages = c["stages"]
     ws = c["workspace_id"]
-    if blocked and blocked["task_type"] in STAGE_TASKS["discovery"] and not await accepted_count(deps, campaign_id):
+    verified = await db.fetchval("""select count(*) from prospects where campaign_id = $1
+                                    and state in ('website_verified','researched','qualified','requires_human_review')""", campaign_id)
+    if blocked and blocked["task_type"] in STAGE_TASKS["discovery"] and not verified:
         await set_campaign_state(deps, campaign_id, "blocked", stage="discovery",
                                  reason=f"{blocked['error_code']}: {blocked['error_detail']}"[:500])
         return "blocked"

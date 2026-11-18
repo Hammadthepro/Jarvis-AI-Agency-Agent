@@ -108,3 +108,28 @@ async def test_outreach_send_blocked_until_ready(client):
                                                                          "postal_address_type": "street", "attest_postal_address": True})
     items = {i["key"]: i["ok"] for i in r.json()["items"]}
     assert items["sending_domain"] is False and items["postal_address"] is False
+
+
+async def test_voice_internal_endpoint_auth_and_pipeline(client, deps):
+    a = await login(client, "voice@t.dev")
+    body = {"user_id": a["me"]["user_id"], "workspace_id": a["me"]["workspace_id"], "text": "Find 10 roofers in Denver"}
+    assert (await client.post("/internal/voice/command", json=body)).status_code == 401
+    client.app.state.settings = deps.settings.model_copy(update={"voice_agent_shared_secret": __import__("pydantic").SecretStr("voice-secret-0123456789abcdef")})
+    r = await client.post("/internal/voice/command", json=body, headers={"X-Voice-Agent-Key": "wrong"})
+    assert r.status_code == 401
+    r = await client.post("/internal/voice/command", json=body, headers={"X-Voice-Agent-Key": "voice-secret-0123456789abcdef"})
+    assert r.status_code == 200 and "roofing" in r.json()["say"] and "compliance" in r.json()["say"]
+    cmds = (await client.get("/commands", headers=a["headers"])).json()
+    assert cmds[0]["channel"] == "voice" and cmds[0]["raw_text"] == "Find 10 roofers in Denver"
+    r = await client.post("/voice/token", headers=a["headers"])
+    assert r.status_code == 424 and r.json()["state"] == "NOT_CONFIGURED"
+
+
+async def test_system_readiness_reports_real_gaps(client):
+    a = await login(client, "ready@t.dev")
+    r = (await client.get("/system/readiness", headers=a["headers"])).json()
+    items = {i["key"]: i for i in r["items"]}
+    assert r["ready"] is False
+    assert items["discovery_provider"]["ok"] is False and "BLOCKED_PENDING_APPROVAL" in items["discovery_provider"]["detail"]
+    assert items["terms_of_use_published"]["ok"] is False and items["privacy_policy_published"]["ok"] is False
+    assert items["claude_api"]["ok"] is True          # configured with a test credential in this fixture

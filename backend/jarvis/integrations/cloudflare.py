@@ -78,7 +78,7 @@ class CloudflarePagesClient:
         if not npx:
             raise ProviderError(PROVIDER, IntegrationState.NOT_CONFIGURED, "npx (Node.js) not available on this host")
         assert self.settings.cloudflare_api_token
-        env = {"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "/tmp"),
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "/tmp"),  # noqa: S108
                "CLOUDFLARE_API_TOKEN": self.settings.cloudflare_api_token.get_secret_value(),
                "CLOUDFLARE_ACCOUNT_ID": self.settings.cloudflare_account_id or "", "WRANGLER_SEND_METRICS": "false",
                "CI": "1"}

@@ -1,0 +1,60 @@
+# Production-style stack for the VPS. Local development: docker-compose.dev.yml adds Postgres.
+# Supabase provides Postgres/Auth/Storage in production (DATABASE_URL points at Supabase).
+services:
+  api:
+    build: { context: ., dockerfile: docker/app.Dockerfile }
+    image: jarvis-app:latest
+    env_file: .env
+    environment: { QA_RUNNER_MODE: docker }
+    volumes: [ "sites:/var/lib/jarvis/sites" ]
+    restart: unless-stopped
+    healthcheck: { test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/ready"], interval: 30s, timeout: 5s, retries: 3 }
+
+  migrate:
+    image: jarvis-app:latest
+    env_file: .env
+    command: ["python", "-m", "jarvis.db.migrate"]
+    restart: "no"
+
+  worker:
+    image: jarvis-app:latest
+    env_file: .env
+    command: ["python", "-m", "jarvis.worker.main"]
+    environment:
+      QA_RUNNER_MODE: docker
+      # The worker never sees the host Docker socket; it talks to a proxy that only allows container lifecycle calls.
+      DOCKER_HOST: tcp://docker-proxy:2375
+      SITES_ARTIFACT_DIR: /var/lib/jarvis/sites
+    volumes: [ "sites:/var/lib/jarvis/sites" ]
+    stop_grace_period: 90s
+    restart: unless-stopped
+    depends_on: [ docker-proxy ]
+
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    environment: { CONTAINERS: 1, POST: 1, IMAGES: 0, NETWORKS: 0, VOLUMES: 0, EXEC: 0, BUILD: 0, SWARM: 0, SERVICES: 0, TASKS: 0 }
+    volumes: [ "/var/run/docker.sock:/var/run/docker.sock:ro" ]
+    restart: unless-stopped
+
+  voice:
+    build: { context: ., dockerfile: docker/voice.Dockerfile }
+    env_file: .env
+    profiles: ["voice"]
+    restart: unless-stopped
+
+  backup:
+    image: jarvis-app:latest
+    env_file: .env
+    entrypoint: ["/bin/sh", "-c", "while true; do /app/scripts/backup.sh || echo 'backup failed'; sleep 86400; done"]
+    volumes: [ "./scripts:/app/scripts:ro", "backups:/backups" ]
+    user: root
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.8.4
+    ports: [ "80:80", "443:443" ]
+    volumes: [ "./docker/Caddyfile:/etc/caddy/Caddyfile:ro", "caddy_data:/data" ]
+    environment: { API_HOSTNAME: "${API_HOSTNAME}", CADDY_ACME_EMAIL: "${CADDY_ACME_EMAIL}" }
+    restart: unless-stopped
+
+volumes: { sites: {}, backups: {}, caddy_data: {} }
