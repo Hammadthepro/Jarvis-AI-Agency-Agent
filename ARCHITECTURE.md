@@ -1,6 +1,6 @@
 # JARVIS — System Architecture
 
-Status: **Proposed, revision 3.** Awaiting architecture approval. No application code exists.
+Status: **Revision 3 design, implemented in revision 4.** Implementation status and the decisions that differ from this design are in [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) §4.
 Last updated: 2026-11-18. Full change history: [CHANGELOG.md](CHANGELOG.md).
 
 Related documents:

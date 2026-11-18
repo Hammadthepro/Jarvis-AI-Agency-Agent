@@ -1,4 +1,8 @@
-# JARVIS Documentation Changelog
+# JARVIS Changelog
+
+## Revision 4: implementation (2026-11-18)
+- Implemented the full platform. See docs/IMPLEMENTATION_STATUS.md for verified status, test results, blockers and decisions that differ from revision 3 (structured-spec renderer, Postgres-checkpointed engine, VERIFIED_* website statuses, API-served unsubscribe, socket-proxy sandbox access).
+- New docs: docs/IMPLEMENTATION_STATUS.md, docs/OPERATIONS.md. README rewritten with run instructions.
 
 ## Revision 3 (2026-11-18)
 
