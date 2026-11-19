@@ -6,7 +6,7 @@ import hashlib
 import json
 import time
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 import jwt
@@ -20,16 +20,13 @@ from jarvis.core.compliance import INTENDED_USE, gate_status
 from jarvis.core.errors import (
     ComplianceBlocked,
     Forbidden,
-    IntegrationState,
     InvalidTransition,
     JarvisError,
     NotFound,
-    ProviderError,
     ValidationFailed,
 )
 from jarvis.db.audit import audit
 from jarvis.integrations.base import CallContext
-from jarvis.integrations.google_places import IDS_ONLY
 from jarvis.integrations.resend import verify_svix
 
 public = APIRouter()
@@ -210,34 +207,6 @@ async def put_limit(limit_id: uuid.UUID, body: LimitIn, request: Request, me: Pr
     return {"ok": True}
 
 
-def _configured(request: Request, provider: str) -> bool:
-    d = request.app.state.deps
-    return {"anthropic": d.claude.configured, "google_places": d.places.configured, "serp_api": d.serp.configured,
-            "firecrawl": d.firecrawl.configured, "cloudflare": d.cloudflare.configured, "resend": d.email.configured,
-            "livekit": request.app.state.livekit.configured}[provider]
-
-
-@router.get("/integrations")
-async def integrations(request: Request, me: Principal = CurrentPrincipal):
-    db = request.app.state.db
-    rows = {r["provider"]: dict(r) for r in await db.fetch("select * from provider_integrations where workspace_id=$1", me.workspace_id)}
-    async with db.acquire() as conn:
-        gate = await gate_status(conn, me.workspace_id, "google_places_prospect_selection")
-    out = []
-    for p in PROVIDERS:
-        configured = _configured(request, p)
-        r = rows.get(p, {})
-        state = (r.get("state") or "NOT_CONFIGURED") if configured else "NOT_CONFIGURED"
-        if p == "google_places" and configured and not gate["open"]:
-            state = IntegrationState.BLOCKED_PENDING_APPROVAL.value
-        if not configured:
-            state = "NOT_CONFIGURED"
-        out.append({"provider": p, "configured": configured, "state": state, "tested": bool(r.get("last_test_ok")),
-                    "last_checked_at": r.get("last_checked_at"), "detail": r.get("detail") if configured else _missing(p),
-                    "compliance": gate if p == "google_places" else None})
-    return J(out)
-
-
 def _missing(p: str) -> str:
     return {"anthropic": "Set ANTHROPIC_API_KEY (Claude Console API key; a Claude Code subscription is not API access)",
             "google_places": "Set GOOGLE_PLACES_API_KEY (Google Cloud project with only Places API (New) enabled)",
@@ -245,62 +214,6 @@ def _missing(p: str) -> str:
             "cloudflare": "Set CLOUDFLARE_API_TOKEN (Pages:Edit) and CLOUDFLARE_ACCOUNT_ID",
             "resend": "Set EMAIL_PROVIDER=resend and RESEND_API_KEY (requires your own sending domain)",
             "livekit": "Set LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET"}[p]
-
-
-async def _record_test(db, ws, provider: str, ok: bool, state: str, detail: str | None) -> None:
-    await db.execute("""insert into provider_integrations(workspace_id, provider, configured, state, last_checked_at, last_test_ok, detail)
-                        values ($1,$2,true,$3,now(),$4,$5) on conflict (workspace_id, provider) do update set state=excluded.state,
-                        last_checked_at=now(), last_test_ok=excluded.last_test_ok, detail=excluded.detail, configured=true""",
-                     ws, provider, state, ok, detail)
-
-
-@router.post("/integrations/{provider}/test")
-async def test_integration(provider: str, request: Request, me: Principal = CurrentPrincipal):
-    """Connection tests use free endpoints only. Google Places uses the Essentials (IDs Only) SKU, which
-    Google lists as having no charge, and still requires the technical-testing compliance scope."""
-    me.require("owner")
-    d, db = request.app.state.deps, request.app.state.db
-    if provider not in PROVIDERS:
-        raise NotFound("unknown provider")
-    if not _configured(request, provider):
-        return {"provider": provider, "state": "NOT_CONFIGURED", "detail": _missing(provider)}
-    try:
-        if provider == "anthropic":
-            res = {m: await d.claude.validate_model(m) for m in {d.settings.claude_model_fast, d.settings.claude_model_build,
-                                                                d.settings.claude_model_escalation}}
-        elif provider == "serp_api":
-            acct = await d.serp.account()
-            res = {k: acct.get(k) for k in ("plan_name", "searches_per_month", "this_month_usage", "plan_searches_left")}
-            await _report(db, me.workspace_id, "serp_api", "search", acct.get("this_month_usage"), acct)
-        elif provider == "firecrawl":
-            res = await d.firecrawl.credit_usage()
-            await _report(db, me.workspace_id, "firecrawl", "credit_remaining", (res.get("data") or {}).get("remaining_credits"), res)
-        elif provider == "cloudflare":
-            res = await d.cloudflare.verify_token()
-        elif provider == "resend":
-            r = await db.fetchrow("select sending_domain from sender_readiness where workspace_id=$1", me.workspace_id)
-            res = await d.email.domain_status(r["sending_domain"]) if r and r["sending_domain"] else {"note": "no sending domain set"}
-        elif provider == "livekit":
-            res = await request.app.state.livekit.check()
-        else:
-            page = await d.places.text_search(CallContext(db, me.workspace_id), text_query="plumber in Austin, TX", min_rating=None,
-                                              include_service_area=True, page_size=1, mask=IDS_ONLY,
-                                              scope="google_places_technical_testing")
-            res = {"returned_ids": len(page.places), "sku": page.sku}
-    except ProviderError as exc:
-        await _record_test(db, me.workspace_id, provider, False, exc.state.value, exc.message[:300])
-        return {"provider": provider, "state": exc.state.value, "detail": exc.message[:300]}
-    except ComplianceBlocked as exc:
-        return {"provider": provider, "state": "BLOCKED_PENDING_APPROVAL", "detail": exc.message}
-    await _record_test(db, me.workspace_id, provider, True, "CONNECTED", None)
-    return J({"provider": provider, "state": "CONNECTED", "result": res})
-
-
-async def _report(db, ws, provider, unit, units, raw) -> None:
-    now = datetime.now(UTC)
-    await db.execute("""insert into provider_usage_reports(workspace_id, provider, period_start, period_end, unit, reported_units, source, raw)
-                        values ($1,$2,$3,$4,$5,$6,'provider_api',$7)""", ws, provider, now.replace(day=1, hour=0, minute=0, second=0,
-                     microsecond=0), now, unit, units, raw)
 
 
 class ApprovalIn(BaseModel):
@@ -454,6 +367,9 @@ async def manual_report(body: ManualReportIn, request: Request, me: Principal = 
 async def voice_token(request: Request, me: Principal = CurrentPrincipal):
     me.require("operator")
     lk = request.app.state.livekit
+    from jarvis.core.integrations import DISABLED
+    if "livekit" in DISABLED:
+        return JSONResponse({"state": "DISABLED", "detail": "LiveKit is disabled in the Integrations Center"}, status_code=424)
     if not lk.configured:
         return JSONResponse({"state": "NOT_CONFIGURED", "detail": _missing("livekit")}, status_code=424)
     room = f"jarvis-{me.workspace_id}-{uuid.uuid4().hex[:8]}"

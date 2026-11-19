@@ -55,7 +55,7 @@ async def test_t12_places_gate_blocks_with_zero_requests(client, deps, web):
     assert r.status_code == 403 and r.json()["error"]["code"] == "COMPLIANCE_BLOCKED"
     assert not [c for c in web.calls if "places.googleapis.com" in c[1]]
     # listing panel also gated
-    integ = {i["provider"]: i for i in (await client.get("/integrations", headers=a["headers"])).json()}
+    integ = {i["provider"]: i for i in (await client.get("/integrations", headers=a["headers"])).json()["integrations"]}
     assert integ["google_places"]["state"] == "BLOCKED_PENDING_APPROVAL"
     assert integ["livekit"]["state"] == "NOT_CONFIGURED"
 

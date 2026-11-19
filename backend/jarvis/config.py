@@ -24,7 +24,11 @@ class Settings(BaseSettings):
     jarvis_worker_id: str | None = None
     jarvis_worker_concurrency: int = Field(3, ge=1, le=8)
     jarvis_task_lease_seconds: int = Field(300, ge=30, le=1800)
-    jarvis_encryption_key: SecretStr | None = None
+    jarvis_encryption_key: SecretStr | None = None            # AES-256-GCM key for stored provider credentials
+    jarvis_encryption_key_previous: SecretStr | None = None   # only during key rotation
+    # Deployment administrators: may manage provider credentials in the Integrations Center (comma-separated).
+    jarvis_admin_user_ids: str = ""
+    jarvis_admin_emails: str = ""
 
     database_url: str = "postgresql://postgres@localhost:5432/postgres"
     database_pool_size: int = Field(5, ge=1, le=20)
@@ -116,6 +120,14 @@ class Settings(BaseSettings):
             if not self.places_api_base_url.startswith("https://places.googleapis.com/"):
                 raise ValueError("PLACES_API_BASE_URL must be https://places.googleapis.com/v1 in production")
         return self
+
+    @property
+    def admin_user_ids(self) -> set[str]:
+        return {x.strip().lower() for x in self.jarvis_admin_user_ids.split(",") if x.strip()}
+
+    @property
+    def admin_emails(self) -> set[str]:
+        return {x.strip().lower() for x in self.jarvis_admin_emails.split(",") if x.strip()}
 
     @property
     def cors_origins(self) -> list[str]:

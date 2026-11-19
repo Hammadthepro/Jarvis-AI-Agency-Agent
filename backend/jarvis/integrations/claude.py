@@ -59,12 +59,20 @@ class ClaudeClient:
     def configured(self) -> bool:
         return self.settings.anthropic_api_key is not None or self._client is not None
 
+    def reconfigure(self, settings: Settings) -> None:
+        """Applies new effective settings; drops a cached SDK client built from a different key."""
+        old = self.settings.anthropic_api_key
+        self.settings = settings
+        if getattr(self, "_owned", False) and old != settings.anthropic_api_key:
+            self._client, self._owned = None, False
+
     def client(self) -> anthropic.AsyncAnthropic:
         if self._client is None:
             if not self.settings.anthropic_api_key:
                 raise not_configured(PROVIDER, "ANTHROPIC_API_KEY (Claude Console API key)")
             self._client = anthropic.AsyncAnthropic(api_key=self.settings.anthropic_api_key.get_secret_value(),
                                                     max_retries=2, timeout=600)
+            self._owned = True
         return self._client
 
     async def validate_model(self, model: str) -> dict:

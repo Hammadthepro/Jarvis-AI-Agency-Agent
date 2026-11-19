@@ -42,6 +42,11 @@ class ResendClient:
         assert self.settings.resend_api_key
         return {"Authorization": f"Bearer {self.settings.resend_api_key.get_secret_value()}"}
 
+    async def list_domains(self) -> list[dict]:
+        """Domains on the Resend account (free). Validates the API key."""
+        r = await http_request(PROVIDER, self.http, "GET", f"{API}/domains", headers=self._h())
+        return r.json().get("data", [])
+
     async def domain_status(self, domain: str) -> dict:
         r = await http_request(PROVIDER, self.http, "GET", f"{API}/domains", headers=self._h())
         for d in r.json().get("data", []):

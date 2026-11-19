@@ -62,6 +62,12 @@ class CloudflarePagesClient:
             r = await http_request(PROVIDER, self.http, "GET", f"{API}/user/tokens/verify", headers=h)
         return r.json()
 
+    async def list_projects(self) -> list[dict]:
+        """Lists Pages projects in the account (free). Confirms the account id and the token's Pages access."""
+        r = await http_request(PROVIDER, self.http, "GET", f"{API}/accounts/{self.settings.cloudflare_account_id}/pages/projects",
+                               headers=self._auth())
+        return r.json().get("result") or []
+
     async def ensure_project(self) -> None:
         h = self._auth()
         acct = self.settings.cloudflare_account_id

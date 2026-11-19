@@ -58,6 +58,8 @@ class Worker:
         self.grace_s = grace_s
         self.stop = asyncio.Event()
         self.inflight: dict[uuid.UUID, asyncio.Task] = {}
+        self.base_settings: Settings = s
+        self._cred_version: str | None = None
         self.started = datetime.now(UTC)
 
     async def run_task(self, task: queue.Task) -> None:
@@ -137,9 +139,29 @@ class Worker:
         except Exception:  # bookkeeping must never fail the task
             log.warning("agent_execution.record_failed", task_id=str(task.id))
 
+    async def refresh_credentials(self) -> bool:
+        """Applies credentials saved in the Integrations Center when they change (checked every heartbeat)."""
+        from jarvis.core import integrations
+        v = await integrations.credentials_version(self.db)
+        if v == self._cred_version or (self._cred_version is None and v.endswith(":0")):
+            self._cred_version = v
+            return False
+        res = await integrations.refresh(self.deps, self.base_settings)
+        self._cred_version = v
+        if res["error"]:
+            log.error("credentials.load_failed", detail=res["error"])
+        else:
+            log.info("credentials.applied", providers=sorted(p for p, i in res["info"].items() if i["sources"]))
+        return True
+
     async def heartbeat_loop(self) -> None:
         while not self.stop.is_set():
             healthy = await self.db.health()
+            if healthy:
+                try:
+                    await self.refresh_credentials()
+                except Exception:   # never stop heartbeats; the error is logged
+                    log.exception("credentials.refresh_failed")
             try:
                 if healthy:
                     await self.db.execute(

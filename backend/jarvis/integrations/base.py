@@ -112,6 +112,9 @@ async def _set_state(db: Database, ws: UUID, provider: str, state: IntegrationSt
 
 
 async def check_kill_switches(db: Database, ctx: CallContext, provider: str) -> None:
+    from jarvis.core.integrations import DISABLED
+    if provider in DISABLED:
+        raise ProviderError(provider, IntegrationState.DISABLED, f"{provider} is disabled in the Integrations Center")
     row = await db.fetchrow("select global_kill_switch, provider_kill_switches from system_settings where workspace_id = $1",
                             ctx.workspace_id)
     if row and row["global_kill_switch"]:
