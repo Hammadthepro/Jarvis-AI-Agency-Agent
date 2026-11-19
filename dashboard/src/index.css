@@ -15,6 +15,10 @@
   --color-signal-500: #6d8bff;
   --color-signal-400: #8aa2ff;
   --color-signal-300: #b0c0ff;
+  --color-arc-300: #8beaff;
+  --color-arc-400: #3fd6f5;
+  --color-arc-500: #13b7da;
+  --color-arc-700: #0b5f73;
   --color-ok-500: #35c28b;
   --color-warn-500: #f0b04a;
   --color-bad-500: #f0616d;
@@ -29,3 +33,10 @@ body { font-family: var(--font-sans); -webkit-font-smoothing: antialiased; backg
 .glow { box-shadow: 0 0 0 1px color-mix(in oklab, var(--color-signal-500) 35%, transparent), 0 8px 40px -12px color-mix(in oklab, var(--color-signal-500) 45%, transparent); }
 .scroll-thin::-webkit-scrollbar { width: 8px; height: 8px; }
 .scroll-thin::-webkit-scrollbar-thumb { background: var(--color-ink-700); border-radius: 8px; }
+
+@keyframes jarvis-spin { to { transform: rotate(360deg); } }
+@keyframes jarvis-spin-rev { to { transform: rotate(-360deg); } }
+.jarvis-spin { animation: jarvis-spin 18s linear infinite; transform-origin: center; }
+.jarvis-spin-fast { animation: jarvis-spin 2.4s linear infinite; transform-origin: center; }
+.jarvis-spin-rev { animation: jarvis-spin-rev 26s linear infinite; transform-origin: center; }
+@media (prefers-reduced-motion: reduce) { .jarvis-spin, .jarvis-spin-fast, .jarvis-spin-rev { animation: none; } }

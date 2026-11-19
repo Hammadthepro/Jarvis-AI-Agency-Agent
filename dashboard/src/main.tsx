@@ -6,6 +6,7 @@ import "./index.css";
 import { ApiError } from "./lib/api";
 import Shell from "./components/Shell";
 import Console from "./pages/Console";
+import CommandCenterPage from "./pages/CommandCenter";
 import OverviewPage from "./pages/Overview";
 import CampaignsPage, { CampaignDetailPage } from "./pages/Campaigns";
 import ProspectsPage, { ProspectDetailPage } from "./pages/Prospects";
@@ -27,7 +28,8 @@ export function App() {
   return (
     <Routes>
       <Route element={<Shell />}>
-        <Route index element={<Console />} />
+        <Route index element={<CommandCenterPage />} />
+        <Route path="commands" element={<Console />} />
         <Route path="overview" element={<OverviewPage />} />
         <Route path="campaigns" element={<CampaignsPage />} />
         <Route path="campaigns/:id" element={<CampaignDetailPage />} />

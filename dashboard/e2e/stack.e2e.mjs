@@ -11,6 +11,14 @@ const assert = (c, m) => { if (!c) { throw new Error("ASSERT: " + m); } };
 
 // 0) No sign-in: the dashboard opens directly to the Command Center (local development access mode).
 await page.goto(base);
+await page.getByLabel("Message JARVIS").waitFor();                       // voice-first JARVIS screen
+// A real text turn through the SAME conversation the voice agent uses. Without an Anthropic key here the
+// deterministic router answers and the reply is labelled "basic mode" (never a fake Claude answer).
+await page.getByLabel("Message JARVIS").fill("Find 10 roofers in Denver, CO");
+await page.getByRole("button", { name: "Send" }).click();
+await page.getByText(/roofing businesses in Denver, CO/).first().waitFor({ timeout: 30000 });
+await page.screenshot({ path: `${out}/e2e-jarvis.png` });
+await page.goto(`${base}/commands`);
 await page.getByText("What should JARVIS work on?").waitFor();
 assert(await page.locator('input[type="email"], input[type="password"]').count() === 0, "no login form");
 assert(!(await page.getByRole("button", { name: /sign in/i }).count()), "no sign-in button");
@@ -51,7 +59,7 @@ assert((integText.match(/NOT_CONFIGURED/g) || []).length >= 6, "unconfigured pro
 assert(/Restricted/.test(integText), "Google Places is shown as restricted");
 assert(/Administrator: can edit/.test(integText), "the local operator administers the local deployment");
 await page.screenshot({ path: `${out}/e2e-integrations.png`, fullPage: true });
-await page.getByRole("link", { name: "Voice Agent" }).first().click();
+await page.getByRole("link", { name: "Voice Setup" }).first().click();
 await page.getByText(/LiveKit server URL, API key and API secret/).waitFor();
 await page.getByRole("link", { name: /Open Integrations/ }).waitFor();
 assert(await page.getByRole("button", { name: "Start voice session" }).isDisabled(), "voice start disabled when not ready");

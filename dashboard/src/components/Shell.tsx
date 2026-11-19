@@ -7,7 +7,7 @@ import { apiBase } from "../lib/config";
 import { IconActivity, IconCog, IconCoins, IconCommand, IconFlag, IconGauge, IconGlobe, IconMail, IconMic, IconPlug, IconUsers } from "./icons";
 
 const NAV = [
-  ["/", "Command Center", IconCommand], ["/voice", "Voice Agent", IconMic], ["/campaigns", "Campaigns", IconFlag],
+  ["/", "JARVIS", IconMic], ["/commands", "Commands", IconCommand], ["/voice", "Voice Setup", IconMic], ["/campaigns", "Campaigns", IconFlag],
   ["/prospects", "Prospects", IconUsers], ["/websites", "Websites & Previews", IconGlobe], ["/outreach", "Outreach", IconMail],
   ["/integrations", "Integrations", IconPlug], ["/activity", "Activity", IconActivity], ["/usage", "Usage & Costs", IconCoins],
   ["/overview", "Overview", IconGauge], ["/settings", "Settings", IconCog],

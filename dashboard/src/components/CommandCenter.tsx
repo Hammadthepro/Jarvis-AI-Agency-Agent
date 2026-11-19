@@ -64,10 +64,11 @@ export function AttentionCard() {
       {cmds.error ? <ErrorState error={cmds.error} /> : loading ? <Loading /> : items.length === 0 ? (
         <p className="text-sm text-ink-400">No approvals, questions or blockers waiting.</p>
       ) : (
-        <ul className="space-y-2 text-sm">{items.slice(0, 8).map((it) => (
+        <ul className="space-y-2 text-sm">{items.slice(0, 4).map((it) => (
           <li key={it.key} className={`flex items-start justify-between gap-3 rounded-lg px-3 py-2 ${it.tone === "bad" ? "bg-bad-500/10" : it.tone === "warn" ? "bg-warn-500/10" : "bg-signal-500/5"}`}>
-            <span className="text-ink-200">{it.text}</span><Link to={it.to} className="shrink-0 text-xs text-signal-300 hover:underline">{it.cta}</Link>
-          </li>))}</ul>
+            <span className="line-clamp-2 text-ink-200">{it.text}</span><Link to={it.to} className="shrink-0 text-xs text-signal-300 hover:underline">{it.cta}</Link>
+          </li>))}
+          {items.length > 4 && <li className="text-xs text-ink-500">+{items.length - 4} more in Campaigns and Commands</li>}</ul>
       )}
     </Card>
   );

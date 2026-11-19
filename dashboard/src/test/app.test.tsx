@@ -218,7 +218,7 @@ describe("No login screen", () => {
     mockAll({ status: 200, body: { email: "local-operator@jarvis.local", role: "owner", auth_mode: "local_development", environment: "local" } });
     const { App } = await import("../main");
     wrap(<App />);
-    expect(await screen.findByText("What should JARVIS work on?")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Message JARVIS")).toBeInTheDocument();          // voice-first JARVIS screen
     expect(await screen.findByText(/Local development mode/)).toBeInTheDocument();
     expect(document.querySelector('input[type="password"], input[type="email"]')).toBeNull();
     expect(screen.queryByRole("button", { name: /sign in|sign out/i })).toBeNull();
@@ -232,5 +232,44 @@ describe("No login screen", () => {
     wrap(<App />);
     expect(await screen.findByText(/local development access is not enabled/)).toBeInTheDocument();
     expect(document.querySelector('input[type="password"], input[type="email"]')).toBeNull();
+  });
+});
+
+describe("Voice-first JARVIS screen", () => {
+  it("derives the orb state only from real signals", async () => {
+    const { orbMode } = await import("../pages/CommandCenter");
+    expect(orbMode("listening", true, false, false)).toBe("listening");
+    expect(orbMode("speaking", true, false, true)).toBe("speaking");
+    expect(orbMode("idle", true, true, false)).toBe("thinking");
+    expect(orbMode("idle", true, false, true)).toBe("executing");
+    expect(orbMode("idle", false, false, false)).toBe("unavailable");
+    expect(orbMode("mic_denied", true, false, false)).toBe("error");
+    expect(orbMode("idle", true, false, false)).toBe("idle");
+  });
+
+  it("shows the shared voice+text conversation and confirms through the same conversation", async () => {
+    const posts: Array<{ path: string; body: string }> = [];
+    const convo = [
+      { id: 1, role: "user", channel: "voice", content: "Look at Bayou City Plumbing and build them a better site.", meta: {}, created_at: "2026-11-19T10:00:00Z" },
+      { id: 2, role: "assistant", channel: "voice", content: "I can verify, research and rebuild their site. Shall I start?", meta: { kind: "proposal", agent: "claude" }, created_at: "2026-11-19T10:00:02Z" },
+    ];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const p = pathOf(input);
+      if (init?.method === "POST") { posts.push({ path: p, body: String(init.body) }); return new Response(JSON.stringify({ say: "On it." }), { status: 200 }); }
+      if (p === "/conversation/messages") return new Response(JSON.stringify(convo), { status: 200 });
+      if (p === "/voice/status") return new Response(JSON.stringify({ state: "NOT_CONFIGURED", checks: {}, missing: ["LiveKit server URL, API key and API secret (Integrations > LiveKit)."], agent: null, token_ttl_s: 600 }), { status: 200 });
+      if (p === "/integrations") return new Response(JSON.stringify({ integrations: [], can_manage: true, vault: { ready: true }, credentials_error: null }), { status: 200 });
+      return new Response("[]", { status: 200 });
+    });
+    const { default: CommandCenterPage } = await import("../pages/CommandCenter");
+    wrap(<CommandCenterPage />);
+    expect(await screen.findByText("Look at Bayou City Plumbing and build them a better site.")).toBeInTheDocument();
+    expect(screen.getByText(/Shall I start\?/)).toBeInTheDocument();
+    expect(await screen.findByText(/Voice: LiveKit server URL/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Yes, go ahead" }));
+    await waitFor(() => expect(posts).toEqual([{ path: "/conversation/turn", body: JSON.stringify({ text: "Yes, go ahead." }) }]));
+    await userEvent.type(screen.getByLabelText("Message JARVIS"), "What have you completed today?");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(posts[1]).toEqual({ path: "/conversation/turn", body: JSON.stringify({ text: "What have you completed today?" }) }));
   });
 });
