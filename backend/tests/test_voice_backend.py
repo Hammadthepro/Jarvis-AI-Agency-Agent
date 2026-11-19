@@ -15,6 +15,7 @@ LK = {"livekit_url": "wss://jarvis-test.livekit.cloud", "livekit_api_key": Secre
 def voice(client, deps):
     s = deps.settings.model_copy(update=LK)
     client.app.state.settings = s
+    client.app.state.base_settings = s
     client.app.state.livekit.settings = s
     return client
 

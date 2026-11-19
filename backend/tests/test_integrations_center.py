@@ -239,3 +239,27 @@ async def test_other_provider_validations(center, deps):
     assert (await center.post("/integrations/firecrawl/test", headers=a["headers"])).json()["state"] == "QUOTA_EXCEEDED"
     deps.firecrawl.http = serp_transport(lambda req: httpx.Response(402, json={"error": "Payment required"}))
     assert (await center.post("/integrations/firecrawl/test", headers=a["headers"])).json()["state"] == "QUOTA_EXCEEDED"
+
+
+def test_rejected_key_reported_as_400_maps_to_invalid_credentials():
+    """Resend answers a rejected API key with HTTP 400 (body captured from the real API on 2026-11-19)."""
+    from jarvis.integrations.base import map_http_error
+    real = httpx.Response(400, json={"statusCode": 400, "message": "API key is invalid", "name": "validation_error"})
+    assert map_http_error("resend", real).state == IntegrationState.INVALID_CREDENTIALS
+    other = httpx.Response(400, json={"message": "missing field 'to'", "name": "validation_error"})
+    assert map_http_error("resend", other).state == IntegrationState.PROVIDER_ERROR
+
+
+async def test_api_instance_picks_up_changes_made_elsewhere(center, deps, db):
+    """Another API instance saves or removes credentials: this instance applies the change on its next request."""
+    a = await login(center, ADMIN)
+    v = Vault(parse_key(KEY))
+    await center.get("/integrations", headers=a["headers"])                          # baseline version
+    await db.execute("insert into integration_credentials(provider, secrets, key_id) values ('firecrawl', $1, $2)",
+                     {"api_key": v.encrypt("firecrawl", "api_key", "fc-" + "q" * 24)}, v.kid)
+    c = cards(await center.get("/integrations", headers=a["headers"]))["firecrawl"]
+    assert c["fields"][0]["source"] == "dashboard" and c["state"] == "NOT_TESTED"
+    assert deps.firecrawl.settings.firecrawl_api_key.get_secret_value() == "fc-" + "q" * 24
+    await db.execute("delete from integration_credentials where provider='firecrawl'")
+    await center.get("/integrations", headers=a["headers"])
+    assert deps.firecrawl.settings.firecrawl_api_key.get_secret_value() == "fc-test"   # back to the environment value

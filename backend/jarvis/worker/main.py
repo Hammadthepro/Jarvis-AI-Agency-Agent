@@ -151,7 +151,8 @@ class Worker:
         if res["error"]:
             log.error("credentials.load_failed", detail=res["error"])
         else:
-            log.info("credentials.applied", providers=sorted(p for p, i in res["info"].items() if i["sources"]))
+            log.info("credentials.applied", from_dashboard=sorted(p for p, i in res["info"].items()
+                                                                  if "dashboard" in i["sources"].values()))
         return True
 
     async def heartbeat_loop(self) -> None:

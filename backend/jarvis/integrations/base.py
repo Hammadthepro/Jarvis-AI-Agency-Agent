@@ -49,23 +49,48 @@ class CallOutcome:
     extra: dict = field(default_factory=dict)
 
 
+# Some providers answer a rejected key with HTTP 400 instead of 401 (observed: Resend returns
+# 400 {"message": "API key is invalid", "name": "validation_error"}).
+_BAD_KEY = ("api key is invalid", "invalid api key", "invalid api token", "invalid token", "authentication error")
+
+
+def provider_message(resp: httpx.Response) -> str:
+    """The provider's own error message from common JSON shapes, else the start of the body. Never includes headers."""
+    try:
+        j = resp.json()
+    except ValueError:
+        return (resp.text or resp.reason_phrase or "")[:200].strip()
+    if isinstance(j, dict):
+        errs = j.get("errors")
+        if isinstance(errs, list) and errs and isinstance(errs[0], dict) and errs[0].get("message"):
+            return "; ".join(str(e.get("message")) for e in errs[:3] if isinstance(e, dict))[:200]
+        err = j.get("error")
+        if isinstance(err, dict) and err.get("message"):
+            return str(err["message"])[:200]
+        for k in ("message", "error", "detail", "msg"):
+            if isinstance(j.get(k), str) and j[k]:
+                return j[k][:200]
+    return resp.text[:200]
+
+
 def map_http_error(provider: str, resp: httpx.Response) -> ProviderError:
     s = resp.status_code
     body = resp.text[:300]
-    if s == 401:
-        return ProviderError(provider, IntegrationState.INVALID_CREDENTIALS, body, http_status=s)
+    msg = provider_message(resp)
+    if s == 401 or (s == 400 and any(p in body.lower() for p in _BAD_KEY)):
+        return ProviderError(provider, IntegrationState.INVALID_CREDENTIALS, msg, http_status=s)
     if s == 403:
-        return ProviderError(provider, IntegrationState.PERMISSION_DENIED, body, http_status=s)
+        return ProviderError(provider, IntegrationState.PERMISSION_DENIED, msg, http_status=s)
     if s == 402:
-        return ProviderError(provider, IntegrationState.QUOTA_EXCEEDED, body, http_status=s)
+        return ProviderError(provider, IntegrationState.QUOTA_EXCEEDED, msg, http_status=s)
     if s == 429:
         quota = "quota" in body.lower() or "exhaust" in body.lower()
         return ProviderError(provider, IntegrationState.QUOTA_EXCEEDED if quota else IntegrationState.RATE_LIMITED,
-                             body, http_status=s, retryable=not quota)
+                             msg, http_status=s, retryable=not quota)
     if s >= 500:
         return ProviderError(provider, IntegrationState.TEMPORARILY_UNAVAILABLE if s in (502, 503, 504)
-                             else IntegrationState.PROVIDER_ERROR, body, http_status=s, retryable=True)
-    return ProviderError(provider, IntegrationState.PROVIDER_ERROR, body, http_status=s, retryable=False)
+                             else IntegrationState.PROVIDER_ERROR, msg, http_status=s, retryable=True)
+    return ProviderError(provider, IntegrationState.PROVIDER_ERROR, msg, http_status=s, retryable=False)
 
 
 async def http_request(provider: str, client: httpx.AsyncClient, method: str, url: str, *,

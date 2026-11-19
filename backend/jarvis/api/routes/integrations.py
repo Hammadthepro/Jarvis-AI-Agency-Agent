@@ -48,12 +48,14 @@ async def _refresh(request: Request) -> dict:
     st = request.app.state
     res = await I.refresh(st, st.base_settings, st.livekit)
     st.credentials_error = res["error"]
+    st.credentials_version = await I.credentials_version(st.db)
     return res
 
 
 @router.get("/integrations")
 async def list_integrations(request: Request, me: Principal = CurrentPrincipal):
     st = request.app.state
+    await I.ensure_fresh(st)
     db, deps, lk = st.db, st.deps, st.livekit
     _eff, info, load_err = await I.load_effective(db, st.base_settings)
     status = {r["provider"]: dict(r) for r in await db.fetch("select * from integration_status")}
@@ -166,10 +168,11 @@ async def test_integration(provider: str, request: Request, me: Principal = Curr
         result, quota = await I.validate(provider, deps, lk, db, me.workspace_id)
     except ProviderError as exc:
         state = I.DISPLAY_STATE.get(exc.state.value, exc.state.value)
-        await I.record_status(db, provider, exc.state.value, exc.message[:300], capabilities=[], quota=None, user_id=me.user_id, ok=False)
-        await _workspace_state(db, me.workspace_id, provider, exc.state.value, exc.message[:300], False)
+        reason = (getattr(exc, "reason", None) or exc.message)[:300]
+        await I.record_status(db, provider, exc.state.value, reason, capabilities=[], quota=None, user_id=me.user_id, ok=False)
+        await _workspace_state(db, me.workspace_id, provider, exc.state.value, reason, False)
         await _audit_test(db, me, provider, state)
-        return {"provider": provider, "state": state, "provider_state": exc.state.value, "detail": exc.message[:300],
+        return {"provider": provider, "state": state, "provider_state": exc.state.value, "detail": reason,
                 "http_status": exc.upstream_status}
     except ComplianceBlocked as exc:
         await _audit_test(db, me, provider, "BLOCKED_PENDING_APPROVAL")

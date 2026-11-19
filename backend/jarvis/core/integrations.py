@@ -274,6 +274,16 @@ async def refresh(app_or_deps, base: Settings, livekit=None) -> dict:
     return {"info": info, "error": err}
 
 
+async def ensure_fresh(state) -> None:
+    """Re-applies stored credentials in this API process if they changed anywhere (another instance, the worker
+    host, or a direct database change). Cheap: one aggregate query."""
+    v = await credentials_version(state.db)
+    if v != getattr(state, "credentials_version", None):
+        res = await refresh(state, state.base_settings, state.livekit)
+        state.credentials_error = res["error"]
+        state.credentials_version = v
+
+
 async def credentials_version(db) -> str:
     v = await db.fetchval("select coalesce(max(updated_at)::text, '') || ':' || count(*) from integration_credentials")
     return v or ""

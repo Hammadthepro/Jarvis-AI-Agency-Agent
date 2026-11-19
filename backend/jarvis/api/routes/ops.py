@@ -373,7 +373,8 @@ async def voice_status(request: Request, me: Principal = CurrentPrincipal):
     """Voice is OPERATIONAL only when LiveKit is configured, the last real LiveKit validation succeeded, the voice
     agent shared secret is set, and a voice agent process has heartbeated recently. Otherwise each missing piece
     is listed; nothing is reported as ready on configuration alone."""
-    from jarvis.core.integrations import DISABLED
+    from jarvis.core.integrations import DISABLED, ensure_fresh
+    await ensure_fresh(request.app.state)
     st, db = request.app.state, request.app.state.db
     lk = st.livekit
     status = await db.fetchrow("select state, last_success_at, detail from integration_status where provider='livekit'")
@@ -431,8 +432,9 @@ async def voice_end(body: VoiceEndIn, request: Request, me: Principal = CurrentP
 @router.post("/voice/token")
 async def voice_token(request: Request, me: Principal = CurrentPrincipal):
     me.require("operator")
+    from jarvis.core.integrations import DISABLED, ensure_fresh
+    await ensure_fresh(request.app.state)
     lk = request.app.state.livekit
-    from jarvis.core.integrations import DISABLED
     if "livekit" in DISABLED:
         return JSONResponse({"state": "DISABLED", "detail": "LiveKit is disabled in the Integrations Center"}, status_code=424)
     if not lk.configured:

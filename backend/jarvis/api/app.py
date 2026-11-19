@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 import structlog
@@ -32,13 +33,22 @@ def create_app(settings: Settings | None = None, deps: Deps | None = None) -> Fa
     async def lifespan(app: FastAPI):
         try:
             await app.state.db.connect()
-            res = await integrations_core.refresh(app.state, settings, app.state.livekit)
-            app.state.credentials_error = res["error"]
-            if res["error"]:
-                log.error("credentials.load_failed", detail=res["error"])
+            await integrations_core.ensure_fresh(app.state)
+            if app.state.credentials_error:
+                log.error("credentials.load_failed", detail=app.state.credentials_error)
         except Exception as exc:  # API still starts; /ready reports the outage
             log.warning("db.initial_connect_failed", error=str(exc))
+
+        async def watch_credentials() -> None:   # picks up changes made by other API instances
+            while True:
+                await asyncio.sleep(15)
+                try:
+                    await integrations_core.ensure_fresh(app.state)
+                except Exception as exc:
+                    log.warning("credentials.refresh_failed", error=str(exc))
+        watcher = asyncio.create_task(watch_credentials())
         yield
+        watcher.cancel()
         await app.state.db.close()
 
     app = FastAPI(title="JARVIS API", version="0.1.0", lifespan=lifespan)

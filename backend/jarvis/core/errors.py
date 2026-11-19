@@ -67,6 +67,7 @@ class ProviderError(JarvisError):
                  http_status: int | None = None, retryable: bool | None = None,
                  billing_ambiguous: bool = False) -> None:
         super().__init__(f"{provider}: {state}: {message}")
+        self.reason = message            # the provider's own explanation, without the provider/state prefix
         self.provider = provider
         self.state = state
         self.upstream_status = http_status
