@@ -37,7 +37,10 @@ class LiveKitClient:
               agent: bool = False, room_admin: bool = False) -> str:
         _url, key, secret = self._require()
         now = int(time.time())
-        video = {"room": room, "roomJoin": True, "canPublish": True, "canSubscribe": True, "canPublishData": True}
+        # Browser tokens: join ONE room, publish only the microphone (no camera/screen), subscribe to the agent,
+        # send data (interrupt/stop controls). No room creation, listing, admin or recording rights.
+        video = {"room": room, "roomJoin": True, "canPublish": True, "canPublishSources": ["microphone"],
+                 "canSubscribe": True, "canPublishData": True, "canUpdateOwnMetadata": False}
         if room_admin:
             video = {"roomList": True, "roomAdmin": True, "room": room}
         claims = {"iss": key, "sub": identity, "name": name, "nbf": now - 5, "exp": now + ttl_s, "jti": uuid.uuid4().hex,
@@ -49,6 +52,12 @@ class LiveKitClient:
     def http_url(self) -> str:
         url, _, _ = self._require()
         return url.replace("wss://", "https://").replace("ws://", "http://")
+
+    async def delete_room(self, room: str) -> None:
+        """Ends a voice session for everyone in it (Twirp RoomService.DeleteRoom)."""
+        tok = self.token(identity="jarvis-api", name="jarvis-api", room=room, ttl_s=60, room_admin=True)
+        await http_request(PROVIDER, self.http, "POST", f"{self.http_url()}/twirp/livekit.RoomService/DeleteRoom",
+                           json={"room": room}, headers={"Authorization": f"Bearer {tok}"})
 
     async def check(self) -> dict:
         tok = self.token(identity="jarvis-healthcheck", name="healthcheck", room="*", ttl_s=60, room_admin=True)

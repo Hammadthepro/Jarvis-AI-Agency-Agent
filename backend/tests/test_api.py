@@ -118,7 +118,7 @@ async def test_voice_internal_endpoint_auth_and_pipeline(client, deps):
     r = await client.post("/internal/voice/command", json=body, headers={"X-Voice-Agent-Key": "wrong"})
     assert r.status_code == 401
     r = await client.post("/internal/voice/command", json=body, headers={"X-Voice-Agent-Key": "voice-secret-0123456789abcdef"})
-    assert r.status_code == 200 and "roofing" in r.json()["say"] and "compliance" in r.json()["say"]
+    assert r.status_code == 200 and "roofing" in r.json()["say"] and "blocked" in r.json()["say"]
     cmds = (await client.get("/commands", headers=a["headers"])).json()
     assert cmds[0]["channel"] == "voice" and cmds[0]["raw_text"] == "Find 10 roofers in Denver"
     r = await client.post("/voice/token", headers=a["headers"])

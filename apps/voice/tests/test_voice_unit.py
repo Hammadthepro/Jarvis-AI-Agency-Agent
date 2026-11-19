@@ -1,5 +1,6 @@
 """Offline tests of the voice agent's turn handling, identity binding and LiveKit object construction."""
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -68,3 +69,73 @@ async def test_worker_and_session_objects_construct_with_real_sdk(monkeypatch):
     from livekit.agents import AgentSession, RoomInputOptions
     AgentSession(stt=agent.STT, tts=agent.TTS, turn_handling=agent.TURN_HANDLING)
     RoomInputOptions(participant_identity="user-1", close_on_disconnect=True)
+
+
+def test_control_messages_only_from_session_owner():
+    msg = json.dumps({"type": "interrupt"}).encode()
+    assert agent.parse_control(msg, "jarvis-control", "user-1", "user-1") == "interrupt"
+    assert agent.parse_control(json.dumps({"type": "end"}).encode(), "jarvis-control", "user-1", "user-1") == "end"
+    assert agent.parse_control(msg, "jarvis-control", "user-2", "user-1") is None      # another participant
+    assert agent.parse_control(msg, "jarvis", "user-1", "user-1") is None              # wrong topic
+    assert agent.parse_control(b"not json", "jarvis-control", "user-1", "user-1") is None
+    assert agent.parse_control(json.dumps({"type": "run_shell"}).encode(), "jarvis-control", "user-1", "user-1") is None
+
+
+@pytest.mark.asyncio
+async def test_progress_is_spoken_only_on_real_changes_and_stops_at_terminal_state():
+    states = iter([
+        {"found": True, "state": "running", "stage": "verification", "counts": {"deployed": 0}, "say": "a"},
+        {"found": True, "state": "running", "stage": "verification", "counts": {"deployed": 0}, "say": "a"},
+        {"found": True, "state": "running", "stage": "build", "counts": {"deployed": 0}, "say": "Now building."},
+        {"found": True, "state": "completed", "stage": "completed", "counts": {"deployed": 2}, "say": "Done: 2 deployed."},
+    ])
+    spoken, published = [], []
+
+    async def speak(t):
+        spoken.append(t)
+
+    async def publish(k, t):
+        published.append((k, t))
+    t = agent.TurnHandler("u1", "w1", publish, http=httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json=next(states)))), api="http://api", secret="s", speak=speak, poll_s=0)
+    await t.progress_loop("c1")
+    assert spoken == ["Now building.", "Done: 2 deployed."] and ("progress", "Now building.") in published
+
+
+@pytest.mark.asyncio
+async def test_authorized_campaign_starts_progress_watch():
+    async def publish(k, t):
+        pass
+
+    async def speak(t):
+        pass
+    t = agent.TurnHandler("u1", "w1", publish, http=httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={"kind": "confirmed", "campaign_id": "c9", "say": "Campaign authorized."}))),
+        api="http://api", secret="s", speak=speak, poll_s=3600)
+    assert await t.handle("confirm") == "Campaign authorized."
+    assert "c9" in t.watchers
+    await t.aclose()
+
+
+def test_livekit_credentials_from_env_or_integrations_center(monkeypatch):
+    for k in ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"):
+        monkeypatch.delenv(k, raising=False)
+    seen = []
+
+    def handler(req):
+        seen.append(req.headers.get("X-Voice-Agent-Key"))
+        return httpx.Response(200, json={"state": "CONFIGURED", "url": "wss://x.livekit.cloud", "api_key": "k", "api_secret": "s"})
+    assert agent.ensure_livekit_env("http://api", "sec", httpx.Client(transport=httpx.MockTransport(handler))) == "integrations_center"
+    assert os.environ["LIVEKIT_URL"] == "wss://x.livekit.cloud" and seen == ["sec"]
+    assert agent.ensure_livekit_env("http://api", "sec") == "environment"
+    for k in ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"):
+        monkeypatch.delenv(k, raising=False)
+    nc = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"state": "NOT_CONFIGURED"})))
+    assert agent.ensure_livekit_env("http://api", "sec", nc) == "missing"
+
+
+def test_heartbeat_reports_failure_honestly():
+    ok = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"ok": True})))
+    bad = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(401)))
+    assert agent.heartbeat_once(ok, "http://api", "s") is True
+    assert agent.heartbeat_once(bad, "http://api", "s") is False

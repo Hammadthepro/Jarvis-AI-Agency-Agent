@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 
 from jarvis.agents.deps import Deps
 from jarvis.api.auth import RateLimiter, TokenVerifier
-from jarvis.api.routes import campaigns, ops, records
+from jarvis.api.routes import campaigns, conversation, ops, records
 from jarvis.api.routes import integrations as integrations_routes
 from jarvis.config import Settings, get_settings
 from jarvis.core import integrations as integrations_core
@@ -81,6 +81,7 @@ def create_app(settings: Settings | None = None, deps: Deps | None = None) -> Fa
     app.include_router(records.router)
     app.include_router(ops.router)
     app.include_router(integrations_routes.router)
+    app.include_router(conversation.router)
     return app
 
 

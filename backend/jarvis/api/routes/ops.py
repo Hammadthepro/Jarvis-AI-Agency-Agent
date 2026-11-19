@@ -23,6 +23,7 @@ from jarvis.core.errors import (
     InvalidTransition,
     JarvisError,
     NotFound,
+    ProviderError,
     ValidationFailed,
 )
 from jarvis.db.audit import audit
@@ -363,6 +364,70 @@ async def manual_report(body: ManualReportIn, request: Request, me: Principal = 
     return {"ok": True}
 
 
+VOICE_TOKEN_TTL_S = 600
+AGENT_FRESH_S = 90
+
+
+@router.get("/voice/status")
+async def voice_status(request: Request, me: Principal = CurrentPrincipal):
+    """Voice is OPERATIONAL only when LiveKit is configured, the last real LiveKit validation succeeded, the voice
+    agent shared secret is set, and a voice agent process has heartbeated recently. Otherwise each missing piece
+    is listed; nothing is reported as ready on configuration alone."""
+    from jarvis.core.integrations import DISABLED
+    st, db = request.app.state, request.app.state.db
+    lk = st.livekit
+    status = await db.fetchrow("select state, last_success_at, detail from integration_status where provider='livekit'")
+    agent = await db.fetchrow(f"""select agent_id, last_seen_at, version from voice_agent_heartbeats
+                                  where last_seen_at > now() - interval '{AGENT_FRESH_S} seconds' order by last_seen_at desc limit 1""")
+    checks = {
+        "livekit_configured": lk.configured and "livekit" not in DISABLED,
+        "livekit_validated": bool(status and status["state"] == "CONNECTED"),
+        "agent_secret_configured": bool(st.settings.voice_agent_shared_secret),
+        "agent_online": agent is not None,
+    }
+    missing = []
+    if "livekit" in DISABLED:
+        missing.append("LiveKit is disabled in the Integrations Center.")
+    elif not lk.configured:
+        missing.append("LiveKit server URL, API key and API secret (Integrations > LiveKit).")
+    elif not checks["livekit_validated"]:
+        missing.append("A successful LiveKit connection test (Integrations > LiveKit > Test connection)"
+                       + (f": last result {status['state']} ({status['detail']})" if status else "."))
+    if not checks["agent_secret_configured"]:
+        missing.append("VOICE_AGENT_SHARED_SECRET in the API environment (the same value in the voice agent).")
+    if not checks["agent_online"]:
+        missing.append("A running JARVIS voice agent (apps/voice: python agent.py start). No heartbeat in the last "
+                       f"{AGENT_FRESH_S} seconds.")
+    state = "OPERATIONAL" if all(checks.values()) else ("DISABLED" if "livekit" in DISABLED else
+                                                         "NOT_CONFIGURED" if not lk.configured else "NOT_READY")
+    return J({"state": state, "checks": checks, "missing": missing,
+              "agent": dict(agent) if agent else None, "token_ttl_s": VOICE_TOKEN_TTL_S})
+
+
+class VoiceEndIn(BaseModel):
+    room: str = Field(min_length=6, max_length=120)
+
+
+@router.post("/voice/end")
+async def voice_end(body: VoiceEndIn, request: Request, me: Principal = CurrentPrincipal):
+    """Terminates a voice session the caller started (deletes the LiveKit room, which ends the agent session)."""
+    db = request.app.state.db
+    owned = await db.fetchval("""select exists(select 1 from audit_logs where action='voice.session_started' and entity_id=$1
+                                 and actor_id=$2 and workspace_id=$3)""", body.room, str(me.user_id), me.workspace_id)
+    if not owned:
+        raise NotFound("voice session not found")
+    lk = request.app.state.livekit
+    detail = None
+    try:
+        await lk.delete_room(body.room)
+    except ProviderError as exc:
+        detail = f"{exc.state.value}: {exc.message[:200]}"
+    await db.execute("""insert into audit_logs(workspace_id, actor_type, actor_id, action, entity_type, entity_id, data)
+                        values ($1,'user',$2,'voice.session_ended','livekit_room',$3,$4)""",
+                     me.workspace_id, str(me.user_id), body.room, {"detail": detail})
+    return {"ok": detail is None, "detail": detail}
+
+
 @router.post("/voice/token")
 async def voice_token(request: Request, me: Principal = CurrentPrincipal):
     me.require("operator")
@@ -374,10 +439,10 @@ async def voice_token(request: Request, me: Principal = CurrentPrincipal):
         return JSONResponse({"state": "NOT_CONFIGURED", "detail": _missing("livekit")}, status_code=424)
     room = f"jarvis-{me.workspace_id}-{uuid.uuid4().hex[:8]}"
     meta = json.dumps({"workspace_id": str(me.workspace_id), "user_id": str(me.user_id)})
-    tok = lk.token(identity=f"user-{me.user_id}", name=me.email or "operator", room=room, ttl_s=900, metadata=meta)
+    tok = lk.token(identity=f"user-{me.user_id}", name=me.email or "operator", room=room, ttl_s=VOICE_TOKEN_TTL_S, metadata=meta)
     await request.app.state.db.execute("""insert into audit_logs(workspace_id, actor_type, actor_id, action, entity_type, entity_id)
                                           values ($1,'user',$2,'voice.session_started','livekit_room',$3)""", me.workspace_id, str(me.user_id), room)
-    return {"url": request.app.state.settings.livekit_url, "token": tok, "room": room}
+    return {"url": lk.settings.livekit_url, "token": tok, "room": room, "expires_in_s": VOICE_TOKEN_TTL_S}
 
 
 # ---------------- outreach ----------------

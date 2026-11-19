@@ -215,8 +215,13 @@ def deterministic_parse(text: str) -> ParseResult:
         draft["website_filter"] = wf
 
     b = re.search(r"build (?:(?:personali[sz]ed )?(?:web)?sites?|websites) for (?:the )?(?:top )?(\d{1,2})", low)
-    if b:
-        draft["sites_to_build"] = int(b.group(1))
+    # "prepare two redesign previews", "build 3 preview websites", "create 2 personalised sites"
+    b2 = None if b else re.search(r"\b(?:prepare|build|create|generate|make|design)\s+(\d{1,2}|" + "|".join(_NUM_WORDS) +
+                                  r")\s+(?:(?:new|redesign(?:ed)?|personali[sz]ed|preview|website|web|homepage)\s+)*"
+                                  r"(?:previews?|websites?|sites?|redesigns?|mock-?ups?)\b", low)
+    if b or b2:
+        n = (b or b2).group(1)
+        draft["sites_to_build"] = int(n) if n.isdigit() else _NUM_WORDS[n]
         draft["stages"] = ALL_STAGES
     if "missing_rating_policy" not in draft and re.search(r"(include|keep) (unrated|businesses without (a )?rating)", low):
         draft["missing_rating_policy"] = "include_for_review"

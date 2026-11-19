@@ -89,3 +89,13 @@ def test_t16_mask_skus():
     assert mask_sku(LISTING_DISPLAY, "details") == "place_details_enterprise"
     assert "places.attributions" in DISCOVERY_ENTERPRISE and "attributions" in LISTING_DISPLAY
     assert "places.rating" not in DISCOVERY_ENTERPRISE
+
+
+def test_preview_count_phrasings_enable_build_stages():
+    from jarvis.agents.command import ALL_STAGES, deterministic_parse
+    for text, n in (("Find 10 independent roofing companies in Houston with outdated websites and prepare two redesign previews.", 2),
+                    ("find 5 dentists in Austin and build 3 preview websites", 3),
+                    ("Find 10 roofers in Houston, TX with outdated websites and build sites for the top 2", 2)):
+        d = deterministic_parse(text).draft
+        assert d["sites_to_build"] == n and d["stages"] == ALL_STAGES, text
+    assert "sites_to_build" not in deterministic_parse("Find 10 roofers in Houston").draft
