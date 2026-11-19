@@ -1,5 +1,13 @@
 # JARVIS Changelog
 
+## Revision 9: one JARVIS conversation, managed voice agent, voice-first screen (2026-11-19)
+- **One conversation brain for voice and text:** Claude with fixed tools over existing operations, persistent memory and focus (migration 0009). Work starts only after an explicit yes (checked server-side). Budget-gated. Website text is fenced as untrusted. Deterministic fallback, labelled.
+- **Work on a named business:** verify, research, qualify, build, browser-QA and deploy a preview for one business through the normal durable pipeline.
+- **Credential consistency fix:** the worker applies dashboard credentials before its first job, so the "saved but X_API_KEY not set" usage message no longer appears; usage refreshes after a successful test; stale reports are hidden.
+- **Managed voice agent:** `dev-up.sh` generates the voice secret once, installs and supervises the agent (backoff, stops after repeated crashes) and waits for its heartbeat.
+- **Voice-first JARVIS screen:** a central orb that follows the real voice and task state, a live shared transcript, confirm and cancel controls, a secondary text field, and compact work, attention and system panels. The old console moved to Commands.
+- **`scripts/verify-live.sh`:** real provider tests, a Claude turn, LiveKit token scope, a spoken round trip, and an optional full build-and-deploy of one business.
+
 ## Revision 8: reliable development startup, Codespaces, no sign-in during development (2026-11-19)
 - **One database configuration:** every process reads the repository-root `.env`; the default `DATABASE_URL` matches `docker-compose.dev.yml` (previously the code defaulted to a different database with no password, causing password failures and missing tables when a terminal lacked the export). Empty `.env` values mean "not set". `postgresql+asyncpg://` URLs are accepted. Production requires an explicit `DATABASE_URL`.
 - **Migrations gate startup:** `/ready` reports pending or modified migrations (503) and the worker refuses to start until they are applied. The migrator has a `status` command and clear errors for wrong passwords, missing databases and failed migrations.

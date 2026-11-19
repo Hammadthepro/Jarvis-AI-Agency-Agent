@@ -87,6 +87,18 @@ Integrations. STT/TTS run through LiveKit Inference (`deepgram/nova-3`, `cartesi
 - Viewers can ask for status by voice but cannot start work. All commands go through the same authorization and
   compliance checks as text.
 
+### Conversation brain (voice and text)
+Voice and the text field on the JARVIS screen share one conversation per operator: the same history (stored in
+`conversation_messages`), the same focus ("this company") and the same pending action.
+
+- **With Anthropic configured**, Claude (the fast model) answers using a fixed set of tools over existing operations:
+  prospect search, working on one named business (verify, research, qualify, and optionally build, browser-test and
+  deploy a preview), status, findings, verified preview links and today's work.
+- **Starting anything needs your explicit yes.** The server checks that your latest message is a yes before it starts
+  any work. Every Claude call is budget-gated.
+- **Without Claude**, or when it is unavailable or over budget, the deterministic command router answers, and the reply
+  is marked "basic mode".
+
 ### Using it
 Open **Voice Agent** (or "Talk to JARVIS" in the Command Center), allow the microphone, and speak. You can interrupt
 JARVIS by talking, or press **Stop speaking**. Examples: "Find 10 independent roofing companies in Houston with outdated

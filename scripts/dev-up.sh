@@ -14,6 +14,7 @@ exec 9>"$RUN_DIR/dev-up.lock"
 flock -w 600 9 || die "another dev-up is still running"
 
 SYNC=0
+RESTART_API=0
 for a in "$@"; do case "$a" in --sync) SYNC=1 ;; *) die "unknown option $a" ;; esac; done
 
 # ---- 0. optional safe sync with GitHub main ----------------------------------------------------------------------------
@@ -46,6 +47,20 @@ else
   unset key
   warn "generated JARVIS_ENCRYPTION_KEY once and saved it in .env (never regenerated). To keep it if this"
   warn "Codespace is deleted, copy it into a Codespaces secret named JARVIS_ENCRYPTION_KEY (see docs/DEVELOPMENT.md)."
+fi
+
+# Voice agent shared secret: generated once, kept in .env (never printed). The API and the voice agent both read it.
+if [ -n "${VOICE_AGENT_SHARED_SECRET:-}" ]; then
+  ok "VOICE_AGENT_SHARED_SECRET provided by the environment"
+elif grep -qE '^VOICE_AGENT_SHARED_SECRET=.+' .env; then
+  ok "VOICE_AGENT_SHARED_SECRET set in .env"
+else
+  vs="$(openssl rand -hex 32)"
+  if grep -qE '^VOICE_AGENT_SHARED_SECRET=' .env; then sed -i "s|^VOICE_AGENT_SHARED_SECRET=.*|VOICE_AGENT_SHARED_SECRET=${vs}|" .env
+  else printf 'VOICE_AGENT_SHARED_SECRET=%s\n' "$vs" >>.env; fi
+  unset vs
+  RESTART_API=1   # a running API must reload settings to know the new secret
+  ok "generated VOICE_AGENT_SHARED_SECRET once and saved it in .env"
 fi
 
 # ---- 2. dependencies (only when missing or changed) ------------------------------------------------------------------
@@ -103,6 +118,7 @@ ok "$out"
 
 # ---- 5. API --------------------------------------------------------------------------------------------------------
 info "API"
+if [ "$RESTART_API" = 1 ] && [ -n "$(managed_pid api)" ]; then stop_proc api; fi
 if [ -z "$(managed_pid api)" ] && port_in_use "$API_PORT"; then die "port $API_PORT is used by a process not started by dev-up; stop it first"; fi
 start_proc api "$ROOT" "$ROOT/backend/.venv/bin/uvicorn" jarvis.api.app:get_app --factory --host 127.0.0.1 --port "$API_PORT"
 wait_http "http://127.0.0.1:$API_PORT/ready" 60 || { tail -n 40 "$LOG_DIR/api.log" >&2; curl -s "http://127.0.0.1:$API_PORT/ready" >&2 || true; die "API not ready"; }
@@ -136,6 +152,36 @@ start_proc dashboard "$ROOT/dashboard" npx vite --port "$WEB_PORT" --strictPort
 wait_http "http://127.0.0.1:$WEB_PORT/" 60 || { tail -n 40 "$LOG_DIR/dashboard.log" >&2; die "dashboard not serving"; }
 wait_http "http://127.0.0.1:$WEB_PORT/api/health" 20 || die "dashboard cannot reach the API through its /api proxy"
 ok "dashboard serving and reaching the API through /api"
+
+# ---- 8. voice agent (only when LiveKit is configured) --------------------------------------------------------------
+info "Voice agent"
+vstatus="$(curl -s --max-time 10 "http://127.0.0.1:$API_PORT/voice/status" || true)"
+lk="$("$PY" -c "import json,sys; print(json.loads(sys.argv[1] or '{}').get('checks',{}).get('livekit_configured', False))" "$vstatus" 2>/dev/null || echo False)"
+if [ "$lk" != "True" ]; then
+  warn "LiveKit is not configured (Integrations > LiveKit); voice agent not started"
+else
+  if [ ! -x apps/voice/.venv/bin/python ] || ! stamp_ok apps/voice/.venv/.jarvis-installed apps/voice/requirements.txt; then
+    { [ -x apps/voice/.venv/bin/python ] || python3 -m venv apps/voice/.venv; } &&
+    (PY="$ROOT/apps/voice/.venv/bin/python"; pip_install -r apps/voice/requirements.txt) >"$LOG_DIR/pip-voice.log" 2>&1 &&
+    touch apps/voice/.venv/.jarvis-installed && ok "voice agent dependencies installed" ||
+    { tail -n 20 "$LOG_DIR/pip-voice.log" >&2; warn "voice agent install failed (see .jarvis/logs/pip-voice.log)"; }
+  else ok "voice agent dependencies up to date"; fi
+  if [ -x apps/voice/.venv/bin/python ]; then
+    VOICE_AGENT_SHARED_SECRET="$(setting voice_agent_shared_secret)" JARVIS_API_URL="http://127.0.0.1:$API_PORT" \
+      start_proc voice "$ROOT" bash "$ROOT/scripts/lib/voice-supervisor.sh"
+    online=False
+    for _ in $(seq 1 60); do
+      online="$(curl -s --max-time 5 "http://127.0.0.1:$API_PORT/voice/status" | "$PY" -c "import json,sys; print(json.load(sys.stdin)['checks']['agent_online'])" 2>/dev/null || echo False)"
+      [ "$online" = "True" ] && break
+      [ -n "$(managed_pid voice)" ] || break
+      sleep 1
+    done
+    if [ "$online" = "True" ]; then ok "voice agent running and heartbeating (supervised; restarts with backoff)"
+    else tail -n 25 "$LOG_DIR/voice.log" >&2; warn "voice agent did not report a heartbeat (see .jarvis/logs/voice.log)"; fi
+    vready="$(curl -s --max-time 5 "http://127.0.0.1:$API_PORT/voice/status" | "$PY" -c "import json,sys; d=json.load(sys.stdin); print(d['state'], '|', ' '.join(d['missing']))" 2>/dev/null || true)"
+    ok "voice status: ${vready}"
+  fi
+fi
 
 public_urls
 info "JARVIS is running"

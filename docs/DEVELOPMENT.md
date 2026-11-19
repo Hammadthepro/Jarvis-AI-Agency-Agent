@@ -56,6 +56,34 @@ when run by hand.
 
 If startup failed, read `.jarvis-startup.log` and run `scripts/dev-status.sh`.
 
+### Voice agent
+When LiveKit is configured (Integrations > LiveKit, then Test connection), `dev-up.sh` also:
+
+- generates `VOICE_AGENT_SHARED_SECRET` once into `.env` (or uses a Codespaces secret of that name);
+- installs the agent in `apps/voice/.venv`;
+- runs it as the managed process `voice` under `scripts/lib/voice-supervisor.sh`, which restarts it after a crash with
+  backoff (5 s up to 60 s) and stops after 5 crashes in 10 minutes, so a broken agent is not hidden;
+- waits for its heartbeat.
+
+The agent takes its LiveKit credentials from the Integrations Center through the API's internal endpoint, so they
+are not duplicated in `.env`. Logs are in `.jarvis/logs/voice.log`.
+
+### Live verification (real providers, your credentials)
+```bash
+scripts/verify-live.sh
+```
+This runs, against the credentials saved in Integrations:
+
+- a real Test connection for every provider;
+- one real Claude conversation turn;
+- the voice status and LiveKit token scope;
+- a real spoken round trip: synthesised speech into a LiveKit room, then transcription, JARVIS's reply as audio, and
+  a reconnect.
+
+Add `--website "Business" "https://their-site.com" "City" "ST" [type]` to also verify, research, qualify, build,
+browser-test and deploy a preview for that one business, read the deployment back from Cloudflare, and fetch the real
+`pages.dev` URL. This uses paid or free-tier provider calls within your budget caps. Secrets are never printed.
+
 ## 3. Stopping JARVIS
 
 ```bash

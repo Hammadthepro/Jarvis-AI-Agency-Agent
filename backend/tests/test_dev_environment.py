@@ -82,7 +82,9 @@ async def test_existing_database_missing_0007_0008_gets_them(tmp_path):
         await conn.execute("insert into app_users(id, email) values ($1, 'keep@me.dev')", uuid.uuid4())
         assert not await conn.fetchval("select to_regclass('public.integration_credentials') is not null")
         await conn.close()
-        assert await migrate(url) == ["0007_integration_credentials.sql", "0008_voice_agent.sql"]
+        newer = [p.name for p in sorted(MIGRATIONS_DIR.glob("*.sql"))[6:]]
+        assert newer[:2] == ["0007_integration_credentials.sql", "0008_voice_agent.sql"]
+        assert await migrate(url) == newer                                     # every newer migration, in order
         conn = await asyncpg.connect(url)
         assert await conn.fetchval("select count(*) from app_users where email='keep@me.dev'") == 1
         assert await conn.fetchval("select to_regclass('public.integration_credentials') is not null")

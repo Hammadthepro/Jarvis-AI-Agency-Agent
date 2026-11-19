@@ -196,7 +196,8 @@ async def site_artifact(site_id: UUID, version: int, path: str, request: Request
 
 @router.get("/deployments")
 async def deployments(request: Request, me: Principal = CurrentPrincipal):
-    rows = await request.app.state.db.fetch("""select d.*, v.site_id from deployments d join site_versions v on v.id = d.site_version_id
+    rows = await request.app.state.db.fetch("""select d.*, v.site_id, g.campaign_id from deployments d
+                                               join site_versions v on v.id = d.site_version_id join generated_sites g on g.id = v.site_id
                                                where d.workspace_id=$1 order by d.created_at desc limit 200""", me.workspace_id)
     return J([dict(r) for r in rows])
 

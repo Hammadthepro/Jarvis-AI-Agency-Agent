@@ -92,6 +92,9 @@ Revision 6 tests (architecture consistency, evidence integrity, usage labels, ba
 | 34 | Voice reports OPERATIONAL only after real validation and a live agent | ✅ | ✅ | ❌ | ❌ | |
 | 35 | Development startup: one command / automatic in Codespaces, migrations gate readiness, no duplicate processes | ✅ | ✅ | — | — | `scripts/tests/dev-startup-test.sh` (real Docker Postgres) + `test_dev_environment.py`. The Codespaces hooks themselves were not run here (no Codespace available to this session) |
 | 36 | No sign-in during development; local access refused outside `JARVIS_ENV=local` | ✅ | ✅ | — | — | Production sign-in is deferred; Supabase JWT verification remains for non-local environments |
+| 37 | One conversation for voice and text (Claude with tools, memory, explicit-yes gate) | ✅ | ✅ | ❌ | — | Tested with a scripted Claude double. Not yet run against real Claude from this environment (credentials live in your Codespace): run `scripts/verify-live.sh` |
+| 38 | Managed, supervised voice agent with heartbeat | ✅ | ✅ | ❌ | — | Supervisor tested here (backoff, give-up). A real agent session needs your LiveKit project: `scripts/verify-live.sh` |
+| 39 | Voice-first JARVIS screen | ✅ | ✅ | — | — | Unit and real-stack E2E (text path); the live voice path needs LiveKit |
 | — | Production deployment | ⚠️ | ⚠️ | — | ❌ | Compose, deploy script and hardening are implemented and checked statically; images build in CI. **No VPS: nothing deployed** |
 
 ## 3. What you must provide

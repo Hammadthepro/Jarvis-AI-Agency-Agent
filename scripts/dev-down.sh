@@ -6,7 +6,7 @@ set -Eeuo pipefail
 source "$(dirname "$0")/lib/dev-common.sh"
 cd "$ROOT"
 info "Stopping JARVIS"
-for p in dashboard worker api; do stop_proc "$p"; done
+for p in voice dashboard worker api; do stop_proc "$p"; done
 if [ "${1:-}" = "--db" ]; then
   if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
     "${COMPOSE[@]}" stop db >/dev/null 2>&1 && ok "database container stopped (volume kept)"

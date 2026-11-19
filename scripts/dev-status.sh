@@ -36,6 +36,14 @@ if [ -n "$(managed_pid dashboard)" ]; then ok "process running (pid $(managed_pi
 if curl -sf -o /dev/null --max-time 5 "http://127.0.0.1:$WEB_PORT/"; then ok "serving on port $WEB_PORT"; else fail "not serving on port $WEB_PORT"; bad=1; fi
 if curl -sf -o /dev/null --max-time 5 "http://127.0.0.1:$WEB_PORT/api/health"; then ok "reaches the API through /api"; else fail "cannot reach the API through /api"; bad=1; fi
 
+info "Voice agent"
+if [ -n "$(managed_pid voice)" ]; then ok "supervisor running (pid $(managed_pid voice))"; else warn "not running (starts automatically when LiveKit is configured)"; fi
+vs="$(curl -s --max-time 5 "http://127.0.0.1:$API_PORT/voice/status" || true)"
+[ -n "$vs" ] && "$PY" -c "
+import json,sys
+d=json.loads(sys.argv[1]); print('  voice:', d['state'])
+for m in d['missing']: print('   -', m)" "$vs"
+
 info "Configuration"
 ok "JARVIS_ENV=$(j "d['environment']"), local development access: $(j "d['local_dev_access']")"
 missing="$(j "'; '.join(d['missing_config'])")"
