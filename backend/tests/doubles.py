@@ -88,6 +88,8 @@ class FakeWeb:
                 return httpx.Response(200, json={"search_metadata": {"id": "s0", "status": "Success"},
                                                  "error": "Google hasn't returned any results for this query."})
             if u.host == "api.firecrawl.dev":
+                if u.path.endswith("/team/credit-usage"):
+                    return httpx.Response(200, json={"success": True, "data": {"remaining_credits": 940, "plan_credits": 1000}})
                 target = json.loads(req.content)["url"]
                 md = self.firecrawl_pages.get(target.rstrip("/"))
                 if md is None:

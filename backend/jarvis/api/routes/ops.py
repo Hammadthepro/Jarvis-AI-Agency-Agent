@@ -159,21 +159,13 @@ class SettingsIn(BaseModel):
 async def get_settings_(request: Request, me: Principal = CurrentPrincipal):
     s = request.app.state.settings
     row = await request.app.state.db.fetchrow("select * from system_settings where workspace_id=$1", me.workspace_id)
-    b = await request.app.state.db.fetchrow("select status, offsite, finished_at from backup_runs order by started_at desc limit 1")
-    if b is None:
-        backup = "NO_BACKUP_RECORDED"
-    elif b["status"] != "succeeded":
-        backup = "BACKUP_FAILED"
-    elif not b["offsite"]:
-        backup = "BACKUP_NOT_PROTECTED"
-    elif (await request.app.state.db.fetchval("select $1::timestamptz < now() - interval '36 hours'", b["finished_at"])):
-        backup = "BACKUP_STALE"
-    else:
-        backup = "PROTECTED"
+    from jarvis.ops.backup import backup_status
+    async with request.app.state.db.acquire() as conn:
+        backup, b = await backup_status(conn)
     return J({"settings": dict(row) if row else {}, "models": {"fast": s.claude_model_fast, "build": s.claude_model_build,
               "escalation": s.claude_model_escalation}, "environment": s.jarvis_env, "qa_runner_mode": s.qa_runner_mode,
               "preview_project": s.cloudflare_pages_preview_project, "preview_ttl_days": s.preview_ttl_days,
-              "backup": backup, "last_backup": dict(b) if b else None})
+              "backup": backup, "last_backup": b})
 
 
 @router.put("/settings")
@@ -370,33 +362,53 @@ async def revoke(approval_id: uuid.UUID, request: Request, me: Principal = Curre
 
 @router.get("/usage")
 async def usage(request: Request, me: Principal = CurrentPrincipal):
+    """Usage this month, kept as separate figures:
+    estimated (worst-case reserved before each call), reserved (still open), committed (actual, from provider
+    responses), ambiguous (outcome unknown, still counted), released (provably not billed), and provider-reported
+    (from usage sync; status 'unavailable'/'not_configured'/'never_synced' means UNKNOWN, never zero)."""
     db = request.app.state.db
-    est = await db.fetch("""select provider, status, date_trunc('month', created_at) as mon, sum(units)::bigint units, sum(amount_micros)::bigint micros, count(*) calls
-                            from cost_reservations where workspace_id=$1 group by 1,2,3 order by 3 desc, 1""", me.workspace_id)
+    rows = await db.fetch(
+        """select provider,
+                  coalesce(sum(estimated_micros) filter (where status <> 'released'), 0)::bigint estimated_micros,
+                  coalesce(sum(amount_micros) filter (where status = 'reserved'), 0)::bigint reserved_micros,
+                  coalesce(sum(amount_micros) filter (where status = 'committed'), 0)::bigint committed_micros,
+                  coalesce(sum(amount_micros) filter (where status = 'ambiguous'), 0)::bigint ambiguous_micros,
+                  coalesce(sum(estimated_micros) filter (where status = 'released'), 0)::bigint released_micros,
+                  coalesce(sum(units) filter (where status = 'committed'), 0)::bigint committed_units,
+                  count(*) filter (where status = 'ambiguous') ambiguous_calls, count(*) calls
+           from cost_reservations where workspace_id = $1 and created_at >= date_trunc('month', now()) group by provider""",
+        me.workspace_id)
+    reported = await db.fetch(
+        """select distinct on (provider) provider, unit, reported_units, reported_cost_micros, source, status, detail, fetched_at
+           from provider_usage_reports where (workspace_id is null or workspace_id = $1)
+           order by provider, fetched_at desc""", me.workspace_id)
     daily = await db.fetch("""select date_trunc('day', created_at) as day, provider, sum(amount_micros)::bigint micros from cost_reservations
                               where workspace_id=$1 and status in ('committed','ambiguous','reserved') and created_at > now() - interval '31 days'
                               group by 1,2 order by 1""", me.workspace_id)
-    reported = await db.fetch("""select distinct on (provider, unit) provider, unit, reported_units, reported_cost_micros, source, fetched_at
-                                 from provider_usage_reports where workspace_id=$1 order by provider, unit, fetched_at desc""", me.workspace_id)
     per_campaign = await db.fetch("""select c.id, c.name, coalesce(sum(r.amount_micros) filter (where r.status in ('committed','ambiguous','reserved')),0)::bigint micros
                                      from campaigns c left join cost_reservations r on r.campaign_id = c.id where c.workspace_id=$1 group by 1,2
                                      order by 3 desc limit 50""", me.workspace_id)
     per_site = await db.fetch("""select g.id, g.slug, g.cost_micros from generated_sites g where g.workspace_id=$1 order by g.cost_micros desc limit 50""",
                               me.workspace_id)
+    est = {r["provider"]: dict(r) for r in rows}
     rep = {r["provider"]: dict(r) for r in reported}
-    providers = sorted({r["provider"] for r in est} | set(PROVIDERS))
+    empty = {"estimated_micros": 0, "reserved_micros": 0, "committed_micros": 0, "ambiguous_micros": 0, "released_micros": 0,
+             "committed_units": 0, "ambiguous_calls": 0, "calls": 0}
     summary = []
-    for p in providers:
-        rows = [r for r in est if r["provider"] == p and r["mon"] == max((x["mon"] for x in est), default=None)]
-        summary.append({"provider": p,
-                        "estimated": {"committed_micros": sum(r["micros"] for r in rows if r["status"] == "committed"),
-                                      "reserved_micros": sum(r["micros"] for r in rows if r["status"] == "reserved"),
-                                      "ambiguous_micros": sum(r["micros"] for r in rows if r["status"] == "ambiguous"),
-                                      "units": sum(r["units"] for r in rows if r["status"] != "released"),
-                                      "calls": sum(r["calls"] for r in rows)},
-                        "reported": rep.get(p) or "not_available"})
+    for p in sorted(set(est) | set(PROVIDERS)):
+        e = {k: v for k, v in est.get(p, empty).items() if k != "provider"}
+        r = rep.get(p) or {"status": "never_synced", "detail": "usage sync has not run for this provider"}
+        summary.append({"provider": p, "jarvis": e, "provider_reported": r, "reconciled": r.get("status") == "ok",
+                        "unknown_spend": r.get("status") != "ok" and (e["committed_micros"] > 0 or e["ambiguous_micros"] > 0)})
     return J({"summary": summary, "daily": [dict(r) for r in daily], "per_campaign": [dict(r) for r in per_campaign],
               "per_site": [dict(r) for r in per_site]})
+
+
+@router.post("/usage/sync")
+async def usage_sync_now(request: Request, me: Principal = CurrentPrincipal):
+    me.require("owner")
+    from jarvis.core.usage_sync import sync_provider_usage
+    return await sync_provider_usage(request.app.state.deps)
 
 
 class ManualReportIn(BaseModel):
@@ -581,7 +593,9 @@ async def system_readiness(request: Request, me: Principal = CurrentPrincipal):
     async with db.acquire() as conn:
         gate = await gate_status(conn, me.workspace_id, "google_places_prospect_selection")
     st = await db.fetchrow("select terms_of_use_url, privacy_policy_url, agency_name from system_settings where workspace_id=$1", me.workspace_id)
-    b = await db.fetchrow("select offsite, status, finished_at from backup_runs order by started_at desc limit 1")
+    from jarvis.ops.backup import backup_status
+    async with db.acquire() as conn:
+        bstatus, _b = await backup_status(conn)
     workers = await db.fetchval("select count(*) from worker_heartbeats where last_seen_at > now() - interval '2 minutes'")
     items = [
         ("database", db.state == "healthy", db.state),
@@ -596,8 +610,7 @@ async def system_readiness(request: Request, me: Principal = CurrentPrincipal):
         ("voice", request.app.state.livekit.configured and bool(s.voice_agent_shared_secret), "LiveKit + VOICE_AGENT_SHARED_SECRET"),
         ("terms_of_use_published", bool(st and st["terms_of_use_url"]), "Public Terms of Use URL"),
         ("privacy_policy_published", bool(st and st["privacy_policy_url"]), "Public Privacy Policy URL"),
-        ("offsite_backup", bool(b and b["offsite"] and b["status"] == "succeeded"),
-         "PROTECTED" if b and b["offsite"] else "BACKUP_NOT_PROTECTED"),
+        ("offsite_backup", bstatus == "PROTECTED", bstatus),
     ]
     outreach_ready = (await outreach.readiness(deps, me.workspace_id))["ready"]
     items.append(("outreach_sending", outreach_ready, "sender readiness checklist (see Outreach)"))

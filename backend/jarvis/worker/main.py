@@ -154,32 +154,64 @@ class Worker:
             except TimeoutError:
                 pass
 
-    async def scheduler_loop(self) -> None:
+    SCHEDULE = {"lease_recovery": 60, "retention": 3600, "usage_sync": 3600, "preview_cleanup": 3600}
+
+    async def _job(self, name: str) -> None:
         from jarvis.agents.deployment import cleanup_expired
+        from jarvis.core.retention import run_retention
+        from jarvis.core.usage_sync import sync_provider_usage
+        if name == "lease_recovery":
+            n = await queue.recover_expired_leases(self.db)
+            if n:
+                log.info("leases.recovered", count=n)
+        elif name == "retention":
+            log.info("retention.done", **await run_retention(self.db))
+        elif name == "usage_sync":
+            log.info("usage_sync.done", results=await sync_provider_usage(self.deps))
+        elif name == "preview_cleanup" and self.deps.cloudflare.configured:
+            await cleanup_expired(self.deps)
+
+    async def run_due_jobs(self) -> list[str]:
+        """Runs every due job once. Only one worker runs jobs at a time: the advisory lock is taken and
+        released on the SAME dedicated connection. Job timing is stored in scheduled_jobs."""
+        ran: list[str] = []
+        async with self.db.acquire() as lock_conn:
+            if not await lock_conn.fetchval("select pg_try_advisory_lock(424242)"):
+                return ran
+            try:
+                for name, every in self.SCHEDULE.items():
+                    due = await self.db.fetchval(
+                        """select coalesce((select last_started_at < now() - make_interval(secs => $2)
+                                            from scheduled_jobs where name = $1), true)""", name, float(every))
+                    if not due:
+                        continue
+                    await self.db.execute("""insert into scheduled_jobs(name, last_started_at) values ($1, now())
+                                             on conflict (name) do update set last_started_at = now()""", name)
+                    try:
+                        await self._job(name)
+                        status, detail = "succeeded", None
+                    except DatabaseUnavailable:
+                        raise
+                    except Exception as exc:
+                        log.exception("scheduler.job_failed", job=name)
+                        status, detail = "failed", f"{type(exc).__name__}: {exc}"[:500]
+                    await self.db.execute("""update scheduled_jobs set last_finished_at = now(), last_status = $2, last_detail = $3
+                                             where name = $1""", name, status, detail)
+                    ran.append(name)
+            finally:
+                await lock_conn.fetchval("select pg_advisory_unlock(424242)")
+        return ran
+
+    async def scheduler_loop(self) -> None:
         while not self.stop.is_set():
             try:
-                got = await self.db.fetchval("select pg_try_advisory_lock(424242)")
-                if got:
-                    try:
-                        n = await queue.recover_expired_leases(self.db)
-                        if n:
-                            log.info("leases.recovered", count=n)
-                        await self.db.execute("""update place_refs set lat=null, lng=null, coords_fetched_at=null, coords_expires_at=null
-                                                 where coords_expires_at < now()""")
-                        await self.db.execute("delete from task_events where created_at < now() - interval '90 days'")
-                        await self.db.execute("""delete from evidence where retention_policy='days_90' and retrieved_at < now() - interval '90 days'
-                                                 and id not in (select evidence_id from research_facts where evidence_id is not null)
-                                                 and id not in (select evidence_id from contacts)""")
-                        if self.deps.cloudflare.configured:
-                            await cleanup_expired(self.deps)
-                    finally:
-                        await self.db.fetchval("select pg_advisory_unlock(424242)")
+                await self.run_due_jobs()
             except DatabaseUnavailable:
                 pass
             except Exception:
                 log.exception("scheduler.error")
             try:
-                await asyncio.wait_for(self.stop.wait(), timeout=60)
+                await asyncio.wait_for(self.stop.wait(), timeout=30)
             except TimeoutError:
                 pass
 

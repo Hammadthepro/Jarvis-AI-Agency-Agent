@@ -96,8 +96,10 @@ async def test_full_workflow_manual_import(client, deps, web):
     # costs recorded (estimated) per provider, campaign and site
     usage = (await client.get("/usage", headers=h)).json()
     prov = {u["provider"]: u for u in usage["summary"]}
-    assert prov["serp_api"]["estimated"]["units"] == 2 and prov["anthropic"]["estimated"]["committed_micros"] > 0
-    assert prov["google_places"]["estimated"]["calls"] == 0 and prov["google_places"]["reported"] == "not_available"
+    assert prov["serp_api"]["jarvis"]["committed_units"] == 2 and prov["anthropic"]["jarvis"]["committed_micros"] > 0
+    assert prov["anthropic"]["jarvis"]["estimated_micros"] >= prov["anthropic"]["jarvis"]["committed_micros"]  # worst case kept
+    assert prov["google_places"]["jarvis"]["calls"] == 0 and prov["google_places"]["provider_reported"]["status"] in ("never_synced", "unavailable", "not_configured")
+    assert prov["serp_api"]["jarvis"]["committed_micros"] > 0
     assert any(c["micros"] > 0 for c in usage["per_campaign"]) and usage["per_site"][0]["cost_micros"] > 0
     ov = (await client.get("/overview", headers=h)).json()
     assert ov["previews_deployed"] == 1 and ov["prospects_no_website"] == 1

@@ -7,8 +7,9 @@ import { Button, Card, ErrorState, Input, Loading, Pill, usd, when } from "../co
 type Integration = { provider: string; configured: boolean; state: string; tested: boolean; last_checked_at: string | null; detail: string | null };
 type Limit = { id: string; scope: string; provider: string | null; unit: string; period: string; cap: number; free_allowance: number | null; allow_paid: boolean };
 type Gate = { scope: string; open: boolean; reason: string | null; intended_use: string | null; approver_name?: string; document_ref?: string; review_by?: string };
-type Usage = { summary: Array<{ provider: string; estimated: { committed_micros: number; reserved_micros: number; ambiguous_micros: number; units: number; calls: number };
-  reported: "not_available" | { reported_units: number | null; reported_cost_micros: number | null; source: string; fetched_at: string } }> };
+type Usage = { summary: Array<{ provider: string; reconciled: boolean; unknown_spend: boolean;
+  jarvis: { estimated_micros: number; reserved_micros: number; committed_micros: number; ambiguous_micros: number; released_micros: number; committed_units: number; calls: number };
+  provider_reported: { status: string; detail?: string | null; unit?: string; reported_units?: number | null; reported_cost_micros?: number | null; source?: string; fetched_at?: string } }> };
 
 export default function SettingsPage() {
   const qc = useQueryClient();
@@ -17,6 +18,7 @@ export default function SettingsPage() {
   const limits = useQuery({ queryKey: ["limits"], queryFn: () => api<Limit[]>("/settings/limits") });
   const compliance = useQuery({ queryKey: ["compliance"], queryFn: () => api<{ gates: Gate[] }>("/compliance") });
   const usage = useQuery({ queryKey: ["usage"], queryFn: () => api<Usage>("/usage") });
+  const syncUsage = useMutation({ mutationFn: () => api("/usage/sync", { method: "POST" }), onSuccess: () => qc.invalidateQueries({ queryKey: ["usage"] }) });
   const test = useMutation({ mutationFn: (p: string) => api<{ state: string; detail?: string }>(`/integrations/${p}/test`, { method: "POST" }), onSuccess: () => qc.invalidateQueries({ queryKey: ["integrations"] }) });
   const put = useMutation({ mutationFn: (b: Record<string, unknown>) => api("/settings", { method: "PUT", json: b }), onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }) });
   const [agency, setAgency] = useState({ agency_name: "", terms_of_use_url: "", privacy_policy_url: "" });
@@ -57,13 +59,22 @@ export default function SettingsPage() {
             </form>{put.error && <ErrorState error={put.error} />}
           </div>)}
         </Card>
-        <Card title="Usage: estimated vs provider-reported" className="lg:col-span-2">
+        <Card title="Usage this month: JARVIS ledger vs provider-reported" className="lg:col-span-2"
+          actions={<Button variant="ghost" onClick={() => syncUsage.mutate()} disabled={syncUsage.isPending}>Sync now</Button>}>
           {usage.error ? <ErrorState error={usage.error} /> : !usage.data ? <Loading /> : (
-            <table className="w-full text-sm"><thead className="text-left text-xs uppercase text-ink-500"><tr><th className="py-1">Provider</th><th className="text-right">Committed</th><th className="text-right">Reserved</th><th className="text-right">Ambiguous</th><th className="text-right">Units</th><th className="px-3">Provider-reported</th></tr></thead>
+            <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="text-left text-xs uppercase text-ink-500"><tr>
+              <th className="py-1">Provider</th><th className="text-right">Estimated</th><th className="text-right">Reserved</th><th className="text-right">Committed</th>
+              <th className="text-right">Ambiguous</th><th className="text-right">Released</th><th className="px-3">Provider-reported</th></tr></thead>
               <tbody className="divide-y divide-ink-800">{usage.data.summary.map((u) => (
-                <tr key={u.provider}><td className="py-2">{u.provider}</td><td className="text-right tabular-nums">{usd(u.estimated.committed_micros)}</td><td className="text-right tabular-nums">{usd(u.estimated.reserved_micros)}</td>
-                  <td className="text-right tabular-nums">{usd(u.estimated.ambiguous_micros)}</td><td className="text-right tabular-nums">{u.estimated.units}</td>
-                  <td className="px-3 text-xs text-ink-400">{u.reported === "not_available" ? "not available" : `${u.reported.reported_units ?? "—"} units · ${u.reported.source} · ${when(u.reported.fetched_at)}`}</td></tr>))}</tbody></table>)}
+                <tr key={u.provider}><td className="py-2">{u.provider}</td>
+                  <td className="text-right tabular-nums">{usd(u.jarvis.estimated_micros)}</td><td className="text-right tabular-nums">{usd(u.jarvis.reserved_micros)}</td>
+                  <td className="text-right tabular-nums">{usd(u.jarvis.committed_micros)}</td><td className="text-right tabular-nums">{usd(u.jarvis.ambiguous_micros)}</td>
+                  <td className="text-right tabular-nums">{usd(u.jarvis.released_micros)}</td>
+                  <td className="px-3 text-xs"><Pill tone={u.reconciled ? "ok" : "warn"}>{u.provider_reported.status}</Pill>{" "}
+                    {u.reconciled ? <span className="text-ink-300">{u.provider_reported.reported_units ?? "—"} {u.provider_reported.unit} · {u.provider_reported.source} · {when(u.provider_reported.fetched_at)}</span>
+                      : <span className="text-warn-500">UNKNOWN (not zero){u.unknown_spend ? " · spend recorded but unreconciled" : ""}</span>}
+                    {u.provider_reported.detail && <div className="text-[11px] text-ink-500">{u.provider_reported.detail}</div>}</td></tr>))}</tbody></table></div>)}
+          <p className="mt-2 text-xs text-ink-500">Estimated = worst case reserved before each call. Ambiguous calls (timeouts) stay counted until reconciled.</p>
         </Card>
         <Card title="Budget limits" className="lg:col-span-2">
           {limits.error ? <ErrorState error={limits.error} /> : !limits.data ? <Loading /> : <LimitsTable rows={limits.data} />}

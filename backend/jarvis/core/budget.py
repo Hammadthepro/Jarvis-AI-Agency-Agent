@@ -121,8 +121,8 @@ async def reserve(conn: asyncpg.Connection, *, workspace_id: UUID, provider: str
 
     rid = await conn.fetchval(
         """insert into cost_reservations(workspace_id, task_id, campaign_id, site_id, provider, unit, units,
-                                         amount_micros, status)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,'reserved') returning id""",
+                                         amount_micros, estimated_micros, status)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$8,'reserved') returning id""",
         workspace_id, task_id, campaign_id, site_id, provider, unit, units, amount_micros)
     return Reservation(rid, provider, unit, units, amount_micros)
 
