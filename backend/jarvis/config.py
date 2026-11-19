@@ -80,7 +80,9 @@ class Settings(BaseSettings):
 
     # Sites / QA / sandbox
     sites_artifact_dir: Path = Path("/var/lib/jarvis/sites")
-    qa_runner_mode: Literal["docker", "subprocess"] = "docker"
+    qa_runner_mode: Literal["runner", "docker", "subprocess"] = "docker"
+    sandbox_runner_url: str | None = None
+    sandbox_runner_token: SecretStr | None = None
     qa_runner_dir: Path = Path(__file__).resolve().parents[2] / "qa-runner"
     sandbox_image: str = "jarvis-qa-sandbox:latest"
     sandbox_timeout_s: int = Field(300, ge=30, le=1800)
@@ -107,6 +109,10 @@ class Settings(BaseSettings):
                 missing.append("SUPABASE_JWKS_URL or SUPABASE_JWT_SECRET")
             if missing:
                 raise ValueError(f"missing required production settings: {', '.join(missing)}")
+            if self.qa_runner_mode != "runner":
+                raise ValueError("production requires QA_RUNNER_MODE=runner (sandbox runner service; no Docker socket in the worker)")
+            if not (self.sandbox_runner_url and self.sandbox_runner_token):
+                raise ValueError("production requires SANDBOX_RUNNER_URL and SANDBOX_RUNNER_TOKEN")
             if not self.places_api_base_url.startswith("https://places.googleapis.com/"):
                 raise ValueError("PLACES_API_BASE_URL must be https://places.googleapis.com/v1 in production")
         return self

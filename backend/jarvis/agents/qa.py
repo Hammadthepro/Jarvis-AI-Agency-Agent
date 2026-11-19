@@ -1,19 +1,23 @@
 """Agent 8: QA. Runs the Node/Playwright/axe runner against a built site.
 
-Production mode `docker`: an isolated container (--network none, non-root, read-only root fs,
-dropped capabilities, no-new-privileges, CPU/memory/pids limits, no Docker socket, no secrets, the
-site mounted read-only). Mode `subprocess` runs the same runner locally (development/CI only) and is
-recorded as such in qa_runs.runner."""
+Modes (recorded in qa_runs.runner):
+* `runner`     (production) HTTP call to the sandbox runner service, the only component with Docker
+               access. The worker has no Docker socket and cannot choose flags, images or mounts.
+* `docker`     (development/CI host) launches the same hardened container directly.
+* `subprocess` (development only) runs the runner with local Node; rejected in production by config.
+All modes produce the same report; screenshots land in <artifact_dir>/qa."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import shutil
-import tempfile
 from pathlib import Path
 
+import httpx
+
 from jarvis.config import Settings
+from jarvis.sandbox_runner import sandbox_command
 
 
 class QaRunnerError(Exception):
@@ -21,25 +25,37 @@ class QaRunnerError(Exception):
 
 
 def docker_command(settings: Settings, site_dir: Path, out_dir: Path, facts: Path) -> list[str]:
-    return ["docker", "run", "--rm", "--network", "none", "--read-only", "--user", "10001:10001",
-            "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "512",
-            "--cpus", "1", "--memory", "1g", "--tmpfs", "/tmp:rw,size=256m",  # noqa: S108 - tmpfs inside the sandbox container
-            "-e", "HOME=/tmp", "-v", f"{site_dir}:/site:ro", "-v", f"{facts}:/facts.json:ro", "-v", f"{out_dir}:/out:rw",
-            settings.sandbox_image, "node", "/runner/run.mjs", "/site", "/out", "/facts.json"]
+    return sandbox_command(settings.sandbox_image, site_dir, out_dir, facts)
 
 
-async def run_qa(settings: Settings, site_dir: Path, facts: dict, artifact_dir: Path) -> tuple[dict, str]:
+async def run_qa(settings: Settings, site_dir: Path, facts: dict, artifact_dir: Path,
+                 http: httpx.AsyncClient | None = None) -> tuple[dict, str]:
+    if settings.qa_runner_mode == "runner":
+        if not settings.sandbox_runner_url or not settings.sandbox_runner_token:
+            raise QaRunnerError("QA_RUNNER_MODE=runner requires SANDBOX_RUNNER_URL and SANDBOX_RUNNER_TOKEN (NOT_CONFIGURED)")
+        client = http or httpx.AsyncClient(timeout=settings.sandbox_timeout_s + 30)
+        try:
+            r = await client.post(f"{settings.sandbox_runner_url}/qa", json={"site_dir": str(site_dir.resolve()), "facts": facts},
+                                  headers={"Authorization": f"Bearer {settings.sandbox_runner_token.get_secret_value()}"})
+        except httpx.HTTPError as exc:
+            raise QaRunnerError(f"sandbox runner unreachable: {exc}") from exc
+        finally:
+            if http is None:
+                await client.aclose()
+        if r.status_code != 200:
+            raise QaRunnerError(f"sandbox runner error {r.status_code}: {r.text[:500]}")
+        return r.json(), "sandbox-runner"
+
     out_dir = artifact_dir / "qa"
     if out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
-        json.dump(facts, fh)
-        facts_path = Path(fh.name)
-    facts_path.chmod(0o644)
     out_dir.chmod(0o777)
+    facts_path = artifact_dir / "qa-facts.json"
+    facts_path.write_text(json.dumps(facts))
+    facts_path.chmod(0o644)
     if settings.qa_runner_mode == "docker":
-        cmd, runner = docker_command(settings, site_dir.resolve(), out_dir.resolve(), facts_path), "docker-sandbox"
+        cmd, runner = docker_command(settings, site_dir.resolve(), out_dir.resolve(), facts_path.resolve()), "docker-sandbox"
     else:
         node = shutil.which("node")
         if not node:
@@ -51,8 +67,6 @@ async def run_qa(settings: Settings, site_dir: Path, facts: dict, artifact_dir: 
     except TimeoutError as exc:
         proc.kill()
         raise QaRunnerError("QA runner timed out") from exc
-    finally:
-        facts_path.unlink(missing_ok=True)
     report_path = out_dir / "report.json"
     if proc.returncode != 0 or not report_path.exists():
         raise QaRunnerError(f"QA runner failed (exit {proc.returncode}): {err.decode(errors='replace')[-800:]}")
