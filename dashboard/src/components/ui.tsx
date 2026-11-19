@@ -39,6 +39,7 @@ const STATE_TONE: Record<string, Tone> = {
   CONFLICTING_EVIDENCE: "warn", paused: "warn", retry_wait: "warn", unknown_provider_result: "warn", BACKUP_NOT_PROTECTED: "warn",
   failed: "bad", dead: "bad", VERIFICATION_FAILED: "bad", INVALID_CREDENTIALS: "bad", PERMISSION_DENIED: "bad", QUOTA_EXCEEDED: "bad",
   PROVIDER_ERROR: "bad", RATE_LIMITED: "warn", TEMPORARILY_UNAVAILABLE: "warn", DISABLED: "muted", rejected: "muted", cancelled: "muted",
+  CONNECTION_FAILED: "bad", NOT_TESTED: "info", OPERATIONAL: "ok", NOT_READY: "warn", needs_clarification: "info", awaiting_confirmation: "info",
 };
 export function Pill({ children, tone }: { children: ReactNode; tone?: Tone }) {
   const t = tone ?? STATE_TONE[String(children)] ?? "muted";

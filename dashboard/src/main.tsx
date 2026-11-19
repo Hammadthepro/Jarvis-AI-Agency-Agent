@@ -15,6 +15,9 @@ import WebsitesPage, { SiteDetailPage } from "./pages/Websites";
 import OutreachPage from "./pages/Outreach";
 import ActivityPage from "./pages/Activity";
 import SettingsPage from "./pages/Settings";
+import IntegrationsPage from "./pages/Integrations";
+import VoicePage from "./pages/Voice";
+import UsagePage from "./pages/Usage";
 
 const qc = new QueryClient({
   defaultOptions: { queries: { retry: (n, e) => !(e instanceof ApiError && [401, 403, 404].includes(e.status)) && n < 2, staleTime: 3000 } },
@@ -43,6 +46,9 @@ export function App() {
         <Route path="outreach" element={<OutreachPage />} />
         <Route path="activity" element={<ActivityPage />} />
         <Route path="settings" element={<SettingsPage />} />
+        <Route path="integrations" element={<IntegrationsPage />} />
+        <Route path="voice" element={<VoicePage />} />
+        <Route path="usage" element={<UsagePage />} />
       </Route>
     </Routes>
   );

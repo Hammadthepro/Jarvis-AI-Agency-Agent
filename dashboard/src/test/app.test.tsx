@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
@@ -82,22 +82,127 @@ describe("Console command workflow", () => {
   });
 });
 
-describe("Settings usage accounting", () => {
+describe("Usage and costs", () => {
   it("labels JARVIS costs as local estimates and never shows an unconfirmed invoice", async () => {
-    const { default: SettingsPage } = await import("../pages/Settings");
+    const { default: UsagePage } = await import("../pages/Usage");
     const usage = { summary: [{ provider: "anthropic", reconciled: false, unknown_spend: true, invoice_status: "UNAVAILABLE", jarvis_cost_basis: "local_estimate",
       jarvis: { estimated_micros: 9000, reserved_micros: 0, committed_micros: 4200, ambiguous_micros: 0, released_micros: 0, committed_units: 1500, calls: 1, response_tokens: 1500 },
       provider_reported: { status: "unavailable", detail: "Account-level usage and billing UNAVAILABLE" } }] };
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const path = new URL(String(input)).pathname;
-      const body = path === "/usage" ? usage : path === "/integrations" || path === "/settings/limits" ? [] : path === "/compliance" ? { gates: [] } : { settings: {}, models: {} };
+      const body = path === "/usage" ? usage : [];
       return new Response(JSON.stringify(body), { status: 200 });
     });
-    wrap(<SettingsPage />);
-    expect(await screen.findByText("Committed (local est.)")).toBeInTheDocument();
+    wrap(<UsagePage />);
+    expect(await screen.findByText("Committed (local est.)", { selector: "th" })).toBeInTheDocument();
     expect(screen.getByText("UNAVAILABLE")).toBeInTheDocument();
     expect(screen.getByText(/UNKNOWN \(not zero\)/)).toBeInTheDocument();
     expect(screen.getByText(/local estimates from the configured price table, not provider invoices/)).toBeInTheDocument();
     expect(screen.queryByText("CONFIRMED")).not.toBeInTheDocument();
+  });
+});
+
+const field = (o: Partial<Record<string, unknown>>) => ({ name: "api_key", label: "API key", secret: true, required: true, hint: "", choices: [], default: null,
+  set: false, source: null, display: null, ...o });
+const card = (o: Record<string, unknown>) => ({ provider: "serp_api", name: "SerpApi", purpose: "Independent web search", docs_url: "https://x", notes: [],
+  managed_in_dashboard: true, configured: false, enabled: true, state: "NOT_CONFIGURED", provider_state: null, detail: "Missing: API key", tested: false,
+  last_checked_at: null, last_success_at: null, last_error: null, last_error_at: null, capabilities: ["website_verification"], validated_capabilities: [],
+  quota: null, usage: null, fields: [field({})], has_dashboard_credentials: false, runtime: null, compliance: null, ...o });
+
+describe("Integrations Center", () => {
+  function mockApi(listing: Record<string, unknown>, calls: Array<{ path: string; method: string; body?: string }>) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const path = new URL(String(input)).pathname; const method = init?.method ?? "GET";
+      calls.push({ path, method, body: init?.body ? String(init.body) : undefined });
+      if (path === "/integrations") return new Response(JSON.stringify(listing), { status: 200 });
+      if (path.endsWith("/test")) return new Response(JSON.stringify({ provider: "serp_api", state: "INVALID_CREDENTIALS", detail: "Invalid API key.", http_status: 401 }), { status: 200 });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+  }
+  const listing = (o: Record<string, unknown> = {}) => ({ can_manage: true, vault: { ready: true, key_id: "abc", detail: null }, credentials_error: null,
+    integrations: [card({}), card({ provider: "google_places", name: "Google Places API (New)", state: "BLOCKED_PENDING_APPROVAL", configured: true }),
+      card({ provider: "cloudflare", name: "Cloudflare Pages", state: "CONNECTED", configured: true, last_success_at: "2026-11-19T07:00:00Z",
+        fields: [field({ name: "api_token", label: "API token", set: true, source: "dashboard", display: "••••••••" }),
+          field({ name: "account_id", label: "Account ID", secret: false, set: true, source: "dashboard", display: "a".repeat(32) })] })], ...o });
+
+  it("renders real states from the API and keeps secrets out of the page", async () => {
+    const calls: Array<{ path: string; method: string; body?: string }> = [];
+    mockApi(listing(), calls);
+    const { default: IntegrationsPage } = await import("../pages/Integrations");
+    wrap(<IntegrationsPage />);
+    expect(await screen.findByText("NOT_CONFIGURED")).toBeInTheDocument();
+    expect(screen.getByText("BLOCKED_PENDING_APPROVAL")).toBeInTheDocument();
+    expect(screen.getByText("CONNECTED")).toBeInTheDocument();
+    expect(screen.getByText(/API token: saved \(dashboard\)/)).toBeInTheDocument();
+    await userEvent.click(within(screen.getByRole("region", { name: "SerpApi" })).getByRole("button", { name: "Test connection" }));
+    expect(await screen.findByText("INVALID_CREDENTIALS")).toBeInTheDocument();
+    expect(screen.getByText("Invalid API key.")).toBeInTheDocument();
+  });
+
+  it("submits secrets write-only, never pre-fills them, and clears the form", async () => {
+    const calls: Array<{ path: string; method: string; body?: string }> = [];
+    mockApi(listing(), calls);
+    const { default: IntegrationsPage } = await import("../pages/Integrations");
+    wrap(<IntegrationsPage />);
+    const region = await screen.findByRole("region", { name: "Cloudflare Pages" });
+    await userEvent.click(within(region).getByRole("button", { name: "Update" }));
+    const token = screen.getByLabelText(/API token/) as HTMLInputElement;
+    expect(token.type).toBe("password");
+    expect(token.value).toBe("");                                   // the saved secret is never sent back or pre-filled
+    await userEvent.type(token, "cf-new-token-value-0123456789abcdef0123");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+    const put = calls.find((c) => c.method === "PUT")!;
+    expect(put.path).toBe("/integrations/cloudflare/credentials");
+    expect(JSON.parse(put.body!)).toEqual({ secrets: { api_token: "cf-new-token-value-0123456789abcdef0123" }, config: {} });
+    expect(window.localStorage.length + window.sessionStorage.length).toBe(0);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("is read-only for non-admins and explains a missing encryption key", async () => {
+    mockApi(listing({ can_manage: false, vault: { ready: false, key_id: null, detail: "JARVIS_ENCRYPTION_KEY is not set" } }), []);
+    const { default: IntegrationsPage } = await import("../pages/Integrations");
+    wrap(<IntegrationsPage />);
+    expect(await screen.findByText(/JARVIS_ENCRYPTION_KEY is not set/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Configure" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Test connection" }).length).toBe(3);
+  });
+});
+
+describe("Voice", () => {
+  it("maps real agent states and parses agent messages", async () => {
+    const { phaseFromAgentState, parseJarvisMessage } = await import("../lib/voice");
+    expect(phaseFromAgentState("listening")).toBe("listening");
+    expect(phaseFromAgentState("thinking")).toBe("thinking");
+    expect(phaseFromAgentState("speaking")).toBe("speaking");
+    expect(phaseFromAgentState(undefined)).toBeNull();
+    expect(parseJarvisMessage(new TextEncoder().encode(JSON.stringify({ type: "status", text: "Campaign authorized." })))).toEqual({ type: "status", text: "Campaign authorized." });
+    expect(parseJarvisMessage(new TextEncoder().encode("garbage"))).toBeNull();
+  });
+
+  it("shows exactly what is missing, links to Integrations, and never requests a token when not ready", async () => {
+    const calls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = new URL(String(input)).pathname; calls.push(path);
+      if (path === "/voice/status") return new Response(JSON.stringify({ state: "NOT_CONFIGURED", checks: { livekit_configured: false, livekit_validated: false,
+        agent_secret_configured: false, agent_online: false }, missing: ["LiveKit server URL, API key and API secret (Integrations > LiveKit)."], agent: null, token_ttl_s: 600 }), { status: 200 });
+      return new Response("{}", { status: 200 });
+    });
+    const { default: VoicePage } = await import("../pages/Voice");
+    wrap(<VoicePage />);
+    expect(await screen.findByText(/LiveKit server URL, API key and API secret/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Open Integrations/ })).toHaveAttribute("href", "/integrations");
+    expect(screen.getByRole("button", { name: "Start voice session" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "Talk to JARVIS" }));
+    expect(await screen.findByText("Voice is not available yet")).toBeInTheDocument();
+    expect(calls).not.toContain("/voice/token");
+  });
+
+  it("reports a denied microphone clearly", async () => {
+    const { requestMicrophone } = await import("../lib/voice");
+    Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: { getUserMedia: () => Promise.reject(Object.assign(new Error("no"), { name: "NotAllowedError" })) } });
+    expect(await requestMicrophone()).toBe("denied");
+    Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: undefined });
+    expect(await requestMicrophone()).toBe("unavailable");
   });
 });

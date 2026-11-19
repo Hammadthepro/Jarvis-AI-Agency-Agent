@@ -6,7 +6,7 @@ import { z } from "zod";
 import { api, ApiError } from "../lib/api";
 import { subscribeEvents, type JarvisEvent } from "../lib/events";
 import { Button, Card, ErrorState, Pill, usd } from "../components/ui";
-import VoicePanel from "../components/VoicePanel";
+import { ActiveCampaigns, AttentionCard, BudgetCard, IntegrationHealth, VoiceLauncher } from "../components/CommandCenter";
 
 const Question = z.object({ field: z.string(), prompt: z.string(), options: z.array(z.union([z.string(), z.number()])).optional(), preselect: z.string().optional() });
 const CommandResp = z.object({
@@ -37,7 +37,7 @@ export default function Console() {
   });
   const answer = useMutation({
     mutationFn: async (answers: Record<string, unknown>) => CommandResp.parse(await api(`/commands/${active!.id}/answer`, { method: "POST", json: { answers } })),
-    onSuccess: setActive,
+    onSuccess: (c) => { setActive(c); void qc.invalidateQueries({ queryKey: ["commands"] }); },
   });
   const confirm = useMutation({
     mutationFn: async () => api<{ campaign_id: string }>(`/commands/${active!.id}/confirm`, { method: "POST", json: {} }),
@@ -59,9 +59,9 @@ export default function Console() {
           <div className="mb-3 flex items-center justify-between">
             <div>
               <h1 className="text-lg font-semibold text-ink-100">What should JARVIS work on?</h1>
-              <p className="text-sm text-ink-400">Describe the businesses to find, then JARVIS verifies, researches, qualifies and builds previews.</p>
+              <p className="text-sm text-ink-400">Describe the businesses and the previews you want. JARVIS checks the request, shows the worst-case cost and waits for your authorization.</p>
             </div>
-            <VoicePanel onTranscript={(t) => setText(t)} />
+            <VoiceLauncher />
           </div>
           <form onSubmit={submit} className="flex flex-col gap-2">
             <label htmlFor="cmd" className="sr-only">Command</label>
@@ -87,6 +87,8 @@ export default function Console() {
           )}
         </AnimatePresence>
 
+        <ActiveCampaigns />
+
         <Card title="Recent commands">
           {history.error ? <ErrorState error={history.error} /> : (
             <ul className="divide-y divide-ink-800 text-sm">
@@ -105,8 +107,12 @@ export default function Console() {
         </Card>
       </div>
 
+      <div className="flex flex-col gap-4">
+      <AttentionCard />
+      <IntegrationHealth />
+      <BudgetCard />
       <Card title="Live activity" actions={<Pill tone={stream === "live" ? "ok" : "warn"}>{stream === "live" ? "live" : "reconnecting"}</Pill>} className="h-fit">
-        <ul className="max-h-[70vh] space-y-2 overflow-y-auto scroll-thin text-sm" aria-live="polite">
+        <ul className="max-h-[50vh] space-y-2 overflow-y-auto scroll-thin text-sm" aria-live="polite">
           {events.map((e) => (
             <li key={e.id} className="rounded-lg bg-ink-850 px-3 py-2">
               <div className="flex items-center justify-between text-[11px] text-ink-500"><span>{e.event_type}</span><span>{new Date(e.created_at).toLocaleTimeString()}</span></div>
@@ -116,6 +122,7 @@ export default function Console() {
           {events.length === 0 && <li className="text-ink-500">Waiting for activity…</li>}
         </ul>
       </Card>
+      </div>
     </div>
   );
 }

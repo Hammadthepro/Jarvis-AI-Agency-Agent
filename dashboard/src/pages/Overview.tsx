@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
+import { useIntegrations } from "../lib/integrations";
 import { Page } from "../components/Shell";
 import { Card, ErrorState, Loading, Pill, Stat, usd, when } from "../components/ui";
 
@@ -9,7 +10,7 @@ type Overview = Record<string, number | string> & {
 
 export default function OverviewPage() {
   const q = useQuery({ queryKey: ["overview"], queryFn: () => api<Overview>("/overview"), refetchInterval: 10_000 });
-  const integ = useQuery({ queryKey: ["integrations"], queryFn: () => api<Array<{ provider: string; state: string; configured: boolean; tested: boolean }>>("/integrations") });
+  const integ = useIntegrations();
   if (q.error) return <Page title="Overview"><ErrorState error={q.error} /></Page>;
   if (!q.data) return <Page title="Overview"><Loading /></Page>;
   const d = q.data;
@@ -44,9 +45,8 @@ export default function OverviewPage() {
         </Card>
         <Card title="Integrations">
           {integ.error ? <ErrorState error={integ.error} /> : (
-            <ul className="space-y-2 text-sm">{(integ.data ?? []).map((i) => (
-              <li key={i.provider} className="flex items-center justify-between"><span>{i.provider}</span>
-                <span className="flex items-center gap-1">{i.configured && <Pill tone={i.tested ? "ok" : "muted"}>{i.tested ? "tested" : "untested"}</Pill>}<Pill>{i.state}</Pill></span></li>))}
+            <ul className="space-y-2 text-sm">{(integ.data?.integrations ?? []).map((i) => (
+              <li key={i.provider} className="flex items-center justify-between"><span>{i.name}</span><Pill>{i.state}</Pill></li>))}
             </ul>)}
         </Card>
       </div>

@@ -3,10 +3,13 @@ import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { api } from "../lib/api";
 import { signOut } from "../lib/auth";
+import { IconActivity, IconCog, IconCoins, IconCommand, IconFlag, IconGauge, IconGlobe, IconMail, IconMic, IconPlug, IconUsers } from "./icons";
 
 const NAV = [
-  ["/", "JARVIS"], ["/overview", "Overview"], ["/campaigns", "Campaigns"], ["/prospects", "Prospects"],
-  ["/websites", "Website Studio"], ["/outreach", "Outreach"], ["/activity", "Activity"], ["/settings", "Settings"],
+  ["/", "Command Center", IconCommand], ["/voice", "Voice Agent", IconMic], ["/campaigns", "Campaigns", IconFlag],
+  ["/prospects", "Prospects", IconUsers], ["/websites", "Websites & Previews", IconGlobe], ["/outreach", "Outreach", IconMail],
+  ["/integrations", "Integrations", IconPlug], ["/activity", "Activity", IconActivity], ["/usage", "Usage & Costs", IconCoins],
+  ["/overview", "Overview", IconGauge], ["/settings", "Settings", IconCog],
 ] as const;
 
 export default function Shell() {
@@ -21,10 +24,10 @@ export default function Shell() {
           <span className="text-sm font-semibold tracking-[0.2em] text-ink-100">JARVIS</span>
         </div>
         <nav className="flex flex-1 flex-col gap-0.5" aria-label="Main">
-          {NAV.map(([to, label]) => (
+          {NAV.map(([to, label, Icon]) => (
             <NavLink key={to} to={to} end={to === "/"}
-              className={({ isActive }) => `rounded-lg px-3 py-2 text-sm transition ${isActive ? "bg-ink-800 text-ink-100" : "text-ink-400 hover:bg-ink-850 hover:text-ink-200"}`}>
-              {label}
+              className={({ isActive }) => `flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition ${isActive ? "bg-ink-800 text-ink-100" : "text-ink-400 hover:bg-ink-850 hover:text-ink-200"}`}>
+              <Icon className="h-4 w-4 shrink-0" />{label}
             </NavLink>
           ))}
         </nav>
