@@ -83,7 +83,7 @@ async def _render(request: Request, row) -> dict:
 async def create_command(body: CommandIn, request: Request, me: Principal = CurrentPrincipal):
     me.require("operator")
     deps = _deps(request)
-    request.app.state.limiter.hit(f"cmd:{me.user_id}", cost=3)
+    await request.app.state.limiter.hit(f"commands:{me.user_id}", cost=1)
     res = cmd.deterministic_parse(body.text)
     parser_error = None
     if res.parameters is None and (any(q["field"] in ("niche", "location") for q in res.questions)) and deps.claude.configured:

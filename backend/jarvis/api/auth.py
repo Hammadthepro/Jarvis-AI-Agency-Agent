@@ -6,9 +6,7 @@ workspace resolved here, and role checks gate writes."""
 from __future__ import annotations
 
 import asyncio
-import time
 import uuid
-from collections import defaultdict
 from dataclasses import dataclass
 
 import jwt
@@ -63,19 +61,22 @@ class TokenVerifier:
 
 
 class RateLimiter:
-    """Token bucket per key (single API instance). Requests beyond the bucket get 429."""
+    """API rate limiting backed by the shared Postgres token buckets (works across API instances)."""
 
-    def __init__(self, rate_per_min: int = 120, burst: int = 60) -> None:
-        self.rate, self.burst = rate_per_min / 60, burst
-        self.buckets: dict[str, tuple[float, float]] = defaultdict(lambda: (burst, time.monotonic()))
+    def __init__(self, db, limits: dict | None = None) -> None:
+        import json as _json
+        from pathlib import Path as _P
 
-    def hit(self, key: str, cost: float = 1) -> None:
-        tokens, last = self.buckets[key]
-        now = time.monotonic()
-        tokens = min(self.burst, tokens + (now - last) * self.rate)
-        if tokens < cost:
-            raise RateLimited("too many requests")
-        self.buckets[key] = (tokens - cost, now)
+        from jarvis.core.ratelimit import PgRateLimiter, provider_rate_limits  # noqa: F401
+        self.pg = PgRateLimiter(db)
+        self.limits = limits or _json.loads((_P(__file__).resolve().parents[1] / "resources" / "default_limits.json")
+                                            .read_text())["api_rate_limits"]
+
+    async def hit(self, key: str, cost: float = 1, kind: str | None = None) -> None:
+        cfg = self.limits[kind or key.split(":", 1)[0]]
+        d = await self.pg.take(f"api:{key}", capacity=cfg["capacity"], refill_per_s=cfg["capacity"] / cfg["per_seconds"], cost=cost)
+        if not d.allowed:
+            raise RateLimited("too many requests", details={"retry_after_s": round(d.retry_after_s, 1)})
 
 
 async def ensure_user_and_workspace(db, user_id: uuid.UUID, email: str | None, requested_ws: str | None) -> tuple[uuid.UUID, str] | None:
@@ -115,7 +116,7 @@ async def principal(request: Request, authorization: str | None = Header(None),
                     x_workspace_id: str | None = Header(None)) -> Principal:
     st = request.app.state
     ip = request.client.host if request.client else "?"
-    st.limiter.hit(f"ip:{ip}")
+    await st.limiter.hit(f"ip:{ip}")
     if not authorization or not authorization.lower().startswith("bearer "):
         raise Unauthorized("missing bearer token")
     claims = await st.verifier.verify(authorization.split(" ", 1)[1])
@@ -123,7 +124,7 @@ async def principal(request: Request, authorization: str | None = Header(None),
         uid = uuid.UUID(claims["sub"])
     except ValueError as exc:
         raise Unauthorized("token subject is not a user id") from exc
-    st.limiter.hit(f"user:{uid}")
+    await st.limiter.hit(f"user:{uid}")
     found = await ensure_user_and_workspace(st.db, uid, claims.get("email"), x_workspace_id)
     if found is None:
         ws = await create_workspace(st.db, uid, (claims.get("email") or "My") .split("@")[0] + " workspace")

@@ -17,7 +17,9 @@ async def new_ws(db):
     return await create_workspace(db, uid, "t"), uid
 
 
-async def test_concurrent_reservations_never_exceed_cap(db):
+async def test_concurrent_reservations_never_exceed_cap(db, monkeypatch):
+    from jarvis.core import ratelimit
+    monkeypatch.setitem(ratelimit.provider_rate_limits(), "serp_api", {"capacity": 1000, "per_seconds": 1})  # isolate the budget cap
     ws, _ = await new_ws(db)
     await db.execute("update budget_limits set cap = 10 where workspace_id=$1 and provider='serp_api'", ws)
     calls = []

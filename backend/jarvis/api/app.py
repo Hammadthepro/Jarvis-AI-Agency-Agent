@@ -41,7 +41,7 @@ def create_app(settings: Settings | None = None, deps: Deps | None = None) -> Fa
     app.state.db = db
     app.state.deps = deps or Deps.build(settings, db)
     app.state.verifier = TokenVerifier(settings)
-    app.state.limiter = RateLimiter()
+    app.state.limiter = RateLimiter(db)
     app.state.livekit = LiveKitClient(settings)
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False,
                        allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Authorization", "Content-Type",

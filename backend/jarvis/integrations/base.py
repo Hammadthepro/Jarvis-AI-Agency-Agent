@@ -19,6 +19,7 @@ import structlog
 from jarvis.core import budget
 from jarvis.core.compliance import require_gate
 from jarvis.core.errors import BudgetBlocked, ComplianceBlocked, IntegrationState, ProviderError
+from jarvis.core.ratelimit import PgRateLimiter, provider_rate_limits
 from jarvis.db.pool import Database
 
 log = structlog.get_logger(__name__)
@@ -128,6 +129,13 @@ async def gateway_call(ctx: CallContext, *, provider: str, operation: str, unit:
                        compliance_scope: str | None = None) -> Any:
     db = ctx.db
     await check_kill_switches(db, ctx, provider)
+    rl = provider_rate_limits().get(provider)
+    if rl:
+        d = await PgRateLimiter(db).take(f"provider:{provider}", capacity=rl["capacity"],
+                                         refill_per_s=rl["capacity"] / rl["per_seconds"])
+        if not d.allowed:   # checked before any reservation: nothing is sent, nothing is reserved
+            raise ProviderError(provider, IntegrationState.RATE_LIMITED,
+                                f"shared throughput limit reached; retry in {d.retry_after_s:.0f}s", retryable=True)
     pv = budget.pricing()["version"]
     if compliance_scope:
         async with db.acquire() as conn:

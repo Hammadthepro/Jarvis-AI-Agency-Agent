@@ -49,6 +49,7 @@ def make_settings(dsn: str, tmp: Path, **kw) -> Settings:
 async def db(dsn):
     d = Database(dsn, pool_size=5)
     await d.connect()
+    await d.execute("delete from rate_limit_buckets")   # rate-limit state is persistent; isolate tests
     yield d
     await d.close()
 
