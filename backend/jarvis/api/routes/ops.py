@@ -363,9 +363,13 @@ async def revoke(approval_id: uuid.UUID, request: Request, me: Principal = Curre
 @router.get("/usage")
 async def usage(request: Request, me: Principal = CurrentPrincipal):
     """Usage this month, kept as separate figures:
-    estimated (worst-case reserved before each call), reserved (still open), committed (actual, from provider
-    responses), ambiguous (outcome unknown, still counted), released (provably not billed), and provider-reported
-    (from usage sync; status 'unavailable'/'not_configured'/'never_synced' means UNKNOWN, never zero)."""
+    estimated (worst-case reserved before each call), reserved (still open), committed (units from provider
+    responses, priced locally), ambiguous (outcome unknown, still counted), released (provably not billed), and
+    provider-reported (from usage sync; status 'unavailable'/'not_configured'/'never_synced' means UNKNOWN, never zero).
+
+    Every JARVIS money figure is a local estimate (`jarvis_cost_basis = local_estimate`). `reconciled` is true only
+    when the provider itself reported account-level usage. `invoice_status` is CONFIRMED only for an imported
+    provider billing export; otherwise UNAVAILABLE (or MANUAL_ENTRY_UNVERIFIED)."""
     db = request.app.state.db
     rows = await db.fetch(
         """select provider,
@@ -379,9 +383,18 @@ async def usage(request: Request, me: Principal = CurrentPrincipal):
            from cost_reservations where workspace_id = $1 and created_at >= date_trunc('month', now()) group by provider""",
         me.workspace_id)
     reported = await db.fetch(
-        """select distinct on (provider) provider, unit, reported_units, reported_cost_micros, source, status, detail, fetched_at
+        """select distinct on (provider) provider, unit, reported_units, reported_cost_micros, cost_basis, source, status, detail,
+                  raw, fetched_at
            from provider_usage_reports where (workspace_id is null or workspace_id = $1)
            order by provider, fetched_at desc""", me.workspace_id)
+    invoiced = {r["provider"]: r["cost_basis"] for r in await db.fetch(
+        """select distinct on (provider) provider, cost_basis from provider_usage_reports
+           where (workspace_id is null or workspace_id = $1) and cost_basis in ('provider_invoice', 'manual_entry')
+             and period_end >= date_trunc('month', now()) order by provider, (cost_basis = 'provider_invoice') desc, fetched_at desc""",
+        me.workspace_id)}
+    tokens = await db.fetchrow("""select coalesce(sum(tokens_in + tokens_out), 0)::bigint t, count(*) n from usage_events
+                                  where workspace_id = $1 and provider = 'anthropic' and outcome = 'ok'
+                                    and created_at >= date_trunc('month', now())""", me.workspace_id)
     daily = await db.fetch("""select date_trunc('day', created_at) as day, provider, sum(amount_micros)::bigint micros from cost_reservations
                               where workspace_id=$1 and status in ('committed','ambiguous','reserved') and created_at > now() - interval '31 days'
                               group by 1,2 order by 1""", me.workspace_id)
@@ -398,8 +411,13 @@ async def usage(request: Request, me: Principal = CurrentPrincipal):
     for p in sorted(set(est) | set(PROVIDERS)):
         e = {k: v for k, v in est.get(p, empty).items() if k != "provider"}
         r = rep.get(p) or {"status": "never_synced", "detail": "usage sync has not run for this provider"}
-        summary.append({"provider": p, "jarvis": e, "provider_reported": r, "reconciled": r.get("status") == "ok",
-                        "unknown_spend": r.get("status") != "ok" and (e["committed_micros"] > 0 or e["ambiguous_micros"] > 0)})
+        if p == "anthropic":
+            e["response_tokens"], e["responses"] = tokens["t"], tokens["n"]   # provider-reported per response
+        account_reported = r.get("status") == "ok" and r.get("source") != "response_usage"
+        invoice = {"provider_invoice": "CONFIRMED", "manual_entry": "MANUAL_ENTRY_UNVERIFIED"}.get(invoiced.get(p), "UNAVAILABLE")
+        summary.append({"provider": p, "jarvis": e, "jarvis_cost_basis": "local_estimate", "provider_reported": r,
+                        "reconciled": account_reported, "invoice_status": invoice,
+                        "unknown_spend": not account_reported and (e["committed_micros"] > 0 or e["ambiguous_micros"] > 0)})
     return J({"summary": summary, "daily": [dict(r) for r in daily], "per_campaign": [dict(r) for r in per_campaign],
               "per_site": [dict(r) for r in per_site]})
 
@@ -424,8 +442,10 @@ class ManualReportIn(BaseModel):
 async def manual_report(body: ManualReportIn, request: Request, me: Principal = CurrentPrincipal):
     me.require("owner")
     await request.app.state.db.execute(
-        """insert into provider_usage_reports(workspace_id, provider, period_start, period_end, unit, reported_units, reported_cost_micros, source)
-           values ($1,$2,$3,$4,$5,$6,$7,'manual_entry')""", me.workspace_id, body.provider, body.period_start, body.period_end, body.unit,
+        """insert into provider_usage_reports(workspace_id, provider, period_start, period_end, unit, reported_units, reported_cost_micros, source,
+                                              cost_basis)
+           values ($1,$2,$3,$4,$5,$6,$7,'manual_entry', case when $7::bigint is null then null else 'manual_entry' end)""",
+        me.workspace_id, body.provider, body.period_start, body.period_end, body.unit,
         body.reported_units, int(body.reported_cost_usd * 1_000_000) if body.reported_cost_usd is not None else None)
     return {"ok": True}
 

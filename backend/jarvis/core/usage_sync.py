@@ -6,7 +6,11 @@ workspace). Every provider gets a row each run with an explicit status:
   unavailable    - no usage API is integrated for this provider; usage is UNKNOWN, not zero
   not_configured - no credential
   error          - the usage API call failed
-Missing data is never written as zero."""
+Missing data is never written as zero.
+
+Cost basis (provider_usage_reports.cost_basis) says what any reported cost is: provider_reported,
+provider_invoice, local_estimate or manual_entry. A cost priced by JARVIS is always local_estimate and is never
+presented as a provider invoice."""
 
 from __future__ import annotations
 
@@ -23,14 +27,16 @@ UNAVAILABLE = {
 
 
 async def _write(db, provider: str, unit: str, status: str, *, units=None, cost=None, source="provider_api", raw=None,
-                 detail=None) -> None:
+                 detail=None, cost_basis=None) -> None:
+    if cost is not None and cost_basis is None:
+        raise ValueError("a reported cost needs an explicit cost_basis")
     now = datetime.now(UTC)
     start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     await db.execute(
         """insert into provider_usage_reports(workspace_id, provider, period_start, period_end, unit, reported_units,
-               reported_cost_micros, source, raw, status, detail)
-           values (null,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""",
-        provider, start, now, unit, units, cost, source, raw, status, detail)
+               reported_cost_micros, source, raw, status, detail, cost_basis)
+           values (null,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)""",
+        provider, start, now, unit, units, cost, source, raw, status, detail, cost_basis)
 
 
 async def sync_provider_usage(deps) -> dict[str, str]:
@@ -81,8 +87,9 @@ async def _sync(deps, db, out: dict[str, str]) -> dict[str, str]:
             await _write(db, "firecrawl", "credit", "error", detail=str(exc)[:300])
             out["firecrawl"] = "error"
 
-    # Anthropic: exact token counts are reported by the API on every response (usage_events). Cost is priced
-    # from those tokens with configured prices; an organization billing API is not integrated.
+    # Anthropic: no Usage & Cost Admin API is integrated, so ACCOUNT-LEVEL usage and billing are UNAVAILABLE.
+    # What JARVIS does know is recorded in `raw`, labelled: token counts the API returned on each of JARVIS's
+    # own responses, and a cost JARVIS priced locally from those tokens (local_estimate, never an invoice).
     if not deps.claude.configured:
         await _write(db, "anthropic", "tokens", "not_configured", source="none", detail="ANTHROPIC_API_KEY not set")
         out["anthropic"] = "not_configured"
@@ -90,9 +97,13 @@ async def _sync(deps, db, out: dict[str, str]) -> dict[str, str]:
         row = await db.fetchrow("""select coalesce(sum(tokens_in + tokens_out), 0)::bigint t, coalesce(sum(estimated_cost_micros), 0)::bigint c,
                                           count(*) n from usage_events where provider = 'anthropic' and outcome = 'ok'
                                           and created_at >= date_trunc('month', now())""")
-        await _write(db, "anthropic", "tokens", "ok", units=row["t"], cost=row["c"], source="response_usage",
-                     detail=f"sum of provider-reported token usage from {row['n']} responses; cost priced locally, not an invoice")
-        out["anthropic"] = "ok"
+        await _write(db, "anthropic", "tokens", "unavailable", source="none",
+                     raw={"jarvis_responses": row["n"], "jarvis_response_tokens": row["t"],
+                          "jarvis_cost_micros": row["c"], "jarvis_cost_basis": "local_estimate"},
+                     detail=("Account-level usage and billing UNAVAILABLE: the Anthropic usage/cost API is not integrated. "
+                             f"JARVIS's own calls this month: {row['n']} responses, {row['t']} tokens as reported per response; "
+                             "their cost is a local estimate from the configured price table, not a provider invoice."))
+        out["anthropic"] = "unavailable"
 
     for provider, why in UNAVAILABLE.items():
         configured = {"google_places": deps.places.configured, "cloudflare": deps.cloudflare.configured,

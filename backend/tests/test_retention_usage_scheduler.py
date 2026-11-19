@@ -65,7 +65,7 @@ async def test_legal_hold_blocks_retention_until_released(db):
 
 async def test_usage_sync_never_reports_missing_as_zero(db, deps):
     out = await sync_provider_usage(deps)
-    assert out["serp_api"] == "ok" and out["anthropic"] == "ok"
+    assert out["serp_api"] == "ok" and out["anthropic"] == "unavailable"   # no account-level Anthropic usage API
     assert out["google_places"] == "unavailable" and out["livekit"] == "not_configured"
     rows = {r["provider"]: r for r in await db.fetch("""select distinct on (provider) * from provider_usage_reports
                                                          order by provider, fetched_at desc""")}
@@ -101,3 +101,47 @@ async def test_scheduler_runs_due_jobs_once_under_lock(db, deps):
     assert len(await w2.run_due_jobs()) == 4
     st = {r["name"]: r["last_status"] for r in await db.fetch("select name, last_status from scheduled_jobs")}
     assert set(st.values()) == {"succeeded"}
+
+
+async def test_anthropic_local_cost_is_never_reported_as_provider_billing(client, deps, db):
+    """Locally priced Claude cost is a labelled estimate; account-level usage stays UNAVAILABLE; no invoice is implied."""
+    from tests.conftest import login
+    a = await login(client, "anth@t.dev")
+    ws = a["me"]["workspace_id"]
+    await db.execute("""insert into usage_events(workspace_id, provider, operation, tokens_in, tokens_out, estimated_cost_micros, outcome, pricing_version)
+                        values ($1,'anthropic','messages',1000,500,4200,'ok','test')""", ws)
+    assert (await sync_provider_usage(deps))["anthropic"] == "unavailable"
+    r = await db.fetchrow("select * from provider_usage_reports where provider='anthropic' order by fetched_at desc limit 1")
+    assert r["status"] == "unavailable" and r["reported_cost_micros"] is None and r["reported_units"] is None
+    assert r["cost_basis"] is None and r["source"] == "none"
+    assert r["raw"]["jarvis_cost_basis"] == "local_estimate" and r["raw"]["jarvis_response_tokens"] >= 1500
+    assert "UNAVAILABLE" in r["detail"] and "not a provider invoice" in r["detail"]
+
+    await client.post("/usage/sync", headers=a["headers"])
+    u = {x["provider"]: x for x in (await client.get("/usage", headers=a["headers"])).json()["summary"]}
+    an = u["anthropic"]
+    assert an["reconciled"] is False and an["invoice_status"] == "UNAVAILABLE" and an["jarvis_cost_basis"] == "local_estimate"
+    assert an["provider_reported"]["status"] == "unavailable" and an["jarvis"]["response_tokens"] == 1500
+    for x in u.values():                              # no provider shows a confirmed invoice without a billing export
+        assert x["invoice_status"] == "UNAVAILABLE" and x["jarvis_cost_basis"] == "local_estimate"
+
+    # A manually entered cost is labelled as such, never as a confirmed invoice.
+    await client.post("/usage/reports", headers=a["headers"], json={
+        "provider": "anthropic", "unit": "usd", "reported_cost_usd": "1.25", "period_start": "2026-11-01T00:00:00Z",
+        "period_end": "2099-01-01T00:00:00Z"})
+    u = {x["provider"]: x for x in (await client.get("/usage", headers=a["headers"])).json()["summary"]}
+    assert u["anthropic"]["invoice_status"] == "MANUAL_ENTRY_UNVERIFIED"
+
+
+async def test_database_refuses_mislabelled_costs(db):
+    import asyncpg
+    import pytest
+    base = """insert into provider_usage_reports(workspace_id, provider, period_start, period_end, unit, reported_cost_micros, source, cost_basis)
+              values (null,'anthropic',now(),now(),'usd',100,$1,$2)"""
+    for source, basis in (("response_usage", "provider_invoice"), ("response_usage", "provider_reported"),
+                          ("provider_api", None), ("manual_entry", "provider_invoice")):
+        with pytest.raises(asyncpg.CheckViolationError):
+            await db.execute(base, source, basis)
+    with pytest.raises(ValueError):
+        from jarvis.core.usage_sync import _write
+        await _write(db, "anthropic", "usd", "ok", cost=1)

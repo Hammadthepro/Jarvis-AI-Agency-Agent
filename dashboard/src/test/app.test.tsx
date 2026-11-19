@@ -81,3 +81,23 @@ describe("Console command workflow", () => {
     expect((await screen.findAllByText("API_UNREACHABLE")).length).toBeGreaterThan(0);
   });
 });
+
+describe("Settings usage accounting", () => {
+  it("labels JARVIS costs as local estimates and never shows an unconfirmed invoice", async () => {
+    const { default: SettingsPage } = await import("../pages/Settings");
+    const usage = { summary: [{ provider: "anthropic", reconciled: false, unknown_spend: true, invoice_status: "UNAVAILABLE", jarvis_cost_basis: "local_estimate",
+      jarvis: { estimated_micros: 9000, reserved_micros: 0, committed_micros: 4200, ambiguous_micros: 0, released_micros: 0, committed_units: 1500, calls: 1, response_tokens: 1500 },
+      provider_reported: { status: "unavailable", detail: "Account-level usage and billing UNAVAILABLE" } }] };
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = new URL(String(input)).pathname;
+      const body = path === "/usage" ? usage : path === "/integrations" || path === "/settings/limits" ? [] : path === "/compliance" ? { gates: [] } : { settings: {}, models: {} };
+      return new Response(JSON.stringify(body), { status: 200 });
+    });
+    wrap(<SettingsPage />);
+    expect(await screen.findByText("Committed (local est.)")).toBeInTheDocument();
+    expect(screen.getByText("UNAVAILABLE")).toBeInTheDocument();
+    expect(screen.getByText(/UNKNOWN \(not zero\)/)).toBeInTheDocument();
+    expect(screen.getByText(/local estimates from the configured price table, not provider invoices/)).toBeInTheDocument();
+    expect(screen.queryByText("CONFIRMED")).not.toBeInTheDocument();
+  });
+});

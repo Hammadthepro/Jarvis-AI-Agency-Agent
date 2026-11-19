@@ -7,8 +7,8 @@ import { Button, Card, ErrorState, Input, Loading, Pill, usd, when } from "../co
 type Integration = { provider: string; configured: boolean; state: string; tested: boolean; last_checked_at: string | null; detail: string | null };
 type Limit = { id: string; scope: string; provider: string | null; unit: string; period: string; cap: number; free_allowance: number | null; allow_paid: boolean };
 type Gate = { scope: string; open: boolean; reason: string | null; intended_use: string | null; approver_name?: string; document_ref?: string; review_by?: string };
-type Usage = { summary: Array<{ provider: string; reconciled: boolean; unknown_spend: boolean;
-  jarvis: { estimated_micros: number; reserved_micros: number; committed_micros: number; ambiguous_micros: number; released_micros: number; committed_units: number; calls: number };
+type Usage = { summary: Array<{ provider: string; reconciled: boolean; unknown_spend: boolean; invoice_status: string; jarvis_cost_basis: string;
+  jarvis: { estimated_micros: number; reserved_micros: number; committed_micros: number; ambiguous_micros: number; released_micros: number; committed_units: number; calls: number; response_tokens?: number };
   provider_reported: { status: string; detail?: string | null; unit?: string; reported_units?: number | null; reported_cost_micros?: number | null; source?: string; fetched_at?: string } }> };
 
 export default function SettingsPage() {
@@ -63,8 +63,8 @@ export default function SettingsPage() {
           actions={<Button variant="ghost" onClick={() => syncUsage.mutate()} disabled={syncUsage.isPending}>Sync now</Button>}>
           {usage.error ? <ErrorState error={usage.error} /> : !usage.data ? <Loading /> : (
             <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="text-left text-xs uppercase text-ink-500"><tr>
-              <th className="py-1">Provider</th><th className="text-right">Estimated</th><th className="text-right">Reserved</th><th className="text-right">Committed</th>
-              <th className="text-right">Ambiguous</th><th className="text-right">Released</th><th className="px-3">Provider-reported</th></tr></thead>
+              <th className="py-1">Provider</th><th className="text-right">Estimated</th><th className="text-right">Reserved</th><th className="text-right" title="Units reported by the provider per response, priced by JARVIS. A local estimate, not an invoice.">Committed (local est.)</th>
+              <th className="text-right">Ambiguous</th><th className="text-right">Released</th><th className="px-3">Provider-reported (account)</th><th className="px-3">Invoice</th></tr></thead>
               <tbody className="divide-y divide-ink-800">{usage.data.summary.map((u) => (
                 <tr key={u.provider}><td className="py-2">{u.provider}</td>
                   <td className="text-right tabular-nums">{usd(u.jarvis.estimated_micros)}</td><td className="text-right tabular-nums">{usd(u.jarvis.reserved_micros)}</td>
@@ -73,8 +73,9 @@ export default function SettingsPage() {
                   <td className="px-3 text-xs"><Pill tone={u.reconciled ? "ok" : "warn"}>{u.provider_reported.status}</Pill>{" "}
                     {u.reconciled ? <span className="text-ink-300">{u.provider_reported.reported_units ?? "—"} {u.provider_reported.unit} · {u.provider_reported.source} · {when(u.provider_reported.fetched_at)}</span>
                       : <span className="text-warn-500">UNKNOWN (not zero){u.unknown_spend ? " · spend recorded but unreconciled" : ""}</span>}
-                    {u.provider_reported.detail && <div className="text-[11px] text-ink-500">{u.provider_reported.detail}</div>}</td></tr>))}</tbody></table></div>)}
-          <p className="mt-2 text-xs text-ink-500">Estimated = worst case reserved before each call. Ambiguous calls (timeouts) stay counted until reconciled.</p>
+                    {u.provider_reported.detail && <div className="text-[11px] text-ink-500">{u.provider_reported.detail}</div>}</td>
+                  <td className="px-3 text-xs"><Pill tone={u.invoice_status === "CONFIRMED" ? "ok" : "warn"}>{u.invoice_status}</Pill></td></tr>))}</tbody></table></div>)}
+          <p className="mt-2 text-xs text-ink-500">All JARVIS amounts are local estimates from the configured price table, not provider invoices. Estimated = worst case reserved before each call. Ambiguous calls (timeouts) stay counted until reconciled. Invoice is CONFIRMED only for an imported provider billing export.</p>
         </Card>
         <Card title="Budget limits" className="lg:col-span-2">
           {limits.error ? <ErrorState error={limits.error} /> : !limits.data ? <Loading /> : <LimitsTable rows={limits.data} />}

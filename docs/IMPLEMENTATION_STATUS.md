@@ -85,5 +85,5 @@ New regression tests this revision:
 ## 5. Known limitations
 - **App image build not verified in this environment.** The Docker build cannot reach apt/npm registries through this container's proxy (TLS interception). CI builds both images (`images` job). The QA sandbox image was verified here from lockfile-identical modules.
 - **Google usage is not reported automatically.** No usage API is integrated; reports are `unavailable` until imported or entered manually.
-- **Claude reported usage is per-response token counts priced locally.** The organisation billing API is not integrated.
+- **Claude account-level usage and billing are UNAVAILABLE.** No Usage and Cost Admin API is integrated. JARVIS records the token counts returned on its own responses and prices them locally; these are labelled `local_estimate` and never shown as reconciled or invoiced (tested).
 - **Expired evidence references.** Retention removes uncited SERP evidence after 180 days and raw pages after 90 days. Since migration 0005 each purge leaves a content-free tombstone, so verification references resolve as `expired` rather than dangling (tested). The UI does not yet render expired references distinctly; the API returns them as `evidence_refs`.

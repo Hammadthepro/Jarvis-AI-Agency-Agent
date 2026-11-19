@@ -215,7 +215,8 @@ Usage display: the Activity → Costs view shows **Estimated (JARVIS ledger)** a
 **Provider-reported** in separate columns, with the variance and the sync time:
 - SerpApi: account API (searches used this month), synced hourly.
 - Firecrawl: credit-usage API, synced hourly.
-- Claude: exact token `usage` from each response (so the ledger is exact for tokens), plus the Usage and Cost API if an admin key is configured.
+- Claude: exact token `usage` from each response (so the ledger is exact for JARVIS's own tokens). The cost of those tokens is a **local estimate** (configured price table), never an invoice. **As built, the Usage and Cost Admin API is not integrated**, so account-level usage and billing show `UNAVAILABLE`.
+- Every JARVIS money figure is labelled `local_estimate`. `invoice_status` is `CONFIRMED` only for an imported provider billing export, `MANUAL_ENTRY_UNVERIFIED` for an operator entry, and `UNAVAILABLE` otherwise.
 - Google: no simple usage API is used in v1. Usage is entered manually or imported from Cloud Billing reports, labelled "manual". If nothing is imported, the column reads "not available".
 
 ---

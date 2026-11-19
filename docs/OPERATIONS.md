@@ -73,7 +73,13 @@ The hourly sync writes account-level `provider_usage_reports` with an explicit s
 - `not_configured`: no credential.
 - `error`: the usage API call failed.
 
-Settings → Usage shows estimated, reserved, committed, ambiguous and released spend, plus the provider-reported figure.
+Anthropic is recorded as `unavailable` at account level: no usage/cost Admin API is integrated. JARVIS's own
+per-response token counts and their locally priced cost are kept in the report's `raw` and labelled `local_estimate`.
+
+Every reported cost has a `cost_basis` (`provider_reported`, `provider_invoice`, `local_estimate`, `manual_entry`).
+Database constraints prevent a response-derived cost from being labelled as provider-reported or invoiced.
+Settings → Usage shows estimated, reserved, committed (local estimate), ambiguous and released spend, the
+account-level provider-reported figure, and an invoice status (`UNAVAILABLE` unless a billing export is imported).
 `POST /usage/sync` runs the sync on demand.
 
 ## Backups
