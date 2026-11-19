@@ -47,6 +47,34 @@ jobs:
       - working-directory: dashboard
         run: npm ci && npm run typecheck && npm test && npx vite build
 
+  voice:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - working-directory: apps/voice
+        run: pip install -r requirements.txt pytest pytest-asyncio && pytest -q -rs tests
+
+  images:
+    # Controlled build: the ONLY place images (incl. the QA sandbox) are built with registry access.
+    # The sandbox image ID is recorded so production can pin SANDBOX_IMAGE=sha256:<id>; runtime never pulls.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build QA sandbox image (pinned base digest)
+        run: docker build -f docker/qa-sandbox.Dockerfile -t jarvis-qa-sandbox:ci .
+      - name: Record sandbox image digest
+        run: docker image inspect --format '{{.Id}}' jarvis-qa-sandbox:ci | tee sandbox-image-id.txt
+      - name: Verify sandbox runs with no network and no pull
+        run: |
+          docker run --rm --pull=never --network none --read-only --user 10001:10001 --cap-drop ALL \
+            --security-opt no-new-privileges --tmpfs /tmp jarvis-qa-sandbox:ci node -e "fetch('https://example.com').then(()=>process.exit(1)).catch(()=>process.exit(0))"
+      - name: Build app image
+        run: docker build -f docker/app.Dockerfile -t jarvis-app:ci .
+      - uses: actions/upload-artifact@v4
+        with: { name: sandbox-image-id, path: sandbox-image-id.txt }
+
   secrets-scan:
     runs-on: ubuntu-24.04
     steps:

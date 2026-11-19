@@ -9,18 +9,23 @@ printf '%s\n' "$VPS_HOST_KEY" > "$KH"
 SSH=(ssh -i "$VPS_SSH_KEY_FILE" -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$KH" -o IdentitiesOnly=yes "$VPS_USER@$VPS_HOST")
 REV="$(git rev-parse --short HEAD)"
 
-rsync -az --delete --exclude .git --exclude node_modules --exclude .venv --exclude '.env' \
+rsync -az --delete --exclude .git --exclude node_modules --exclude .venv --exclude '.env' --exclude 'env/*.env' \
   -e "ssh -i $VPS_SSH_KEY_FILE -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KH" ./ "$VPS_USER@$VPS_HOST:/opt/jarvis/"
 "${SSH[@]}" bash -se <<REMOTE
 set -euo pipefail
 cd /opt/jarvis
-test -f .env || { echo ".env missing on server"; exit 1; }
+for f in app runner backup; do test -f env/\$f.env || { echo "env/\$f.env missing on server"; exit 1; }; done
 export JARVIS_VERSION=$REV
-docker compose build api
-docker build -f docker/qa-sandbox.Dockerfile -t jarvis-qa-sandbox:latest .
-docker compose run --rm migrate
-docker compose up -d --remove-orphans api worker docker-proxy caddy backup
-sleep 5
+# Controlled provisioning: images are built here (registry access only at build time). At runtime the sandbox
+# runs with --network none and --pull=never; the runner refuses unpinned images in production.
+docker compose build migrate
+docker build -f docker/qa-sandbox.Dockerfile -t jarvis-qa-sandbox:$REV .
+SANDBOX_ID=\$(docker image inspect --format '{{.Id}}' jarvis-qa-sandbox:$REV)
+sed -i "s|^SANDBOX_IMAGE=.*|SANDBOX_IMAGE=\$SANDBOX_ID|" env/runner.env
+docker compose up -d --remove-orphans migrate sandbox-runner api worker backup caddy
+docker compose wait migrate
+sleep 10
 docker compose exec -T api curl -fsS http://127.0.0.1:8000/ready
+docker compose exec -T sandbox-runner curl -fsS http://127.0.0.1:8090/health
 REMOTE
 echo "deployed $REV"

@@ -1,60 +1,83 @@
-# Production-style stack for the VPS. Local development: docker-compose.dev.yml adds Postgres.
-# Supabase provides Postgres/Auth/Storage in production (DATABASE_URL points at Supabase).
-services:
-  api:
-    build: { context: ., dockerfile: docker/app.Dockerfile }
-    image: jarvis-app:latest
-    env_file: .env
-    environment: { QA_RUNNER_MODE: docker }
-    volumes: [ "sites:/var/lib/jarvis/sites" ]
-    restart: unless-stopped
-    healthcheck: { test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/ready"], interval: 30s, timeout: 5s, retries: 3 }
+# Production stack for the VPS. Local development: docker-compose.dev.yml (Postgres) + README.
+# Secrets are split per service (least privilege): env/app.env, env/runner.env, env/voice.env, env/backup.env
+# (all mode 600, never committed; see env/*.example). Supabase provides Postgres/Auth in production.
+#
+# Startup order: migrate (must succeed) -> api, worker; sandbox-runner must be healthy before the worker starts.
+# Only sandbox-runner can reach the Docker socket; it exposes one fixed operation and is not published to the host.
 
+x-app: &app
+  image: jarvis-app:${JARVIS_VERSION:-latest}
+  env_file: [env/app.env]
+  read_only: true
+  tmpfs: ["/tmp"]
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+
+services:
   migrate:
-    image: jarvis-app:latest
-    env_file: .env
+    <<: *app
+    build: { context: ., dockerfile: docker/app.Dockerfile }
     command: ["python", "-m", "jarvis.db.migrate"]
     restart: "no"
 
-  worker:
-    image: jarvis-app:latest
-    env_file: .env
-    command: ["python", "-m", "jarvis.worker.main"]
-    environment:
-      QA_RUNNER_MODE: docker
-      # The worker never sees the host Docker socket; it talks to a proxy that only allows container lifecycle calls.
-      DOCKER_HOST: tcp://docker-proxy:2375
-      SITES_ARTIFACT_DIR: /var/lib/jarvis/sites
-    volumes: [ "sites:/var/lib/jarvis/sites" ]
-    stop_grace_period: 90s
+  api:
+    <<: *app
+    environment: { QA_RUNNER_MODE: runner }
+    depends_on: { migrate: { condition: service_completed_successfully } }
+    volumes: ["/var/lib/jarvis/sites:/var/lib/jarvis/sites:ro"]
     restart: unless-stopped
-    depends_on: [ docker-proxy ]
+    healthcheck: { test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/ready"], interval: 30s, timeout: 5s, retries: 3, start_period: 20s }
 
-  docker-proxy:
-    image: tecnativa/docker-socket-proxy:0.3.0
-    environment: { CONTAINERS: 1, POST: 1, IMAGES: 0, NETWORKS: 0, VOLUMES: 0, EXEC: 0, BUILD: 0, SWARM: 0, SERVICES: 0, TASKS: 0 }
-    volumes: [ "/var/run/docker.sock:/var/run/docker.sock:ro" ]
+  worker:
+    <<: *app
+    command: ["python", "-m", "jarvis.worker.main"]
+    environment: { QA_RUNNER_MODE: runner, SANDBOX_RUNNER_URL: "http://sandbox-runner:8090", SITES_ARTIFACT_DIR: /var/lib/jarvis/sites }
+    volumes: ["/var/lib/jarvis/sites:/var/lib/jarvis/sites"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      sandbox-runner: { condition: service_healthy }
+    stop_grace_period: 90s          # SIGTERM -> stop claiming, finish/hand back in-flight tasks
     restart: unless-stopped
+    healthcheck: { test: ["CMD", "python", "-m", "jarvis.worker.health"], interval: 60s, timeout: 10s, retries: 3, start_period: 60s }
+
+  sandbox-runner:
+    # The only container with the Docker socket. Fixed operation, pinned image (SANDBOX_IMAGE=sha256:...), no pulls.
+    image: jarvis-app:${JARVIS_VERSION:-latest}
+    command: ["uvicorn", "jarvis.sandbox_runner:app", "--host", "0.0.0.0", "--port", "8090"]
+    env_file: [env/runner.env]
+    environment: { SITES_ARTIFACT_DIR: /var/lib/jarvis/sites }
+    user: root                      # needs the docker group on the host socket; no other privileges
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "/var/lib/jarvis/sites:/var/lib/jarvis/sites"      # same host path so sandbox bind mounts resolve
+    expose: ["8090"]                # internal network only; never published
+    restart: unless-stopped
+    healthcheck: { test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8090/health"], interval: 30s, timeout: 5s, retries: 3 }
 
   voice:
     build: { context: ., dockerfile: docker/voice.Dockerfile }
-    env_file: .env
+    env_file: [env/voice.env]
     profiles: ["voice"]
+    depends_on: [api]
     restart: unless-stopped
 
   backup:
-    image: jarvis-app:latest
-    env_file: .env
-    entrypoint: ["/bin/sh", "-c", "while true; do /app/scripts/backup.sh || echo 'backup failed'; sleep 86400; done"]
-    volumes: [ "./scripts:/app/scripts:ro", "backups:/backups" ]
-    user: root
+    <<: *app
+    env_file: [env/backup.env]
+    entrypoint: ["/bin/sh", "-c", "while true; do python -m jarvis.ops.backup run || echo 'backup failed'; sleep 86400; done"]
+    volumes: ["backups:/backups"]
+    depends_on: { migrate: { condition: service_completed_successfully } }
     restart: unless-stopped
 
   caddy:
     image: caddy:2.8.4
-    ports: [ "80:80", "443:443" ]
-    volumes: [ "./docker/Caddyfile:/etc/caddy/Caddyfile:ro", "caddy_data:/data" ]
+    ports: ["80:80", "443:443"]
+    volumes: ["./docker/Caddyfile:/etc/caddy/Caddyfile:ro", "caddy_data:/data"]
     environment: { API_HOSTNAME: "${API_HOSTNAME}", CADDY_ACME_EMAIL: "${CADDY_ACME_EMAIL}" }
+    depends_on: [api]
     restart: unless-stopped
 
-volumes: { sites: {}, backups: {}, caddy_data: {} }
+volumes: { backups: {}, caddy_data: {} }

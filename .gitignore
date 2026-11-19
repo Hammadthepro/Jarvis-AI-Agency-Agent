@@ -15,3 +15,4 @@ dashboard/dist/
 .ruff_cache/
 .mypy_cache/
 *.tsbuildinfo
+env/*.env

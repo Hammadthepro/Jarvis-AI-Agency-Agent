@@ -29,7 +29,10 @@ ufw allow 80/tcp
 ufw allow 443/tcp
 ufw --force enable
 
-install -d -o "$DEPLOY_USER" /opt/jarvis
+install -d -o "$DEPLOY_USER" /opt/jarvis /opt/jarvis/env
+chmod 700 /opt/jarvis/env
+# Shared site artifacts: same host path in worker, api (read-only) and sandbox-runner; app containers run as uid 10002.
+install -d -o 10002 -g 10002 -m 755 /var/lib/jarvis/sites
 echo "VPS ready. Next: copy the repo to /opt/jarvis, create /opt/jarvis/.env (mode 600), then run scripts/deploy.sh from CI or locally."
 echo "Record this host key fingerprint for deploy pinning:"
 ssh-keyscan -t ed25519 localhost 2>/dev/null | ssh-keygen -lf -

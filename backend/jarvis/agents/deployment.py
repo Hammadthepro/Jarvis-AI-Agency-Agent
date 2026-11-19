@@ -29,19 +29,35 @@ async def deploy_site(deps: Deps, ctx: CallContext, site_id: UUID, verify_attemp
     if existing:
         return {"status": "verified", "url": existing["url"], "deployment_id": existing["provider_deployment_id"]}
     branch = re.sub(r"[^a-z0-9-]", "-", row["slug"].lower())[:28].strip("-")
-    dep_id = await db.fetchval(
-        """insert into deployments(workspace_id, site_version_id, project_name, branch, status, expires_at)
-           values ($1,$2,$3,$4,'pending',$5) returning id""", ctx.workspace_id, row["vid"], deps.cloudflare.project, branch,
-        datetime.now(UTC) + timedelta(days=deps.settings.preview_ttl_days))
-    try:
-        res = await deps.cloudflare.deploy(ctx, Path(row["artifact_path"]), branch)
-    except ProviderError as exc:
-        await db.execute("update deployments set status = $2, verification = $3 where id = $1", dep_id,
-                         "unknown_provider_result" if exc.billing_ambiguous else "failed", {"error": exc.message[:500]})
-        raise
-    url = res.alias_url or res.url
-    await db.execute("update deployments set status='uploaded', provider_deployment_id=$2, url=$3 where id=$1",
-                     dep_id, res.deployment_id, url)
+    # Restart safety: a retried task must not upload again if a previous attempt already did.
+    prior = await db.fetchrow("""select * from deployments where site_version_id = $1
+                                 and status in ('pending','uploaded','unknown_provider_result') order by created_at desc limit 1""", row["vid"])
+    url = None
+    if prior and prior["status"] == "uploaded" and prior["url"]:
+        dep_id, url = prior["id"], prior["url"]
+    elif prior:
+        dep_id = prior["id"]
+        existing_cf = await deps.cloudflare.latest_deployment(branch)   # did the crashed attempt reach Cloudflare?
+        if existing_cf and existing_cf.get("url"):
+            url = existing_cf["url"]
+            await db.execute("""update deployments set status='uploaded', provider_deployment_id=$2, url=$3, upload_completed_at=now()
+                                where id=$1""", dep_id, existing_cf.get("id"), url)
+    else:
+        dep_id = await db.fetchval(
+            """insert into deployments(workspace_id, site_version_id, project_name, branch, status, expires_at)
+               values ($1,$2,$3,$4,'pending',$5) returning id""", ctx.workspace_id, row["vid"], deps.cloudflare.project, branch,
+            datetime.now(UTC) + timedelta(days=deps.settings.preview_ttl_days))
+    if url is None:
+        try:
+            res = await deps.cloudflare.deploy(ctx, Path(row["artifact_path"]), branch)
+        except ProviderError as exc:
+            await db.execute("update deployments set status = $2, verification = $3 where id = $1", dep_id,
+                             "unknown_provider_result" if exc.billing_ambiguous else "failed", {"error": exc.message[:500]})
+            raise
+        url = res.alias_url or res.url
+        await db.execute("""update deployments set status='uploaded', provider_deployment_id=$2, url=$3, upload_completed_at=now()
+                            where id=$1""", dep_id, res.deployment_id, url)
+    deployment_id = await db.fetchval("select provider_deployment_id from deployments where id=$1", dep_id)
     title = re.search(r"<title>(.*?)</title>", Path(row["artifact_path"], "index.html").read_text(), re.S)
     expected = (title.group(1) if title else "").replace("&amp;", "&")
     checks = []
@@ -56,7 +72,7 @@ async def deploy_site(deps: Deps, ctx: CallContext, site_id: UUID, verify_attemp
                 await conn.execute("update generated_sites set state='deployed' where id=$1", site_id)
                 await audit(conn, workspace_id=ctx.workspace_id, actor_type="agent", actor_id="deployment",
                             action="deployment.verified", entity_type="deployment", entity_id=dep_id, data={"url": url})
-            return {"status": "verified", "url": url, "deployment_id": res.deployment_id}
+            return {"status": "verified", "url": url, "deployment_id": deployment_id}
         await asyncio.sleep(verify_delay_s)
     await db.execute("update deployments set status='failed', verification=$2 where id=$1", dep_id, {"checks": checks})
     return {"status": "failed", "url": url, "reason": "deployed URL did not verify", "checks": checks}
