@@ -12,7 +12,7 @@ import pytest
 from jarvis.config import Settings
 
 ROOT = Path(__file__).resolve().parents[2]
-PROD = dict(jarvis_env="production", jarvis_encryption_key="k" * 44, supabase_url="https://x.supabase.co",
+PROD = dict(jarvis_env="production", database_url="postgresql://jarvis:pw@db.example.com:5432/jarvis", jarvis_encryption_key="k" * 44, supabase_url="https://x.supabase.co",
             supabase_jwks_url="https://x.supabase.co/auth/v1/.well-known/jwks.json", qa_runner_mode="runner",
             sandbox_runner_url="http://sandbox-runner:8090", sandbox_runner_token="t" * 32)
 

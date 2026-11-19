@@ -24,6 +24,8 @@ router = APIRouter()
 
 def is_admin(request: Request, me: Principal) -> bool:
     s = request.app.state.base_settings
+    if s.local_dev_access_active and me.email and me.email.lower() == s.jarvis_local_dev_email.lower():
+        return True   # the single local-development operator administers its own local deployment
     return str(me.user_id).lower() in s.admin_user_ids or bool(me.email and me.email.lower() in s.admin_emails)
 
 

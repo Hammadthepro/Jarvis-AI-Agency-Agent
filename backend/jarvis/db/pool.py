@@ -26,7 +26,8 @@ async def _init_conn(conn: asyncpg.Connection) -> None:
 
 class Database:
     def __init__(self, dsn: str, *, pool_size: int = 5, max_backoff_s: int = 60) -> None:
-        self.dsn = dsn
+        from jarvis.config import normalize_dsn
+        self.dsn = normalize_dsn(dsn)
         self.pool_size = pool_size
         self.max_backoff_s = max_backoff_s
         self._pool: asyncpg.Pool | None = None

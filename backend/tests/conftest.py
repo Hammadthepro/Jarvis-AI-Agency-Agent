@@ -12,6 +12,8 @@ import httpx
 import pytest
 
 os.environ.setdefault("JARVIS_ENV", "test")
+os.environ["JARVIS_ENV_FILE"] = ""          # tests never read the developer's .env
+os.environ.pop("JARVIS_LOCAL_DEV_ACCESS", None)
 PG_ADMIN = os.environ.get("TEST_PG_ADMIN_DSN", "postgresql://postgres@localhost:54329/postgres")
 
 from jarvis.agents.deps import Deps  # noqa: E402

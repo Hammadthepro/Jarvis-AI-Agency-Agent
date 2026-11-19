@@ -47,8 +47,18 @@ async def health():
 
 @public.get("/ready")
 async def ready(request: Request):
-    ok = await request.app.state.db.health()
-    body = {"database": request.app.state.db.state, "detail": request.app.state.db.last_error}
+    """Ready only when the database is reachable AND every migration is applied (a missing table such as
+    integration_credentials is reported here, not discovered later as a 500)."""
+    from jarvis.db.migrate import status_conn
+    db = request.app.state.db
+    ok = await db.health()
+    body = {"database": db.state, "detail": db.last_error, "migrations": None}
+    if ok:
+        async with db.acquire() as conn:
+            st = await status_conn(conn)
+        body["migrations"] = {"ok": st.ok, "applied": len(st.applied), "pending": st.pending, "modified": st.modified,
+                              "detail": None if st.ok else st.describe()}
+        ok = st.ok
     return JSONResponse(body, status_code=200 if ok else 503)
 
 
@@ -133,7 +143,10 @@ async def me_(request: Request, me: Principal = CurrentPrincipal):
     db = request.app.state.db
     ws = await db.fetch("""select w.id, w.name, m.role from memberships m join workspaces w on w.id = m.workspace_id
                            where m.user_id=$1 order by m.created_at""", me.user_id)
+    s = request.app.state.settings
+    local = s.local_dev_access_active and bool(me.email) and me.email.lower() == s.jarvis_local_dev_email.lower()
     return J({"user_id": me.user_id, "email": me.email, "workspace_id": me.workspace_id, "role": me.role,
+              "auth_mode": "local_development" if local else "token", "environment": s.jarvis_env,
               "workspaces": [dict(r) for r in ws]})
 
 

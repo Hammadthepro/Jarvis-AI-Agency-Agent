@@ -124,6 +124,15 @@ async def _create_workspace_in(conn, user_id: uuid.UUID, name: str) -> uuid.UUID
     return ws
 
 
+def local_operator_id(email: str) -> uuid.UUID:
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"jarvis-local-operator:{email.lower()}")
+
+
+def local_operator_claims(settings: Settings) -> dict:
+    email = settings.jarvis_local_dev_email.lower()
+    return {"sub": str(local_operator_id(email)), "email": email, "jarvis_local_dev": True}
+
+
 def get_state(request: Request):
     return request.app.state
 
@@ -133,9 +142,14 @@ async def principal(request: Request, authorization: str | None = Header(None),
     st = request.app.state
     ip = request.client.host if request.client else "?"
     await st.limiter.hit(f"ip:{ip}")
-    if not authorization or not authorization.lower().startswith("bearer "):
+    if not authorization and st.settings.local_dev_access_active:
+        # LOCAL DEVELOPMENT ONLY (JARVIS_ENV=local and JARVIS_LOCAL_DEV_ACCESS=true; refused at startup otherwise):
+        # a request without a token acts as one fixed local operator, so the dashboard needs no sign-in.
+        claims = local_operator_claims(st.settings)
+    elif not authorization or not authorization.lower().startswith("bearer "):
         raise Unauthorized("missing bearer token")
-    claims = await st.verifier.verify(authorization.split(" ", 1)[1])
+    else:
+        claims = await st.verifier.verify(authorization.split(" ", 1)[1])
     try:
         uid = uuid.UUID(claims["sub"])
     except ValueError as exc:

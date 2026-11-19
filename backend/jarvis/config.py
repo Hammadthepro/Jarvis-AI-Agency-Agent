@@ -3,6 +3,7 @@ missing *optional* provider credentials surface as NOT_CONFIGURED, never as a mo
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -14,9 +15,27 @@ Env = Literal["local", "test", "live-test", "production"]
 
 ALLOWED_MODELS = {"claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"}
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+# One environment file for every process (API, worker, migrations, scripts), wherever it is started from.
+# Real environment variables (for example Codespaces secrets) take precedence over it.
+# JARVIS_ENV_FILE overrides the path; an empty value disables the file (the test suite does this).
+ENV_FILE = os.environ.get("JARVIS_ENV_FILE", str(REPO_ROOT / ".env")) or None
+
+# Development database: the same values as docker-compose.dev.yml (existing volumes were initialised with them).
+DEV_DATABASE_URL = "postgresql://postgres:jarvis@localhost:5432/jarvis"
+LOCAL_OPERATOR_EMAIL = "local-operator@jarvis.local"
+
+
+def normalize_dsn(url: str) -> str:
+    """asyncpg accepts postgresql:// or postgres:// only; SQLAlchemy-style driver suffixes are stripped."""
+    for prefix in ("postgresql+asyncpg://", "postgres+asyncpg://", "postgresql+psycopg://"):
+        if url.startswith(prefix):
+            return "postgresql://" + url[len(prefix):]
+    return url
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
+    model_config = SettingsConfigDict(env_file=ENV_FILE, extra="ignore", case_sensitive=False, env_ignore_empty=True)
 
     jarvis_env: Env = "local"
     jarvis_enable_test_doubles: bool = False
@@ -29,8 +48,12 @@ class Settings(BaseSettings):
     # Deployment administrators: may manage provider credentials in the Integrations Center (comma-separated).
     jarvis_admin_user_ids: str = ""
     jarvis_admin_emails: str = ""
+    # LOCAL DEVELOPMENT ONLY: requests without a token act as one local operator, so the dashboard needs no
+    # sign-in during development. Refused at startup unless JARVIS_ENV=local; never a production feature.
+    jarvis_local_dev_access: bool = False
+    jarvis_local_dev_email: str = LOCAL_OPERATOR_EMAIL
 
-    database_url: str = "postgresql://postgres@localhost:5432/postgres"
+    database_url: str = DEV_DATABASE_URL
     database_pool_size: int = Field(5, ge=1, le=20)
     db_health_interval_s: int = Field(30, ge=1, le=300)
     db_reconnect_max_backoff_s: int = Field(60, ge=1, le=600)
@@ -100,8 +123,21 @@ class Settings(BaseSettings):
             raise ValueError(f"model {v!r} is not in the allowed list {sorted(ALLOWED_MODELS)}")
         return v
 
+    @field_validator("database_url")
+    @classmethod
+    def _dsn(cls, v: str) -> str:
+        return normalize_dsn(v)
+
+    @field_validator("sites_artifact_dir")
+    @classmethod
+    def _sites_dir(cls, v: Path) -> Path:
+        # Relative paths are anchored at the repository root, so the API and worker always share one directory.
+        return v if v.is_absolute() else (REPO_ROOT / v)
+
     @model_validator(mode="after")
     def _env_rules(self) -> Settings:
+        if self.jarvis_local_dev_access and self.jarvis_env != "local":
+            raise ValueError("JARVIS_LOCAL_DEV_ACCESS is a local-development mode and is only permitted when JARVIS_ENV=local")
         if self.jarvis_enable_test_doubles and self.jarvis_env != "test":
             raise ValueError("JARVIS_ENABLE_TEST_DOUBLES is only permitted when JARVIS_ENV=test")
         if self.jarvis_env == "production":
@@ -111,6 +147,8 @@ class Settings(BaseSettings):
             }.items() if not v]
             if not (self.supabase_jwks_url or self.supabase_jwt_secret):
                 missing.append("SUPABASE_JWKS_URL or SUPABASE_JWT_SECRET")
+            if "database_url" not in self.model_fields_set or self.database_url == DEV_DATABASE_URL:
+                missing.append("DATABASE_URL (the development default is not allowed in production)")
             if missing:
                 raise ValueError(f"missing required production settings: {', '.join(missing)}")
             if self.qa_runner_mode != "runner":
@@ -120,6 +158,11 @@ class Settings(BaseSettings):
             if not self.places_api_base_url.startswith("https://places.googleapis.com/"):
                 raise ValueError("PLACES_API_BASE_URL must be https://places.googleapis.com/v1 in production")
         return self
+
+    @property
+    def local_dev_access_active(self) -> bool:
+        """True only for an explicitly enabled local-development deployment."""
+        return self.jarvis_local_dev_access and self.jarvis_env == "local"
 
     @property
     def admin_user_ids(self) -> set[str]:

@@ -269,6 +269,12 @@ class Worker:
 
     async def serve(self) -> None:
         await self.db.connect_with_retry(self.stop)
+        from jarvis.db.migrate import status_conn
+        async with self.db.acquire() as conn:
+            st = await status_conn(conn)
+        if not st.ok:   # never run tasks against a schema the code does not match
+            await self.db.close()
+            raise SchemaNotReady(st.describe())
         loops = [asyncio.create_task(self.claim_loop()), asyncio.create_task(self.heartbeat_loop()),
                  asyncio.create_task(self.scheduler_loop())]
         await self.stop.wait()
@@ -283,6 +289,10 @@ class Worker:
         await self.db.close()
 
 
+class SchemaNotReady(RuntimeError):
+    pass
+
+
 def main() -> None:
     settings = get_settings()
     configure_logging(settings.jarvis_log_level)
@@ -295,7 +305,11 @@ def main() -> None:
             loop.add_signal_handler(sig, worker.stop.set)
         await worker.serve()
 
-    asyncio.run(runner())
+    try:
+        asyncio.run(runner())
+    except SchemaNotReady as exc:
+        log.error("worker.schema_not_ready", detail=str(exc))
+        raise SystemExit(f"worker not started: database migrations are not applied ({exc})") from None
 
 
 if __name__ == "__main__":
