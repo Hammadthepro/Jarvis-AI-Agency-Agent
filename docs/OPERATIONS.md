@@ -87,10 +87,15 @@ account-level provider-reported figure, and an invoice status (`UNAVAILABLE` unl
   `BACKUP_AGE_RECIPIENT` (keep the private key offline); 7 local copies; upload to `BACKUP_S3_*` (for example Cloudflare R2);
   verify size and sha256 of the uploaded object.
 - **Restore drill** (monthly, required for `PROTECTED`): `scripts/restore-drill.sh`. It downloads the newest *off-site*
-  object, verifies its checksum, decrypts it, restores it into `RESTORE_DRILL_DATABASE_URL` (a scratch database) and
-  compares row counts with production.
+  object, verifies its checksum (a missing checksum fails the drill), decrypts it, restores it into
+  `RESTORE_DRILL_DATABASE_URL` (a scratch database) and checks row counts against those recorded at backup time
+  (stored in the object metadata). Any mismatch fails the drill and the status stays `BACKUP_NOT_PROTECTED`.
 - Status is `PROTECTED` only when two things hold. The latest backup was uploaded to a destination that is **not**
-  on this host or a private network. And a restore drill from that destination succeeded within 35 days.
+  on this host, this server's public IP (`BACKUP_HOST_PUBLIC_IPS`, `API_HOSTNAME`) or a private network. And a restore
+  drill from that destination succeeded within 35 days.
+- **Not yet verified against a real provider.** Automated tests use an S3-protocol server (moto) on loopback, which
+  verifies the logic only. Cloudflare R2 compatibility (metadata, checksums, listing) is unverified until a real run
+  and drill succeed; until then the status is `BACKUP_NOT_PROTECTED`.
   Otherwise the status is `BACKUP_NOT_PROTECTED` (or `NO_BACKUP_RECORDED`, `BACKUP_FAILED`, `BACKUP_STALE`).
 - Manual restore of a specific file: `scripts/restore.sh <file.dump.age> <age-identity> <target-db-url>`.
 

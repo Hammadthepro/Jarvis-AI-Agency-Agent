@@ -8,6 +8,11 @@ Status (shown in Settings and /system/readiness) is PROTECTED only when the late
 an independent destination (not loopback/private network) AND a restore drill from that destination
 succeeded within 35 days. Otherwise BACKUP_NOT_PROTECTED (or NO_BACKUP_RECORDED / BACKUP_FAILED / BACKUP_STALE).
 
+The drill fails unless the downloaded object's sha256 matches the checksum recorded at upload (required, not
+optional), every counted table is restored, and row counts are consistent with those recorded at backup time.
+Automated tests use an S3-protocol server on loopback (moto); that verifies the logic only. A real provider
+(for example Cloudflare R2) is verified only by a real run + drill, which is what flips the status to PROTECTED.
+
 Config: DATABASE_URL, BACKUP_AGE_RECIPIENT, BACKUP_DIR, BACKUP_S3_ENDPOINT, BACKUP_S3_BUCKET,
 BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY, BACKUP_S3_REGION (default auto), for drills:
 BACKUP_AGE_IDENTITY_FILE (private key; keep offline except during drills) and RESTORE_DRILL_DATABASE_URL."""
@@ -17,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
+import json
 import os
 import socket
 import subprocess
@@ -31,6 +37,7 @@ import asyncpg
 
 KEY_PREFIX = "jarvis-db/"
 COUNT_TABLES = ("campaigns", "prospects", "research_facts", "generated_sites", "outreach_drafts", "suppression_records", "audit_logs")
+NEVER_DELETED = ("suppression_records", "audit_logs")   # retention never deletes these, so a restore can't have fewer
 
 
 @dataclass(frozen=True)
@@ -55,7 +62,8 @@ class S3Config:
                             aws_secret_access_key=self.secret, region_name=self.region)
 
     def independent(self) -> bool:
-        """True when the destination is not on this host or a private network (i.e. survives losing the VPS)."""
+        """True when the destination is not on this host or a private network (i.e. survives losing the VPS).
+        Also false when it resolves to this server's own public address (API_HOSTNAME / BACKUP_HOST_PUBLIC_IPS)."""
         host = urlsplit(self.endpoint).hostname or ""
         if host in ("localhost",) or host.endswith(".local") or host.endswith(".internal"):
             return False
@@ -63,11 +71,23 @@ class S3Config:
             addrs = {i[4][0] for i in socket.getaddrinfo(host, 443)}
         except socket.gaierror:
             return False
+        if addrs & _own_addresses():
+            return False
         for a in addrs:
             ip = ipaddress.ip_address(a)
             if ip.is_loopback or ip.is_private or ip.is_link_local:
                 return False
         return True
+
+
+def _own_addresses() -> set[str]:
+    own = {a.strip() for a in os.environ.get("BACKUP_HOST_PUBLIC_IPS", "").split(",") if a.strip()}
+    for name in filter(None, (os.environ.get("API_HOSTNAME"), socket.gethostname())):
+        try:
+            own |= {i[4][0] for i in socket.getaddrinfo(name, 443)}
+        except (socket.gaierror, UnicodeError):
+            pass
+    return own
 
 
 def _pg_url(url: str) -> str:
@@ -124,13 +144,14 @@ async def run_backup(database_url: str, recipient: str, out_dir: Path, s3: S3Con
     run_id = await _record(database_url, "insert into backup_runs(status, destination, offsite) values ('running', $1, false) returning id",
                            f"local:{out_dir}")
     try:
+        counts = await _counts(database_url)          # just before the dump; checked by the restore drill
         await asyncio.to_thread(_dump_encrypted, database_url, recipient, out)
         digest, size = sha256_file(out), out.stat().st_size
         offsite, destination, detail = False, f"local:{out}", "BACKUP_NOT_PROTECTED: no off-site destination configured"
         if s3 is not None:
             key = KEY_PREFIX + out.name
             c = s3.client()
-            c.upload_file(str(out), s3.bucket, key, ExtraArgs={"Metadata": {"sha256": digest}})
+            c.upload_file(str(out), s3.bucket, key, ExtraArgs={"Metadata": {"sha256": digest, "row-counts": json.dumps(counts, separators=(",", ":"))}})
             head = c.head_object(Bucket=s3.bucket, Key=key)
             if head["ContentLength"] != size or head.get("Metadata", {}).get("sha256") != digest:
                 raise RuntimeError("off-site object verification failed (size or checksum mismatch)")
@@ -158,18 +179,32 @@ async def restore_drill(database_url: str, s3: S3Config, identity_file: Path, sc
     with tempfile.TemporaryDirectory() as td:
         local = Path(td) / Path(latest["Key"]).name
         c.download_file(s3.bucket, latest["Key"], str(local))
-        expected = c.head_object(Bucket=s3.bucket, Key=latest["Key"]).get("Metadata", {}).get("sha256")
+        meta = c.head_object(Bucket=s3.bucket, Key=latest["Key"]).get("Metadata", {})
+        expected = meta.get("sha256")
         digest = sha256_file(local)
-        if expected and expected != digest:
+        if not expected:
+            raise RuntimeError("off-site object has no recorded sha256 checksum; cannot verify the restore source")
+        if expected != digest:
             raise RuntimeError("downloaded backup checksum does not match uploaded checksum")
         await asyncio.to_thread(_decrypt_restore, identity_file, local, scratch_url)
-    restored = await _counts(scratch_url)
+    try:
+        restored = await _counts(scratch_url)
+    except asyncpg.PostgresError as exc:
+        raise RuntimeError(f"restore drill failed: restored database is missing counted tables ({exc})") from exc
+    at_backup = json.loads(meta["row-counts"]) if meta.get("row-counts") else None
+    if at_backup is not None:
+        bad = [t for t in COUNT_TABLES if t in at_backup and (
+            (t in NEVER_DELETED and restored[t] < at_backup[t]) or (at_backup[t] > 0 and restored[t] == 0))]
+        if bad:
+            raise RuntimeError(f"restore drill failed: row counts inconsistent with backup time for {bad}: "
+                               f"restored={restored} at_backup={at_backup}")
     run_id = await _record(database_url, "select id from backup_runs where sha256 = $1 order by started_at desc limit 1", digest)
     if run_id:
         await _record(database_url, """update backup_runs set restore_tested_at = now(),
                                        detail = coalesce(detail,'') || ' | restore drill ok from ' || $2 where id = $1""",
                       run_id, f"s3://{s3.bucket}/{latest['Key']}")
-    return {"restored_from": f"s3://{s3.bucket}/{latest['Key']}", "sha256": digest, "row_counts": restored, "backup_run_id": str(run_id)}
+    return {"restored_from": f"s3://{s3.bucket}/{latest['Key']}", "sha256": digest, "row_counts": restored,
+            "row_counts_at_backup": at_backup, "backup_run_id": str(run_id)}
 
 
 async def backup_status(conn) -> tuple[str, dict | None]:

@@ -215,6 +215,7 @@ needs manual approval. All **SECRET**.
 | `SITES_ARTIFACT_DIR` | worker, api, sandbox-runner | shared host path `/var/lib/jarvis/sites` | CONFIG |
 | `VOICE_AGENT_SHARED_SECRET` | api, voice | authenticates the voice agent to `/internal/voice/command` | **SECRET** |
 | `BACKUP_S3_ENDPOINT`, `BACKUP_S3_BUCKET`, `BACKUP_S3_REGION` | backup | independent off-site destination (for example Cloudflare R2) | CONFIG |
+| `BACKUP_HOST_PUBLIC_IPS` | backup | this server's public IPs (comma-separated). A destination resolving to them is not independent and cannot make backups `PROTECTED` | CONFIG |
 | `BACKUP_S3_ACCESS_KEY_ID`, `BACKUP_S3_SECRET_ACCESS_KEY` | backup | bucket-scoped credentials | **SECRET** |
 | `BACKUP_AGE_IDENTITY_FILE`, `RESTORE_DRILL_DATABASE_URL` | restore drill (operator machine) | age private key and scratch DB for drills | **SECRET** |
 | `JARVIS_LIVE_TESTS`, `JARVIS_LIVE_USER_ID`, `JARVIS_LIVE_WORKSPACE_ID` | live tests only | enable credentialed live tests | CONFIG |

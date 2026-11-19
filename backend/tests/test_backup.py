@@ -67,7 +67,8 @@ async def test_offsite_backup_and_restore_drill(db, dsn, s3, agekey, tmp_path):
 async def test_protected_requires_independent_destination_and_drill(db, dsn, s3, agekey, tmp_path, monkeypatch):
     key, pub = agekey
     await db.execute("delete from backup_runs")
-    monkeypatch.setattr(B.S3Config, "independent", lambda self: True)    # simulate an off-host bucket (e.g. Cloudflare R2)
+    # Logic test only: forces the independence result. This does NOT verify Cloudflare R2 or any real provider.
+    monkeypatch.setattr(B.S3Config, "independent", lambda self: True)
     out = await B.run_backup(dsn, pub, tmp_path / "local", s3)
     assert out["offsite"] is True
     async with db.acquire() as conn:
@@ -91,4 +92,36 @@ def test_independence_check():
     assert not B.S3Config("http://127.0.0.1:9000", "b", "k", "s").independent()
     assert not B.S3Config("http://localhost:9000", "b", "k", "s").independent()
     assert not B.S3Config("http://10.0.0.5", "b", "k", "s").independent()
+    assert B.S3Config("https://1.1.1.1", "b", "k", "s").independent()
+
+
+async def test_drill_requires_recorded_checksum(db, dsn, s3, agekey, tmp_path):
+    key, pub = agekey
+    out = await B.run_backup(dsn, pub, tmp_path / "local", s3)
+    obj_key, c = out["destination"].split("/", 3)[3], s3.client()
+    c.copy_object(Bucket=s3.bucket, Key=obj_key, CopySource={"Bucket": s3.bucket, "Key": obj_key},
+                  Metadata={}, MetadataDirective="REPLACE")                    # checksum metadata stripped
+    with pytest.raises(RuntimeError, match="no recorded sha256"):
+        await B.restore_drill(dsn, s3, key, await scratch_db(dsn))
+    assert not await db.fetchval("select restore_tested_at is not null from backup_runs where sha256=$1", out["sha256"])
+
+
+async def test_drill_fails_when_restored_rows_are_missing(db, dsn, s3, agekey, tmp_path):
+    import json
+    key, pub = agekey
+    out = await B.run_backup(dsn, pub, tmp_path / "local", s3)
+    obj_key, c = out["destination"].split("/", 3)[3], s3.client()
+    meta = c.head_object(Bucket=s3.bucket, Key=obj_key)["Metadata"]
+    inflated = {k: v + 1000 for k, v in json.loads(meta["row-counts"]).items()}   # backup "had" more rows than restored
+    c.copy_object(Bucket=s3.bucket, Key=obj_key, CopySource={"Bucket": s3.bucket, "Key": obj_key},
+                  Metadata={"sha256": meta["sha256"], "row-counts": json.dumps(inflated)}, MetadataDirective="REPLACE")
+    with pytest.raises(RuntimeError, match="row counts inconsistent"):
+        await B.restore_drill(dsn, s3, key, await scratch_db(dsn))
+    assert not await db.fetchval("select restore_tested_at is not null from backup_runs where sha256=$1", out["sha256"])
+
+
+def test_destination_on_this_server_is_not_independent(monkeypatch):
+    monkeypatch.setenv("BACKUP_HOST_PUBLIC_IPS", "1.1.1.1")
+    assert not B.S3Config("https://1.1.1.1", "b", "k", "s").independent()   # a bucket on the VPS's own public IP
+    monkeypatch.setenv("BACKUP_HOST_PUBLIC_IPS", "")
     assert B.S3Config("https://1.1.1.1", "b", "k", "s").independent()
