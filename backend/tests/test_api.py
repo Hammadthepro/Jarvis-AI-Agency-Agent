@@ -133,3 +133,14 @@ async def test_system_readiness_reports_real_gaps(client):
     assert items["discovery_provider"]["ok"] is False and "BLOCKED_PENDING_APPROVAL" in items["discovery_provider"]["detail"]
     assert items["terms_of_use_published"]["ok"] is False and items["privacy_policy_published"]["ok"] is False
     assert items["claude_api"]["ok"] is True          # configured with a test credential in this fixture
+
+
+async def test_concurrent_first_requests_create_exactly_one_workspace(client):
+    """A new user's dashboard fires several requests at once; they must all resolve to one workspace."""
+    import asyncio
+    r = await client.post("/auth/dev-token", json={"email": "race@first.dev"})
+    h = {"Authorization": f"Bearer {r.json()['access_token']}"}
+    res = await asyncio.gather(*[client.get("/me", headers=h) for _ in range(8)])
+    ws_ids = {x.json()["workspace_id"] for x in res}
+    assert len(ws_ids) == 1
+    assert len((await client.get("/me", headers=h)).json()["workspaces"]) == 1

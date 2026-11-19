@@ -91,20 +91,36 @@ async def ensure_user_and_workspace(db, user_id: uuid.UUID, email: str | None, r
         if role is None:
             raise Forbidden("not a member of this workspace")
         return ws, role
-    row = await db.fetchrow("select workspace_id, role from memberships where user_id=$1 order by created_at limit 1", user_id)
+    row = await db.fetchrow("select workspace_id, role from memberships where user_id=$1 order by created_at, workspace_id limit 1",
+                            user_id)
     return (row["workspace_id"], row["role"]) if row else None
+
+
+async def ensure_default_workspace(db, user_id: uuid.UUID, name: str) -> tuple[uuid.UUID, str]:
+    """First request(s) of a new user: creates exactly one workspace even when requests arrive concurrently."""
+    async with db.transaction() as conn:
+        await conn.execute("select pg_advisory_xact_lock(hashtextextended('jarvis.default_ws:' || $1::uuid::text, 0))", user_id)
+        row = await conn.fetchrow("""select workspace_id, role from memberships where user_id=$1
+                                     order by created_at, workspace_id limit 1""", user_id)
+        if row:
+            return row["workspace_id"], row["role"]
+        return await _create_workspace_in(conn, user_id, name), "owner"
 
 
 async def create_workspace(db, user_id: uuid.UUID, name: str) -> uuid.UUID:
     async with db.transaction() as conn:
-        ws = await conn.fetchval("insert into workspaces(name, created_by) values ($1,$2) returning id", name, user_id)
-        await conn.execute("insert into memberships(workspace_id, user_id, role) values ($1,$2,'owner')", ws, user_id)
-        await conn.execute("insert into system_settings(workspace_id) values ($1)", ws)
-        await budget.seed_default_limits(conn, ws)
-        await conn.execute("""insert into scoring_rule_sets(workspace_id, version, rules, is_active) values ($1,1,$2,true)""",
-                           ws, __import__("jarvis.agents.qualification", fromlist=["x"]).DEFAULT_RULES)
-        await conn.execute("insert into audit_logs(workspace_id, actor_type, actor_id, action) values ($1,'user',$2,'workspace.created')",
-                           ws, str(user_id))
+        return await _create_workspace_in(conn, user_id, name)
+
+
+async def _create_workspace_in(conn, user_id: uuid.UUID, name: str) -> uuid.UUID:
+    ws = await conn.fetchval("insert into workspaces(name, created_by) values ($1,$2) returning id", name, user_id)
+    await conn.execute("insert into memberships(workspace_id, user_id, role) values ($1,$2,'owner')", ws, user_id)
+    await conn.execute("insert into system_settings(workspace_id) values ($1)", ws)
+    await budget.seed_default_limits(conn, ws)
+    await conn.execute("""insert into scoring_rule_sets(workspace_id, version, rules, is_active) values ($1,1,$2,true)""",
+                       ws, __import__("jarvis.agents.qualification", fromlist=["x"]).DEFAULT_RULES)
+    await conn.execute("insert into audit_logs(workspace_id, actor_type, actor_id, action) values ($1,'user',$2,'workspace.created')",
+                       ws, str(user_id))
     return ws
 
 
@@ -127,8 +143,7 @@ async def principal(request: Request, authorization: str | None = Header(None),
     await st.limiter.hit(f"user:{uid}")
     found = await ensure_user_and_workspace(st.db, uid, claims.get("email"), x_workspace_id)
     if found is None:
-        ws = await create_workspace(st.db, uid, (claims.get("email") or "My") .split("@")[0] + " workspace")
-        found = (ws, "owner")
+        found = await ensure_default_workspace(st.db, uid, (claims.get("email") or "My").split("@")[0] + " workspace")
     return Principal(uid, claims.get("email"), found[0], found[1])
 
 
