@@ -25,7 +25,8 @@ flowchart LR
   subgraph VPS[VPS · REQUIRED · Docker Compose]
     API[FastAPI<br/>REST · SSE · auth · policy]
     W[Python workers<br/>agents · scheduler · LangGraph<br/>DB health monitor]
-    SB[[Build sandbox<br/>no network · Astro · Playwright]]
+    SR[sandbox-runner<br/>only Docker-socket holder<br/>one fixed op: POST /qa]
+    SB[[QA sandbox<br/>no network · Playwright · axe]]
     BK[Backup job<br/>pg_dump · encrypted]
     V[Voice agent · Phase 7]
   end
@@ -53,7 +54,8 @@ flowchart LR
   API <--> DB
   W <--> DB
   W <--> ST
-  W -- spawn --> SB
+  W -- HTTP POST /qa --> SR
+  SR -- docker run, fixed flags --> SB
   W -- compliance gate --> GP
   W --> SE
   W --> FC
@@ -199,7 +201,7 @@ sequenceDiagram
   participant Ed as Edge Worker
   participant DB as Postgres
 
-  Wk->>SB: build and QA (no network)
+  Wk->>SB: QA via sandbox-runner (no network)
   SB-->>Wk: static artefact and QA report
   Wk->>CF: direct upload, branch = slug
   CF-->>Wk: slug.jarvis-previews.pages.dev

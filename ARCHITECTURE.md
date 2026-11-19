@@ -126,7 +126,8 @@ don't depend on the browser or on the user's laptop.
 | `apps/dashboard` | React, Vite, TS, Tailwind, Framer Motion, TanStack Query, React Router, Zod | Operator UI. Talks only to the API. Live progress over SSE. Supabase Auth for login. | Cloudflare Pages |
 | `apps/api` | FastAPI, Pydantic v2, SQLAlchemy 2 async, asyncpg | JWT verification, REST, SSE, command intake, user-initiated policy checks, health endpoints, receiving forwarded webhooks. | VPS |
 | `apps/worker` | Python 3.12 | Claims tasks, runs agents, enforces limits, scheduler (follow-ups, preview expiry, retention purges, provider-usage sync), lease recovery, DB health monitor. | VPS |
-| `build-sandbox` | Node 22, Astro, Tailwind, Playwright + Chromium | Builds and QA-tests one site in isolation. | VPS (ephemeral container) |
+| `sandbox-runner` | Python (`jarvis/sandbox_runner.py`) | The only service that mounts the Docker socket. One fixed, token-authenticated operation (`POST /qa`) that starts the QA sandbox with hardened flags. The worker reaches it over the internal network and never holds the socket. | VPS |
+| `build-sandbox` (as built: QA sandbox) | Node 22, Playwright + Chromium, axe-core | QA-tests one rendered site in isolation (as built, a deterministic renderer replaces the Astro build). Started only by `sandbox-runner`. | VPS (ephemeral container) |
 | `apps/voice` (Phase 7) | LiveKit Agents (Python) | STT → `/commands` → TTS, barge-in. | VPS |
 | `workers/edge` | Cloudflare Worker | `GET/POST /u/:token` one-click unsubscribe (verifies signature, forwards to API, queues the event if the API is down) and `POST /webhooks/email` (verifies provider signature, forwards). | workers.dev |
 | `jarvis_core` | Python package | Domain models, state machines, policy, limits, agents, adapters, scoring, cost ledger. | — |
@@ -515,7 +516,7 @@ Production:
 - **Previews:** Pages project `jarvis-previews`, Direct Upload, branch per site, `*.pages.dev`.
 - **Edge Worker:** `jarvis-edge.<account>.workers.dev` (unsubscribe, webhooks).
 - **VPS (required):** Docker Compose running `caddy`, `api`, `worker`, `backup`, and later
-  `voice`, with sandbox containers launched by a restricted runner. Unattended security upgrades,
+  `voice`, plus `sandbox-runner`: the only service that mounts the Docker socket. It starts QA sandbox containers through one fixed operation; the worker reaches it over the internal network. Unattended security upgrades,
   SSH keys only, a firewall allowing only 80/443 and SSH from your IP.
 - **Supabase Free:** Postgres, Auth, Storage.
 - **CI:** GitHub Actions.

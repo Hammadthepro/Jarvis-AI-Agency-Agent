@@ -80,7 +80,7 @@ New regression tests this revision:
 - **Verification statuses** follow the build brief: `VERIFIED_HAS_WEBSITE` (+ `site_health` working, broken or outdated), `VERIFIED_NO_WEBSITE`, `WEBSITE_UNCERTAIN`, `CONFLICTING_EVIDENCE`, `VERIFICATION_FAILED`.
 - **Unsubscribe and webhooks** are served by the API over HTTPS (Caddy) and backed by the authoritative DB (fail-closed), not by a Cloudflare Worker + KV.
 - **Deployment upload** uses the official `wrangler pages deploy` (pinned `wrangler@4.160.1`), with REST confirmation and cleanup.
-- **Docker access:** the worker reaches Docker only through a restricted socket proxy (container lifecycle only). Sandboxes never see the socket.
+- **Docker access:** only the `sandbox-runner` service mounts the Docker socket. The worker has no socket and reaches the runner over the internal network (`POST /qa`, bearer token), which starts the QA container with fixed hardened flags. Sandboxes never see the socket. (Revision 4 used a generic socket proxy; it was removed in revision 5.)
 
 ## 5. Known limitations
 - **App image build not verified in this environment.** The Docker build cannot reach apt/npm registries through this container's proxy (TLS interception). CI builds both images (`images` job). The QA sandbox image was verified here from lockfile-identical modules.

@@ -144,7 +144,7 @@ Generated code is untrusted and is never executed in the API or worker process.
 | Privileges | non-root UID, `--cap-drop ALL`, `no-new-privileges`, default seccomp profile |
 | Filesystem | read-only root, 512 MB tmpfs `/work` |
 | Resources | `--cpus 1`, `--memory 1g`, `--pids-limit 256`. 180 s build, 300 s QA |
-| Docker socket | never mounted into the sandbox. A restricted runner service starts sandboxes. gVisor considered for Phase 9 |
+| Docker socket | mounted only into the `sandbox-runner` service, never into the api, worker or sandbox. The runner exposes one fixed operation (`POST /qa`) and always applies these flags; the worker cannot choose images, flags or mounts. No socket proxy is used. gVisor considered for Phase 9 |
 | Output | static files only (allow-listed extensions), ≤ 20 MB, no `_worker.js` or `functions/` |
 | Content | no external scripts by default, no trackers. Forms disabled with a preview notice |
 | Paths | writes only to allowed scaffold paths. Traversal rejected |

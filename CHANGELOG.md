@@ -14,7 +14,7 @@
 - Migrations 0003 and 0004 (additive; existing records preserved).
 
 ## Revision 4: implementation (2026-11-18)
-- Implemented the full platform. See docs/IMPLEMENTATION_STATUS.md for verified status, test results, blockers and decisions that differ from revision 3 (structured-spec renderer, Postgres-checkpointed engine, VERIFIED_* website statuses, API-served unsubscribe, socket-proxy sandbox access).
+- Implemented the full platform. See docs/IMPLEMENTATION_STATUS.md for verified status, test results, blockers and decisions that differ from revision 3 (structured-spec renderer, Postgres-checkpointed engine, VERIFIED_* website statuses, API-served unsubscribe, and a generic Docker socket proxy for sandbox access, which revision 5 removed and replaced with the dedicated sandbox runner).
 - New docs: docs/IMPLEMENTATION_STATUS.md, docs/OPERATIONS.md. README rewritten with run instructions.
 
 ## Revision 3 (2026-11-18)
