@@ -1,12 +1,10 @@
-import { StrictMode, useEffect, useState } from "react";
+import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes } from "react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import "./index.css";
-import { getToken, onAuthChange } from "./lib/auth";
 import { ApiError } from "./lib/api";
 import Shell from "./components/Shell";
-import Login from "./pages/Login";
 import Console from "./pages/Console";
 import OverviewPage from "./pages/Overview";
 import CampaignsPage, { CampaignDetailPage } from "./pages/Campaigns";
@@ -23,15 +21,9 @@ const qc = new QueryClient({
   defaultOptions: { queries: { retry: (n, e) => !(e instanceof ApiError && [401, 403, 404].includes(e.status)) && n < 2, staleTime: 3000 } },
 });
 
+/** No sign-in screen: the dashboard opens straight to the Command Center. Locally the API runs in its explicit
+ *  local-development access mode; if it does not (or is unreachable), Shell shows exactly why. */
 export function App() {
-  const [authed, setAuthed] = useState<boolean | null>(null);
-  useEffect(() => {
-    const check = () => getToken().then((t) => setAuthed(Boolean(t)));
-    void check();
-    return onAuthChange(() => { qc.clear(); void check(); });
-  }, []);
-  if (authed === null) return null;
-  if (!authed) return <Login />;
   return (
     <Routes>
       <Route element={<Shell />}>

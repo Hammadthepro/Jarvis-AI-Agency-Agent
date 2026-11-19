@@ -1,4 +1,4 @@
-import { config } from "./config";
+import { apiBase } from "./config";
 import { getToken } from "./auth";
 
 export class ApiError extends Error {
@@ -14,9 +14,9 @@ export async function api<T = unknown>(path: string, init: RequestInit & { json?
   if (init.json !== undefined) headers.set("Content-Type", "application/json");
   let resp: Response;
   try {
-    resp = await fetch(`${config.VITE_API_BASE_URL}${path}`, { ...init, headers, body: init.json !== undefined ? JSON.stringify(init.json) : init.body });
+    resp = await fetch(`${apiBase}${path}`, { ...init, headers, body: init.json !== undefined ? JSON.stringify(init.json) : init.body });
   } catch {
-    throw new ApiError(0, "API_UNREACHABLE", "The JARVIS API is unreachable. Check that the API service is running.");
+    throw new ApiError(0, "API_UNREACHABLE", `The JARVIS API is unreachable at ${apiBase}. Check that the API service is running (scripts/dev-status.sh).`);
   }
   const text = await resp.text();
   const body = text ? safeJson(text) : null;
@@ -31,7 +31,7 @@ function safeJson(t: string): unknown { try { return JSON.parse(t); } catch { re
 
 export async function apiBlobUrl(path: string): Promise<string> {
   const token = await getToken();
-  const r = await fetch(`${config.VITE_API_BASE_URL}${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  const r = await fetch(`${apiBase}${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
   if (!r.ok) throw new ApiError(r.status, `HTTP_${r.status}`, "file unavailable");
   return URL.createObjectURL(await r.blob());
 }

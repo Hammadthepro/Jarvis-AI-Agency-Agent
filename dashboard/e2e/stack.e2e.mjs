@@ -9,10 +9,12 @@ const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
 const assert = (c, m) => { if (!c) { throw new Error("ASSERT: " + m); } };
 
+// 0) No sign-in: the dashboard opens directly to the Command Center (local development access mode).
 await page.goto(base);
-await page.getByLabel("Email").fill(`e2e-${Date.now()}@stack.dev`);
-await page.getByRole("button", { name: "Sign in" }).click();
 await page.getByText("What should JARVIS work on?").waitFor();
+assert(await page.locator('input[type="email"], input[type="password"]').count() === 0, "no login form");
+assert(!(await page.getByRole("button", { name: /sign in/i }).count()), "no sign-in button");
+await page.getByText("Local development mode").waitFor();
 
 // 1) Places-based command: parsed, plan shown, compliance gate blocks authorization
 await page.getByLabel("Command").fill("Find 20 plumbers in Houston with at least a 3.5 Google rating and no website.");
@@ -47,7 +49,7 @@ await page.getByText("Missing: Server URL, API key, API secret").waitFor();
 const integText = await page.textContent("body");
 assert((integText.match(/NOT_CONFIGURED/g) || []).length >= 6, "unconfigured providers show NOT_CONFIGURED");
 assert(/Restricted/.test(integText), "Google Places is shown as restricted");
-assert(/Read-only/.test(integText), "non-admins get a read-only view");
+assert(/Administrator: can edit/.test(integText), "the local operator administers the local deployment");
 await page.screenshot({ path: `${out}/e2e-integrations.png`, fullPage: true });
 await page.getByRole("link", { name: "Voice Agent" }).first().click();
 await page.getByText(/LiveKit server URL, API key and API secret/).waitFor();
@@ -62,11 +64,7 @@ await page.getByText("System health").waitFor();
 await page.screenshot({ path: `${out}/e2e-overview.png` });
 // 4) Deployment admin: save deliberately INVALID (format-valid) keys, run Test connection against the REAL providers,
 //    expect INVALID_CREDENTIALS from each, then remove them. Requires network access to the providers.
-if (process.env.E2E_ADMIN_EMAIL) {
-  await page.getByRole("button", { name: "Sign out" }).click();
-  await page.getByLabel("Email").fill(process.env.E2E_ADMIN_EMAIL);
-  await page.getByRole("button", { name: "Sign in" }).click();
-  await page.getByRole("button", { name: "Sign out" }).waitFor();
+if (process.env.E2E_LIVE_PROVIDER_CHECKS) {
   await page.getByRole("link", { name: "Integrations" }).first().click();
   await page.getByText("Administrator: can edit").waitFor();
   const bogus = {

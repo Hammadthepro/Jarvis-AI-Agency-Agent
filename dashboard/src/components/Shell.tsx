@@ -2,7 +2,8 @@ import { NavLink, Outlet } from "react-router";
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { api } from "../lib/api";
-import { signOut } from "../lib/auth";
+import { ApiError } from "../lib/api";
+import { apiBase } from "../lib/config";
 import { IconActivity, IconCog, IconCoins, IconCommand, IconFlag, IconGauge, IconGlobe, IconMail, IconMic, IconPlug, IconUsers } from "./icons";
 
 const NAV = [
@@ -13,7 +14,8 @@ const NAV = [
 ] as const;
 
 export default function Shell() {
-  const me = useQuery({ queryKey: ["me"], queryFn: () => api<{ email: string; role: string }>("/me") });
+  const me = useQuery({ queryKey: ["me"], queryFn: () => api<{ email: string; role: string; auth_mode: string; environment: string }>("/me"),
+    retry: (n, e) => !(e instanceof ApiError && e.status === 401) && n < 3, refetchInterval: (q) => (q.state.error ? 5000 : false) });
   return (
     <div className="flex h-full">
       <aside className="hidden w-60 shrink-0 flex-col border-r hairline bg-ink-900/60 p-4 md:flex">
@@ -32,9 +34,10 @@ export default function Shell() {
           ))}
         </nav>
         <div className="mt-4 border-t hairline pt-3 text-xs text-ink-400">
-          <div className="truncate">{me.data?.email ?? "…"}</div>
-          <div className="flex items-center justify-between"><span>{me.data?.role}</span>
-            <button className="text-ink-300 hover:text-ink-100" onClick={() => void signOut()}>Sign out</button></div>
+          {me.data?.auth_mode === "local_development"
+            ? <div className="rounded-md bg-warn-500/10 px-2 py-1 text-[11px] text-warn-500" title="JARVIS_ENV=local with JARVIS_LOCAL_DEV_ACCESS=true. Not available in production.">Local development mode · no sign-in</div>
+            : <div className="truncate">{me.data?.email ?? "…"}</div>}
+          <div className="mt-1 text-[11px]">{me.data ? `${me.data.role} · ${me.data.environment}` : ""}</div>
         </div>
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
@@ -43,10 +46,22 @@ export default function Shell() {
             <NavLink key={to} to={to} end={to === "/"} className={({ isActive }) => `whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs ${isActive ? "bg-ink-800 text-ink-100" : "text-ink-400"}`}>{label}</NavLink>
           ))}
         </nav>
+        {me.error && <ApiProblem error={me.error} />}
         <main className="min-h-0 flex-1 overflow-y-auto scroll-thin"><Outlet /></main>
       </div>
     </div>
   );
+}
+
+/** Explains why the dashboard cannot use the API. Deliberately not a sign-in form. */
+function ApiProblem({ error }: { error: unknown }) {
+  const e = error instanceof ApiError ? error : null;
+  const text = e?.status === 401
+    ? "The API requires authentication and local development access is not enabled. For local development run scripts/dev-up.sh, which starts the API with JARVIS_ENV=local and JARVIS_LOCAL_DEV_ACCESS=true. Sign-in for production will be added later."
+    : e?.code === "API_UNREACHABLE"
+      ? `The JARVIS API is not reachable at ${apiBase}. Start it with scripts/dev-up.sh and check scripts/dev-status.sh.`
+      : `The JARVIS API returned an error: ${e ? `${e.code} ${e.message}` : String(error)}`;
+  return <div role="alert" className="border-b border-bad-500/30 bg-bad-500/10 px-4 py-2 text-sm text-ink-100">{text}</div>;
 }
 
 export function Page({ title, subtitle, actions, children }: { title: string; subtitle?: string; actions?: ReactNode; children: ReactNode }) {

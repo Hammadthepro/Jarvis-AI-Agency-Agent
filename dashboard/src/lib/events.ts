@@ -1,4 +1,4 @@
-import { config } from "./config";
+import { apiBase } from "./config";
 import { getToken } from "./auth";
 
 export type JarvisEvent = { id: number; campaign_id: string | null; event_type: string; message: string; data: Record<string, unknown>; created_at: string };
@@ -16,7 +16,7 @@ export function subscribeEvents(onEvent: (e: JarvisEvent) => void, opts: { campa
       try {
         const token = await getToken();
         const qs = opts.campaignId ? `?campaign_id=${opts.campaignId}` : "";
-        const r = await fetch(`${config.VITE_API_BASE_URL}/events${qs}`, {
+        const r = await fetch(`${apiBase}/events${qs}`, {
           headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(lastId ? { "Last-Event-ID": lastId } : {}) }, signal: ac.signal,
         });
         if (!r.ok || !r.body) throw new Error(`events ${r.status}`);

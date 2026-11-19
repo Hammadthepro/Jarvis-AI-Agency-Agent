@@ -7,7 +7,6 @@ import { ApiError } from "../lib/api";
 import { ErrorState, Pill } from "../components/ui";
 import { ImportSchema, parseCsv } from "../pages/Campaigns";
 import Console, { commandSchema } from "../pages/Console";
-import { LoginSchema } from "../pages/Login";
 
 function wrap(ui: React.ReactNode) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -15,6 +14,8 @@ function wrap(ui: React.ReactNode) {
 }
 
 afterEach(() => vi.restoreAllMocks());
+/** API path as the app requests it (the dashboard calls the same-origin /api proxy). */
+const pathOf = (input: unknown) => new URL(String(input), "http://localhost").pathname.replace(/^\/api/, "");
 
 describe("validation", () => {
   it("rejects empty and over-long commands", () => {
@@ -27,10 +28,6 @@ describe("validation", () => {
     expect(rows).toEqual([{ business_name: "Bayou City Plumbing Co", phone: "(713) 555-0142", city: "Houston", state: "TX" }]);
     expect(ImportSchema.safeParse({ niche: "plumbing", city: "Houston", state: "TX", rights: false, rows }).success).toBe(false);
     expect(ImportSchema.safeParse({ niche: "plumbing", city: "Houston", state: "TX", rights: true, rows }).success).toBe(true);
-  });
-  it("validates login email", () => {
-    expect(LoginSchema.safeParse({ email: "nope" }).success).toBe(false);
-    expect(LoginSchema.safeParse({ email: "a@b.co" }).success).toBe(true);
   });
 });
 
@@ -59,9 +56,9 @@ describe("Console command workflow", () => {
       "GET /commands": [],
     };
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-      const url = new URL(String(input));
-      const key = `${(init?.method ?? "GET").toUpperCase()} ${url.pathname}`;
-      if (url.pathname === "/events") return new Response(new ReadableStream(), { status: 200 });
+      const urlPath = pathOf(input);
+      const key = `${(init?.method ?? "GET").toUpperCase()} ${urlPath}`;
+      if (urlPath === "/events") return new Response(new ReadableStream(), { status: 200 });
       return new Response(JSON.stringify(responses[key] ?? {}), { status: 200 });
     });
     wrap(<Console />);
@@ -89,7 +86,7 @@ describe("Usage and costs", () => {
       jarvis: { estimated_micros: 9000, reserved_micros: 0, committed_micros: 4200, ambiguous_micros: 0, released_micros: 0, committed_units: 1500, calls: 1, response_tokens: 1500 },
       provider_reported: { status: "unavailable", detail: "Account-level usage and billing UNAVAILABLE" } }] };
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const path = new URL(String(input)).pathname;
+      const path = pathOf(input);
       const body = path === "/usage" ? usage : [];
       return new Response(JSON.stringify(body), { status: 200 });
     });
@@ -112,7 +109,7 @@ const card = (o: Record<string, unknown>) => ({ provider: "serp_api", name: "Ser
 describe("Integrations Center", () => {
   function mockApi(listing: Record<string, unknown>, calls: Array<{ path: string; method: string; body?: string }>) {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-      const path = new URL(String(input)).pathname; const method = init?.method ?? "GET";
+      const path = pathOf(input); const method = init?.method ?? "GET";
       calls.push({ path, method, body: init?.body ? String(init.body) : undefined });
       if (path === "/integrations") return new Response(JSON.stringify(listing), { status: 200 });
       if (path.endsWith("/test")) return new Response(JSON.stringify({ provider: "serp_api", state: "INVALID_CREDENTIALS", detail: "Invalid API key.", http_status: 401 }), { status: 200 });
@@ -183,7 +180,7 @@ describe("Voice", () => {
   it("shows exactly what is missing, links to Integrations, and never requests a token when not ready", async () => {
     const calls: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const path = new URL(String(input)).pathname; calls.push(path);
+      const path = pathOf(input); calls.push(path);
       if (path === "/voice/status") return new Response(JSON.stringify({ state: "NOT_CONFIGURED", checks: { livekit_configured: false, livekit_validated: false,
         agent_secret_configured: false, agent_online: false }, missing: ["LiveKit server URL, API key and API secret (Integrations > LiveKit)."], agent: null, token_ttl_s: 600 }), { status: 200 });
       return new Response("{}", { status: 200 });
@@ -204,5 +201,36 @@ describe("Voice", () => {
     expect(await requestMicrophone()).toBe("denied");
     Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: undefined });
     expect(await requestMicrophone()).toBe("unavailable");
+  });
+});
+
+describe("No login screen", () => {
+  function mockAll(me: { status: number; body: unknown }) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const p = pathOf(input);
+      if (p === "/events") return new Response(new ReadableStream(), { status: 200 });
+      if (p === "/me") return new Response(JSON.stringify(me.body), { status: me.status });
+      return new Response(JSON.stringify(p === "/integrations" ? { integrations: [], can_manage: true, vault: { ready: true }, credentials_error: null } : []), { status: 200 });
+    });
+  }
+
+  it("opens directly to the Command Center with no sign-in form, using the same-origin API proxy", async () => {
+    mockAll({ status: 200, body: { email: "local-operator@jarvis.local", role: "owner", auth_mode: "local_development", environment: "local" } });
+    const { App } = await import("../main");
+    wrap(<App />);
+    expect(await screen.findByText("What should JARVIS work on?")).toBeInTheDocument();
+    expect(await screen.findByText(/Local development mode/)).toBeInTheDocument();
+    expect(document.querySelector('input[type="password"], input[type="email"]')).toBeNull();
+    expect(screen.queryByRole("button", { name: /sign in|sign out/i })).toBeNull();
+    const calls = (globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => String(c[0]));
+    expect(calls.every((u) => u.startsWith("/api/"))).toBe(true);           // never localhost:8000 from the browser
+  });
+
+  it("explains a 401 instead of showing a login form", async () => {
+    mockAll({ status: 401, body: { error: { code: "UNAUTHORIZED", message: "missing bearer token" } } });
+    const { App } = await import("../main");
+    wrap(<App />);
+    expect(await screen.findByText(/local development access is not enabled/)).toBeInTheDocument();
+    expect(document.querySelector('input[type="password"], input[type="email"]')).toBeNull();
   });
 });
