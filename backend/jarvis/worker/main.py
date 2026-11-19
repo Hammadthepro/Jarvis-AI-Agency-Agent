@@ -275,6 +275,12 @@ class Worker:
         if not st.ok:   # never run tasks against a schema the code does not match
             await self.db.close()
             raise SchemaNotReady(st.describe())
+        # Apply credentials saved in the Integrations Center BEFORE any task or scheduled job (e.g. usage sync) runs;
+        # otherwise the first jobs would see providers as not configured.
+        try:
+            await self.refresh_credentials()
+        except Exception:
+            log.exception("credentials.initial_refresh_failed")
         loops = [asyncio.create_task(self.claim_loop()), asyncio.create_task(self.heartbeat_loop()),
                  asyncio.create_task(self.scheduler_loop())]
         await self.stop.wait()

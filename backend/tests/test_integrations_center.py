@@ -263,3 +263,37 @@ async def test_api_instance_picks_up_changes_made_elsewhere(center, deps, db):
     await db.execute("delete from integration_credentials where provider='firecrawl'")
     await center.get("/integrations", headers=a["headers"])
     assert deps.firecrawl.settings.firecrawl_api_key.get_secret_value() == "fc-test"   # back to the environment value
+
+
+async def test_worker_applies_dashboard_credentials_before_first_scheduled_job(center, deps, db):
+    """Regression: the first usage sync ran before credentials were applied and reported 'not set' for an hour."""
+    from jarvis.worker.main import Worker
+    a = await login(center, ADMIN)
+    await center.put("/integrations/firecrawl/credentials", headers=a["headers"], json={"secrets": {"api_key": "fc-" + "w" * 24}})
+    deps.firecrawl.settings = deps.firecrawl.settings.model_copy(update={"firecrawl_api_key": None})   # fresh worker process
+    w = Worker(deps, worker_id="cred-order")
+    w.base_settings = center.app.state.base_settings
+    seen = {}
+
+    async def first_job():
+        seen["key"] = deps.firecrawl.settings.firecrawl_api_key
+        w.stop.set()
+
+    async def idle():
+        await w.stop.wait()
+    w.scheduler_loop, w.claim_loop, w.heartbeat_loop = first_job, idle, idle
+    await w.serve()
+    assert seen["key"] is not None and seen["key"].get_secret_value() == "fc-" + "w" * 24
+
+
+async def test_stale_usage_hidden_and_refreshed_after_successful_test(center, deps, db):
+    a = await login(center, ADMIN)
+    await db.execute("""insert into provider_usage_reports(workspace_id, provider, period_start, period_end, unit, source, status, detail)
+                        values (null,'serp_api',now(),now(),'search','none','not_configured','SERPAPI_API_KEY not set')""")
+    await center.put("/integrations/serp_api/credentials", headers=a["headers"], json={"secrets": {"api_key": SERP_KEY}})
+    assert cards(await center.get("/integrations", headers=a["headers"]))["serp_api"]["usage"] is None      # stale report hidden
+    deps.serp.http = serp_transport(lambda req: httpx.Response(200, json={"plan_name": "Free", "searches_per_month": 250,
+                                                                         "this_month_usage": 50, "plan_searches_left": 200}))
+    assert (await center.post("/integrations/serp_api/test", headers=a["headers"])).json()["state"] == "CONNECTED"
+    u = cards(await center.get("/integrations", headers=a["headers"]))["serp_api"]["usage"]
+    assert u["status"] == "ok" and u["reported_units"] == 50                                             # real usage, now

@@ -50,6 +50,14 @@ def _map(exc: Exception) -> ProviderError:
     return ProviderError(PROVIDER, IntegrationState.PROVIDER_ERROR, str(exc))
 
 
+@dataclass(frozen=True)
+class ConverseResult:
+    content: list[dict[str, Any]]      # assistant content blocks as plain dicts (text / tool_use)
+    stop_reason: str
+    model: str
+
+
+
 class ClaudeClient:
     def __init__(self, settings: Settings, client: anthropic.AsyncAnthropic | None = None) -> None:
         self.settings = settings
@@ -116,3 +124,34 @@ class ClaudeClient:
 
         return await gateway_call(ctx, provider=PROVIDER, operation=operation, unit="usd_micros", units=est_in + max_tokens,
                                   estimated_micros=worst, fn=do)
+
+    async def converse(self, ctx: CallContext, *, model: str, system: str, messages: list[dict],
+                        tools: list[dict], max_tokens: int, operation: str = "conversation.turn") -> ConverseResult:
+        """One tool-using conversation step. Worst-case cost is reserved first (budget-gated like every call)."""
+        if model not in budget.pricing()["anthropic"]:
+            raise ProviderError(PROVIDER, IntegrationState.PROVIDER_ERROR, f"model {model} has no configured price")
+        est_in = (len(system) + len(json.dumps(messages)) + len(json.dumps(tools))) // 3 + 200
+        worst = budget.claude_cost(model, est_in, max_tokens)
+        client = self.client()
+
+        async def do() -> CallOutcome:
+            try:
+                msg = await client.messages.create(model=model, max_tokens=max_tokens, system=system, messages=messages, tools=tools)
+            except Exception as exc:
+                raise _map(exc) from exc
+            if msg.stop_reason == "refusal":
+                raise ProviderError(PROVIDER, IntegrationState.PROVIDER_ERROR, "model refused the request")
+            blocks = []
+            for b in msg.content:
+                t = getattr(b, "type", None)
+                if t == "text":
+                    blocks.append({"type": "text", "text": b.text})
+                elif t == "tool_use":
+                    blocks.append({"type": "tool_use", "id": b.id, "name": b.name, "input": dict(b.input or {})})
+            tin, tout = msg.usage.input_tokens, msg.usage.output_tokens
+            return CallOutcome(ConverseResult(blocks, msg.stop_reason, msg.model), tin + tout, budget.claude_cost(model, tin, tout),
+                               model=msg.model, tokens_in=tin, tokens_out=tout)
+
+        return await gateway_call(ctx, provider=PROVIDER, operation=operation, unit="usd_micros", units=est_in + max_tokens,
+                                  estimated_micros=worst, fn=do)
+

@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     # sign-in during development. Refused at startup unless JARVIS_ENV=local; never a production feature.
     jarvis_local_dev_access: bool = False
     jarvis_local_dev_email: str = LOCAL_OPERATOR_EMAIL
+    # Conversation brain shared by voice and text. "auto": Claude with tools when Anthropic is configured, otherwise the
+    # deterministic command router. Either way every action goes through the same authorized command system.
+    jarvis_conversation_agent: Literal["auto", "claude", "deterministic"] = "auto"
 
     database_url: str = DEV_DATABASE_URL
     database_pool_size: int = Field(5, ge=1, le=20)

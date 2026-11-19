@@ -40,7 +40,7 @@ async def dsn():
 
 
 def make_settings(dsn: str, tmp: Path, **kw) -> Settings:
-    base = dict(jarvis_env="test", jarvis_enable_test_doubles=True, database_url=dsn, supabase_jwt_secret=JWT_SECRET,
+    base = dict(jarvis_env="test", jarvis_enable_test_doubles=True, jarvis_conversation_agent="deterministic", database_url=dsn, supabase_jwt_secret=JWT_SECRET,
                 sites_artifact_dir=tmp / "sites", qa_runner_mode="subprocess", jarvis_task_lease_seconds=30,
                 no_website_min_confidence=0.8, unsubscribe_signing_key="unsub-key-0123456789abcdef0123456789")
     base.update(kw)

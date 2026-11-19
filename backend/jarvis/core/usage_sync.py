@@ -48,7 +48,7 @@ async def _sync(deps, db, out: dict[str, str]) -> dict[str, str]:
 
     # SerpApi: account endpoint (free) reports searches used this month.
     if not deps.serp.configured:
-        await _write(db, "serp_api", "search", "not_configured", source="none", detail="SERPAPI_API_KEY not set")
+        await _write(db, "serp_api", "search", "not_configured", source="none", detail="not configured: save the key in Integrations (or set SERPAPI_API_KEY)")
         out["serp_api"] = "not_configured"
     else:
         try:
@@ -67,7 +67,7 @@ async def _sync(deps, db, out: dict[str, str]) -> dict[str, str]:
 
     # Firecrawl: credit usage endpoint.
     if not deps.firecrawl.configured:
-        await _write(db, "firecrawl", "credit", "not_configured", source="none", detail="FIRECRAWL_API_KEY not set")
+        await _write(db, "firecrawl", "credit", "not_configured", source="none", detail="not configured: save the key in Integrations (or set FIRECRAWL_API_KEY)")
         out["firecrawl"] = "not_configured"
     else:
         try:
@@ -91,7 +91,7 @@ async def _sync(deps, db, out: dict[str, str]) -> dict[str, str]:
     # What JARVIS does know is recorded in `raw`, labelled: token counts the API returned on each of JARVIS's
     # own responses, and a cost JARVIS priced locally from those tokens (local_estimate, never an invoice).
     if not deps.claude.configured:
-        await _write(db, "anthropic", "tokens", "not_configured", source="none", detail="ANTHROPIC_API_KEY not set")
+        await _write(db, "anthropic", "tokens", "not_configured", source="none", detail="not configured: save the key in Integrations (or set ANTHROPIC_API_KEY)")
         out["anthropic"] = "not_configured"
     else:
         row = await db.fetchrow("""select coalesce(sum(tokens_in + tokens_out), 0)::bigint t, coalesce(sum(estimated_cost_micros), 0)::bigint c,
@@ -109,6 +109,6 @@ async def _sync(deps, db, out: dict[str, str]) -> dict[str, str]:
         configured = {"google_places": deps.places.configured, "cloudflare": deps.cloudflare.configured,
                       "resend": deps.email.configured, "livekit": bool(deps.settings.livekit_api_key)}[provider]
         await _write(db, provider, "requests", "unavailable" if configured else "not_configured", source="none",
-                     detail=why if configured else "credential not set")
+                     detail=why if configured else "not configured: save the credentials in Integrations")
         out[provider] = "unavailable" if configured else "not_configured"
     return out

@@ -63,12 +63,15 @@ async def list_integrations(request: Request, me: Principal = CurrentPrincipal):
     status = {r["provider"]: dict(r) for r in await db.fetch("select * from integration_status")}
     runtime = {r["provider"]: dict(r) for r in await db.fetch(
         "select provider, state, detail, last_checked_at from provider_integrations where workspace_id=$1", me.workspace_id)}
-    usage = {r["provider"]: dict(r) for r in await db.fetch(
+    stored = await I.stored(db)
+    usage_rows = {r["provider"]: dict(r) for r in await db.fetch(
         """select distinct on (provider) provider, unit, reported_units, status, detail, fetched_at from provider_usage_reports
            where workspace_id is null or workspace_id=$1 order by provider, fetched_at desc""", me.workspace_id)}
+    # A report written before the current credentials were saved describes the old configuration: do not show it.
+    usage = {p: u for p, u in usage_rows.items()
+             if not (stored.get(p) or {}).get("updated_at") or u["fetched_at"] >= stored[p]["updated_at"]}
     async with db.acquire() as conn:
         gate = await gate_status(conn, me.workspace_id, "google_places_prospect_selection")
-    stored = await I.stored(db)
     cards = []
     for p, sp in I.SPECS.items():
         inf, row, srow = info.get(p, {}), stored.get(p) or {}, status.get(p) or {}
@@ -180,6 +183,12 @@ async def test_integration(provider: str, request: Request, me: Principal = Curr
         await _audit_test(db, me, provider, "BLOCKED_PENDING_APPROVAL")
         return {"provider": provider, "state": "BLOCKED_PENDING_APPROVAL", "detail": exc.message}
     await I.record_status(db, provider, "CONNECTED", None, capabilities=list(sp.capabilities), quota=quota, user_id=me.user_id, ok=True)
+    try:   # refresh provider-reported usage now with the validated credentials (free endpoints only)
+        from jarvis.core.usage_sync import sync_provider_usage
+        await sync_provider_usage(deps)
+    except Exception as exc:
+        import structlog
+        structlog.get_logger(__name__).warning("usage_sync.after_test_failed", provider=provider, error=str(exc)[:200])
     await _workspace_state(db, me.workspace_id, provider, "CONNECTED", None, True)
     await _audit_test(db, me, provider, "CONNECTED")
     return JSONResponse(content=_json({"provider": provider, "state": "CONNECTED", "result": result, "quota": quota,

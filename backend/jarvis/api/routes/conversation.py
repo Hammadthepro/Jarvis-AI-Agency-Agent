@@ -127,7 +127,7 @@ async def _status(db, me: Principal) -> dict:
     return {"kind": "status", "say": say}
 
 
-async def handle_turn(request: Request, me: Principal, text: str, channel: str) -> dict:
+async def deterministic_turn(request: Request, me: Principal, text: str, channel: str) -> dict:
     db = request.app.state.db
     low = " ".join(text.lower().strip().rstrip(".!?").split())
     pending = await db.fetchrow(
@@ -189,6 +189,49 @@ def _describe(res: dict) -> dict:
         return {**base, "kind": "blocked", "say": say + ". But Google Places discovery is blocked until written approval is "
                 "recorded, so I can't start it. Import a business list from Campaigns and I'll run the rest of the workflow on it."}
     return {**base, "kind": "confirm_needed", "say": say + ". Say confirm to start, or cancel."}
+
+
+# ------------------------------------------------------------------ the shared brain (voice and text)
+async def _store(db, me: Principal, role: str, channel: str, content: str, meta: dict | None = None) -> None:
+    await db.execute("""insert into conversation_messages(workspace_id, user_id, role, channel, content, meta)
+                        values ($1,$2,$3,$4,$5,$6)""", me.workspace_id, me.user_id, role, channel, content[:8000], meta or {})
+
+
+async def handle_turn(request: Request, me: Principal, text: str, channel: str) -> dict:
+    """One turn of the single JARVIS conversation. Claude with tools when Anthropic is available; otherwise (or if the
+    model is unavailable or over budget) the deterministic router. Both use the same command system and memory."""
+    from jarvis.api.conversation_agent import claude_available, claude_turn
+    from jarvis.core.errors import BudgetBlocked, ProviderError
+    db = request.app.state.db
+    await _store(db, me, "user", channel, text)
+    out: dict | None = None
+    note = None
+    if claude_available(request):
+        try:
+            out = await claude_turn(request, me, text, channel)
+        except BudgetBlocked as exc:
+            note = f"Claude budget limit reached ({exc.message}); using the basic command parser."
+        except ProviderError as exc:
+            note = f"Claude unavailable ({exc.state.value}); using the basic command parser."
+    if out is None:
+        out = await deterministic_turn(request, me, text, channel)
+        out["agent"] = "deterministic"
+        if note:
+            out["notice"] = note
+    meta = {k: out.get(k) for k in ("kind", "command_id", "campaign_id", "agent", "notice") if out.get(k)}
+    meta.update({k: v for k, v in (out.get("meta") or {}).items() if k in ("tools", "agent")})
+    await _store(db, me, "assistant", channel, out.get("say") or "", meta)
+    out.pop("meta", None)
+    return out
+
+
+@router.get("/conversation/messages")
+async def conversation_messages(request: Request, me: Principal = CurrentPrincipal, after: int = 0, limit: int = 60):
+    rows = await request.app.state.db.fetch(
+        """select id, role, channel, content, meta, created_at from conversation_messages where workspace_id=$1 and user_id=$2
+           and id > $3 order by id desc limit $4""", me.workspace_id, me.user_id, after, min(max(limit, 1), 200))
+    import json as _json
+    return _json.loads(_json.dumps([dict(r) for r in reversed(rows)], default=str))
 
 
 # ------------------------------------------------------------------ text entry point (same router)

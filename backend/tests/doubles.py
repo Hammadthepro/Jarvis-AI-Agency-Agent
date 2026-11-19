@@ -133,6 +133,8 @@ class FakeAnthropic:
                 break
         if data is None:
             data = default_response(kw)
+        if isinstance(data, SimpleNamespace):          # a prebuilt message (e.g. tool use) from a responder
+            return data
         text = json.dumps(data)
         return SimpleNamespace(content=[SimpleNamespace(type="text", text=text)], stop_reason="end_turn", model=kw["model"],
                                usage=SimpleNamespace(input_tokens=1200, output_tokens=400))
