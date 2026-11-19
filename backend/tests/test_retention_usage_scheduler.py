@@ -41,7 +41,7 @@ async def test_retention_rules_and_protected_records(db):
     ws, uid = await new_ws(db)
     cid, pid, ids = await seed(db, ws, uid)
     counts = await run_retention(db)
-    assert set(counts) == set(RULES) and counts["serp_results_180d"] >= 1 and counts["raw_pages_90d"] >= 1
+    assert set(counts) == set(RULES) | {"dangling_evidence_refs"} and counts["dangling_evidence_refs"] == 0 and counts["serp_results_180d"] >= 1 and counts["raw_pages_90d"] >= 1
     assert await remaining(db, ids) == {"serp_new", "serp_old_cited", "page_new", "keep_forever"}
     msgs = [r["message"] for r in await db.fetch("select message from task_events where campaign_id=$1", cid)]
     assert msgs == ["new"]

@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from jarvis.api.auth import CurrentPrincipal, Principal
 from jarvis.core.errors import NotFound, ValidationFailed
+from jarvis.core.retention import resolve_evidence
 from jarvis.db.audit import audit
 from jarvis.integrations.base import CallContext
 
@@ -97,9 +98,11 @@ async def prospect_detail(pid: UUID, request: Request, me: Principal = CurrentPr
                                                      e.source_type, e.source_ref, e.retrieved_at from research_facts f
                                                      left join evidence e on e.id = f.evidence_id where f.prospect_id=$1
                                                      order by f.fact_key, f.created_at""", pid)],
-        "verifications": [dict(r) for r in await db.fetch("""select id, status, site_health, reason, url, final_url, listing_sources,
-                                                            checks, confidence, checked_at from website_verifications
-                                                            where prospect_id=$1 order by checked_at desc""", pid)],
+        "verifications": [{**{k: v for k, v in dict(r).items() if k != "evidence_ids"},
+                           "evidence_refs": await resolve_evidence(db, list(r["evidence_ids"]))}
+                          for r in await db.fetch("""select id, status, site_health, reason, url, final_url, listing_sources,
+                                                     checks, evidence_ids, confidence, checked_at from website_verifications
+                                                     where prospect_id=$1 order by checked_at desc""", pid)],
         "evidence": [dict(r) for r in await db.fetch("""select id, source_type, source_ref, retrieved_at, left(content_excerpt, 400) excerpt
                                                        from evidence where prospect_id=$1 order by retrieved_at desc limit 100""", pid)],
         "contacts": [dict(r) for r in await db.fetch("""select contact_type, value, verification, is_public_business_contact,

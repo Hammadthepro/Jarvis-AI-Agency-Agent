@@ -61,7 +61,9 @@ Every rule is listed in `backend/jarvis/core/retention.py`:
 - Places coordinates: 30 days.
 
 Evidence cited by a verified fact or contact is kept. Audit logs, suppressions, outreach records, the cost ledger,
-usage events and backup runs are **never** deleted by retention. A legal hold (`legal_holds`, at workspace, campaign
+usage events and backup runs are **never** deleted by retention. Purged evidence leaves a content-free tombstone
+(`evidence_tombstones`: source type, host, hashes, dates, rule), so verification records keep resolvable references;
+`dangling_evidence_refs` must be 0 and is recorded on every run. A legal hold (`legal_holds`, at workspace, campaign
 or prospect scope) exempts all covered rows until it is released. Each run is recorded in `retention_runs` and `audit_logs`.
 
 ## Usage reconciliation

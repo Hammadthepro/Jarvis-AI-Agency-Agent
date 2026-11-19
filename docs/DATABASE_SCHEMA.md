@@ -345,6 +345,17 @@ RLS is enabled on every table, with no default access.
 | Outreach messages and replies | 3 years |
 | Suppression list, audit events | indefinite |
 | Backups | 7 daily + 4 weekly |
+| `evidence_tombstones` (as built, migration 0005) | kept while the prospect exists |
+
+**Expired evidence references (as built).** Every evidence delete, by retention or otherwise, leaves a row in
+`evidence_tombstones` (written by a trigger, tagged with the retention rule). It keeps only provenance metadata:
+`source_type`, the source **host** (no path, query or snippet), a sha256 of the original `source_ref`, `content_sha256`,
+`retrieved_at`, `retention_policy`, `purged_at` and `purge_rule`. It never keeps `content_excerpt` or the full source
+reference. `website_verifications.evidence_ids` and `checks` are never rewritten, so each id resolves to live evidence
+or an explicit `expired` reference (`resolve_evidence`, and `evidence_refs` in `GET /prospects/{id}`). The view
+`dangling_evidence_refs` must be empty; each retention run records its count. Legal holds block deletion, and so
+no tombstone is written for held evidence. References purged before migration 0005 were backfilled with
+`purge_rule = 'purged_before_tombstones'` and no metadata.
 
 ## 8. Backup and recovery
 

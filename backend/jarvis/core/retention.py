@@ -12,7 +12,12 @@
 |                                        | usage_events, backup_runs, legal_holds                      |
 
 Legal holds (workspace, campaign or prospect scope) exempt every covered row. Each run is recorded in
-retention_runs and audit_logs with per-rule counts."""
+retention_runs and audit_logs with per-rule counts.
+
+Deleted evidence leaves a content-free tombstone (`evidence_tombstones`, written by a database trigger on
+every evidence delete, tagged with the rule name), so `website_verifications.evidence_ids` always resolve to
+live evidence or an explicit expired reference. Verification summaries (`checks`, status, reason) are never
+modified. Each run also records `dangling_evidence_refs` (must be 0) from the integrity view."""
 
 from __future__ import annotations
 
@@ -49,8 +54,11 @@ async def run_retention(db: Database) -> dict[str, int]:
     try:
         async with db.transaction() as conn:
             for name, sql in RULES.items():
+                await conn.execute("select set_config('jarvis.purge_rule', $1, true)", name)
                 res = await conn.execute(sql)
                 counts[name] = int(res.split()[-1])
+            await conn.execute("select set_config('jarvis.purge_rule', '', true)")
+            counts["dangling_evidence_refs"] = await conn.fetchval("select count(*) from dangling_evidence_refs")
             await conn.execute("update retention_runs set status='succeeded', finished_at=now(), counts=$2 where id=$1", run_id, counts)
             await conn.execute("""insert into audit_logs(actor_type, actor_id, action, data) values ('system','retention','retention.run',$1)""",
                                counts)
@@ -58,3 +66,24 @@ async def run_retention(db: Database) -> dict[str, int]:
         await db.execute("update retention_runs set status='failed', finished_at=now(), detail=$2 where id=$1", run_id, str(exc)[:500])
         raise
     return counts
+
+
+async def resolve_evidence(conn, ids: list) -> list[dict]:
+    """Resolves evidence ids to live evidence or an explicit expired reference (tombstone). Never drops an id:
+    an id found in neither table is reported as `missing` so integrity problems stay visible."""
+    if not ids:
+        return []
+    live = {r["id"]: r for r in await conn.fetch("""select id, source_type::text, source_ref, retrieved_at, left(content_excerpt, 400) excerpt
+                                                    from evidence where id = any($1::uuid[])""", ids)}
+    dead = {r["evidence_id"]: r for r in await conn.fetch("""select evidence_id, source_type::text, source_host, retrieved_at, retention_policy,
+                                                             purged_at, purge_rule from evidence_tombstones
+                                                             where evidence_id = any($1::uuid[])""", ids)}
+    out = []
+    for i in ids:
+        if i in live:
+            out.append({"id": i, "state": "live", **{k: v for k, v in dict(live[i]).items() if k != "id"}})
+        elif i in dead:
+            out.append({"id": i, "state": "expired", **{k: v for k, v in dict(dead[i]).items() if k != "evidence_id"}})
+        else:
+            out.append({"id": i, "state": "missing"})
+    return out
