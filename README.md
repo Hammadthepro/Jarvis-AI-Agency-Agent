@@ -6,8 +6,11 @@ sources, scores them deterministically, builds personalised preview websites, te
 browser inside an isolated sandbox, deploys them to Cloudflare Pages, and prepares outreach drafts.
 Sending is gated behind compliance checks and explicit authorization.
 
-**Status:** implemented and tested locally. See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md)
-for exactly what works, what is NOT_CONFIGURED, and what is blocked pending approval.
+**Status:** implemented and tested locally with test doubles for every third-party provider. **Not live-verified
+against any provider, not deployed, and not production-ready.** Voice, off-site backup protection, real
+integrations and production deployment stay blocked until their real acceptance tests pass. See
+[docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for each criterion's implemented, test-verified,
+live-verified and deployed status.
 
 ## Repository layout
 

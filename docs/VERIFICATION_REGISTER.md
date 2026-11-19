@@ -4,6 +4,10 @@ Status: **Revision 3** (2026-11-18). Lists what the documentation depends on, an
 each item as a confirmed fact, an estimate or an unresolved legal question. Update an entry
 whenever it's checked.
 
+This register covers provider facts the design relies on. It does **not** record whether JARVIS's own
+integrations work: that is tracked per criterion (implemented / test-verified / live-verified / deployed) in
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md). As of 2026-11-19, no integration is live-verified.
+
 ## A. Confirmed facts (primary source checked 2026-11-18)
 
 | # | Fact | Source |

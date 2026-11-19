@@ -1,5 +1,13 @@
 # JARVIS Changelog
 
+## Revision 6: consistency and data-integrity audit (2026-11-19)
+- **Docker architecture docs:** every document now states that only `sandbox-runner` mounts the Docker socket. A static regression test fails if docs, scripts, CI or config describe the removed socket proxy as current.
+- **Evidence retention integrity:** migration 0005 adds content-free `evidence_tombstones` (trigger on every evidence delete), a `dangling_evidence_refs` integrity view (recorded on each retention run) and a backfill. Verification references resolve as live or expired.
+- **Usage accounting:** migration 0006 adds `cost_basis`. Anthropic account-level usage is `unavailable`; JARVIS costs are labelled `local_estimate`; `/usage` reports `invoice_status` (`UNAVAILABLE` unless a billing export is imported). Constraints refuse mislabelled costs.
+- **Backups:** the restore drill fails on a missing checksum or inconsistent row counts; a bucket on the server's own public IP is not independent. R2 is documented as unverified; status stays `BACKUP_NOT_PROTECTED`.
+- **Bug fix:** concurrent first requests from a new user could create two workspaces (commands then 404'd). Now exactly one.
+- **Status accuracy:** acceptance criteria split into implemented / test-verified / live-verified / deployed. Criteria previously shown as fully green without live verification (for example 19) corrected.
+
 ## Revision 5: hardening before live provider testing (2026-11-19)
 - **Shared rate limiting:** Postgres token buckets for the API (IP, user, commands) and provider throughput, across all instances. The in-process limiter was removed.
 - **Sandbox:** a dedicated sandbox runner (the only Docker-socket holder, with one fixed operation) replaces the generic socket proxy, which allowed privileged container creation. Images are pinned by digest; `--pull=never`; production requires the runner mode and a pinned image. Base image pinned by digest.
