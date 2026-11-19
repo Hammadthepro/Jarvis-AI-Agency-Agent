@@ -24,7 +24,7 @@ live-verified and deployed status.
 | `apps/voice/` | LiveKit voice agent (same command pipeline as text) |
 | `docker/`, `docker-compose*.yml` | App, QA sandbox, voice images; Caddy; production compose |
 | `scripts/` | VPS setup, pinned-host-key deploy, encrypted backup, restore |
-| `docs/` | Architecture, requirements, contracts, schema, security/compliance, cost model |
+| `docs/` | Architecture, requirements, contracts, schema, security/compliance, cost model, [integrations and voice setup](docs/INTEGRATIONS_AND_VOICE.md) |
 
 ## Run locally
 
@@ -35,8 +35,13 @@ cd backend && python -m venv .venv && .venv/bin/pip install -e ".[dev]"
 ```
 
 ```bash
-export DATABASE_URL=postgresql://postgres:jarvis@localhost:5432/jarvis JARVIS_ENV=local SUPABASE_JWT_SECRET=$(openssl rand -hex 32)
+export DATABASE_URL=postgresql://postgres:jarvis@localhost:5432/jarvis JARVIS_ENV=local SUPABASE_JWT_SECRET=$(openssl rand -hex 32) JARVIS_ENCRYPTION_KEY=$(openssl rand -base64 32) JARVIS_ADMIN_EMAILS=you@example.com
 ```
+
+`JARVIS_ENCRYPTION_KEY` lets you save provider credentials from the dashboard (Integrations), and
+`JARVIS_ADMIN_EMAILS` names who may do so. Keep the key: credentials saved with it cannot be read without it.
+Then sign in, open **Integrations**, configure each provider and click **Test connection**. Voice setup is in
+[docs/INTEGRATIONS_AND_VOICE.md](docs/INTEGRATIONS_AND_VOICE.md).
 
 ```bash
 cd backend && .venv/bin/python -m jarvis.db.migrate

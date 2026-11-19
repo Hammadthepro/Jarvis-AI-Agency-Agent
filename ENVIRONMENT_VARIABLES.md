@@ -9,6 +9,13 @@ Classification: **SECRET** (credential, server-only, never logged), **SENSITIVE*
 **PUBLIC** (safe in the browser bundle), **CONFIG** (tuning).
 Consumers: `api`, `worker`, `voice`, `dashboard`, `edge` (Cloudflare Worker), `backup`, `ci`.
 
+**Revision 7 (as built): provider credentials can be entered in the dashboard.** The provider keys in
+sections 4–11 (Anthropic, SerpApi, Firecrawl, Cloudflare, LiveKit, Resend, Google Places) may be set either
+here or in the Integrations Center. Dashboard values are stored encrypted with `JARVIS_ENCRYPTION_KEY`, take
+precedence over these variables, and fall back to them when removed. Infrastructure settings (database,
+Supabase auth, encryption key, admins, sandbox runner, backups, voice shared secret) remain environment-only.
+See [docs/INTEGRATIONS_AND_VOICE.md](docs/INTEGRATIONS_AND_VOICE.md).
+
 Revision 3: Places API (New) naming; `PLACES_API_BASE_URL`; the listing-panel cap is now Details Enterprise; rating, compliance-gate and website-verification variables. The compliance gate itself lives in the DB (`compliance_approvals`), not in env vars.
 
 Revision 2: added VPS/hostname, model-routing, usage-sync, coordinate-storage, sending-readiness,
@@ -21,7 +28,10 @@ backup and edge-Worker variables. Budget defaults now match the cost model §6.4
 | `JARVIS_ENV` | `local` \| `test` \| `live-test` \| `production` | Required | api, worker, voice | CONFIG | enum. Startup aborts if `JARVIS_ENABLE_TEST_DOUBLES=true` outside `test` |
 | `JARVIS_ENABLE_TEST_DOUBLES` | enables test doubles | Optional (false) | test only | CONFIG | allowed only when `JARVIS_ENV=test` |
 | `JARVIS_LOG_LEVEL` | log level | Optional (`INFO`) | all | CONFIG | enum |
-| `JARVIS_ENCRYPTION_KEY` | AES-256-GCM key for secrets stored in the DB | Required | api, worker | **SECRET** | 32 bytes base64 (`openssl rand -base64 32`) |
+| `JARVIS_ENCRYPTION_KEY` | AES-256-GCM key for provider credentials saved in the Integrations Center (`integration_credentials`). Without it, saving credentials fails closed with `ENCRYPTION_NOT_CONFIGURED` | Required (production) | api, worker | **SECRET** | must decode to exactly 32 bytes; standard or URL-safe base64 (`openssl rand -base64 32`) |
+| `JARVIS_ENCRYPTION_KEY_PREVIOUS` | the old key, only while rotating (`python -m jarvis.security.vault rotate`) | Optional | api, worker | **SECRET** | same format |
+| `JARVIS_ADMIN_EMAILS` | deployment administrators allowed to save, remove, enable or disable provider credentials in the dashboard | Optional (none = nobody can) | api | SENSITIVE | comma-separated emails |
+| `JARVIS_ADMIN_USER_IDS` | the same, by Supabase user id | Optional | api | SENSITIVE | comma-separated UUIDs |
 | `JARVIS_WORKER_ID` | worker identity | Optional (hostname) | worker | CONFIG | slug |
 | `JARVIS_WORKER_CONCURRENCY` | parallel non-build tasks | Optional (`3`) | worker | CONFIG | 1–8 (sized for 2 vCPU / 4 GB) |
 | `JARVIS_TASK_LEASE_SECONDS` | lease length | Optional (`300`) | worker | CONFIG | 60–1800 |

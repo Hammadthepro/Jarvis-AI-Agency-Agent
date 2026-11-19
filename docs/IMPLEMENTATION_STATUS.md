@@ -1,37 +1,54 @@
 # JARVIS — Implementation Status
 
-As of 2026-11-19 (revision 6: consistency and data-integrity audit). Branch `claude/sleepy-shannon-4lorvo`.
+As of 2026-11-19 (revision 7: Integrations Center, voice agent and unified conversation router). Branch `main`.
 
 **Overall: NOT production-ready and NOT deployed.** The platform is implemented and passes its automated tests
 against real local infrastructure (PostgreSQL, Chromium, Docker) with **test doubles for every third-party provider**.
-No third-party integration has been exercised against the real provider, because no credentials were available.
+No provider has been validated as CONNECTED with real credentials, because none were available. What has been
+checked live is narrower: the five providers below were called for real with deliberately invalid keys, and each
+rejection was reported correctly as INVALID_CREDENTIALS (section 1a).
 No VPS has been purchased, so nothing runs in production.
 
 Four separate levels are tracked below. A higher level is never implied by a lower one:
 - **Implemented:** code exists in the repository.
 - **Test-verified:** an automated test exercises it (real Postgres, Chromium and Docker; providers via doubles unless stated).
-- **Live-verified:** exercised against the real third-party provider with real credentials. **None so far.**
+- **Live-verified:** exercised against the real third-party provider. **No successful connection yet** (no real credentials);
+  only invalid-credential detection has been live-verified (section 1a).
 - **Deployed:** running on production infrastructure. **None so far.**
 
 ## 1. Test results (latest run, 2026-11-19)
 
 | Suite | Where | Result | What it exercises |
 |---|---|---|---|
-| Backend `pytest` | this environment | **122 passed, 4 skipped** | Real PostgreSQL 16 (migrations 0001–0006, RLS); real Chromium (Playwright/axe); real Docker sandbox and sandbox runner; S3-protocol server (moto, loopback) for backups; provider HTTP via test doubles |
+| Backend `pytest` | this environment | **151 passed, 4 skipped** | Real PostgreSQL 16 (migrations 0001–0008, RLS); real Chromium (Playwright/axe); real Docker sandbox and sandbox runner; S3-protocol server (moto) for backups; provider HTTP via test doubles or httpx MockTransport |
 | Backend live tests (`tests/live`) | this environment | **4 skipped**: no credentials | Claude, SerpApi, Firecrawl, Cloudflare. One capped call each |
-| Voice agent (`apps/voice/tests`) | this environment | **5 passed, 2 skipped** | Offline turn handling, identity binding, real-SDK object construction. Live LiveKit test skipped: no credentials |
-| Dashboard Vitest / typecheck / build | this environment | **8 passed / clean / pass** | |
-| Real-stack E2E | this environment | **pass** (2 consecutive runs) | Real API, worker, Postgres and built dashboard in Chromium |
+| Voice agent (`apps/voice/tests`) | this environment | **10 passed, 2 skipped** | Turn handling, progress narration, control-message ownership, credential sourcing, heartbeat. Live LiveKit test skipped: no credentials |
+| Dashboard Vitest / typecheck / build | this environment | **14 passed / clean / pass** | Integrations Center, voice states, usage labels, command flow |
+| Real-stack E2E | this environment | **pass** | Real API, worker, Postgres and built dashboard in Chromium, including the Integrations Center, Voice page and the live invalid-key checks below |
 | Lint | this environment | `ruff` clean | |
-| GitHub Actions CI | GitHub, last observed run (commit 9e67f88) | **failed overall.** `backend`, `dashboard`, `voice` and `images` (QA sandbox image, no-network check, app image) **passed**. `secrets-scan` **failed** (see §5) | The revision 6 commits had not been run by CI when this was written |
+| GitHub Actions CI | GitHub, `main` at 9d768a7 | **all jobs passed** | backend, dashboard, voice, images, secrets-scan. Revision 7 commits not yet observed in CI when this was written |
 
-Regression tests added in revision 6:
-- `test_architecture_consistency.py` (4): only `sandbox-runner` mounts the Docker socket; no document, script, CI file or config describes the removed socket proxy as current; the docs name the runner as the sole socket holder; CI and deploy pin the sandbox image.
-- `test_evidence_integrity.py` (5): purged evidence becomes a content-free tombstone; no dangling references; verification summaries unchanged; legal holds block deletion and tombstoning; ad hoc and cascading deletes; backfill of earlier dangling references; API shows `expired` references.
-- `test_retention_usage_scheduler.py` (+2): Anthropic local cost is never reported as provider billing; the database refuses mislabelled costs.
-- `test_backup.py` (+3): a missing checksum fails the drill; inconsistent restored row counts fail the drill; a bucket on this server's own public IP is not independent.
-- `test_api.py` (+1): concurrent first requests create exactly one workspace (bug found by the E2E and fixed).
-- Dashboard (+1): usage labels show local estimates and never an unconfirmed invoice.
+### 1a. Live provider checks (real network calls, deliberately invalid keys)
+Through the real dashboard and API, an administrator saved format-valid but invalid keys and ran Test connection:
+
+| Provider | Real response | JARVIS state |
+|---|---|---|
+| SerpApi | HTTP 401 "Invalid API key" | INVALID_CREDENTIALS |
+| Anthropic | HTTP 401 | INVALID_CREDENTIALS |
+| Firecrawl | HTTP 401 "Unauthorized: Invalid token" | INVALID_CREDENTIALS |
+| Cloudflare | HTTP 401 "Invalid API Token" | INVALID_CREDENTIALS |
+| Resend | HTTP **400** "API key is invalid" | INVALID_CREDENTIALS (this check found a mapping bug: Resend's 400 was shown as a generic error; fixed) |
+
+This proves the Test connection path reaches the real providers and classifies rejected keys correctly. It does **not**
+prove any provider works with valid credentials. LiveKit and Google Places were not called (no URL / restricted).
+
+Regression tests added in revision 7:
+- `test_integrations_center.py` (20): AES-GCM vault (binding, wrong key, tamper, rotation); the database refuses plaintext; admin-only management; fail-closed without a key; secrets never in responses, storage or audit logs; invalid input never echoed; every connection state (CONNECTED, INVALID_CREDENTIALS incl. HTTP 200/400 bodies, RATE_LIMITED, QUOTA_EXCEEDED, CONNECTION_FAILED, PERMISSION_DENIED); disable blocks the gateway; removal falls back to the environment; worker and other API instances pick up changes.
+- `test_voice_backend.py` (8): token scope and 10-minute expiry; voice never OPERATIONAL on configuration alone; agent heartbeat and config auth; ending only your own session; multi-turn clarify, status and cancel; the example agency command; viewers cannot start work.
+- `test_rating_and_command.py` (+1): "prepare two redesign previews" and similar phrasings enable the build stages.
+- Voice agent (+5), dashboard (+6).
+
+Revision 6 tests (architecture consistency, evidence integrity, usage labels, backup drill, workspace race) remain in the suite.
 
 ## 2. Acceptance criteria
 
@@ -65,10 +82,14 @@ Regression tests added in revision 6:
 | 24 | Safe job recovery | ✅ | ✅ | — | ❌ | Leases, heartbeats, dead letters, backoff, per-workspace kill switch |
 | 25 | Drafts from verified evidence | ✅ | ✅ | ❌ | ❌ | Claude double |
 | 26 | Sending protected by gates | ✅ | ✅ | ❌ | ❌ | Gates tested. Sending is not configured (no domain, no Resend key) |
-| 27 | Voice implemented and testable | ✅ | ⚠️ | ❌ | ❌ | **BLOCKED.** Offline tests only. The credentialed live test has never run (no LiveKit project). Not production-ready until it passes |
+| 27 | Voice implemented and testable | ✅ | ✅ | ❌ | ❌ | **BLOCKED (live).** Shared conversation router, scoped tokens, agent heartbeat, progress narration, interrupt and end controls, and a full dashboard experience are implemented and tested offline. The credentialed live test has never run (no LiveKit project). Not production-ready until it passes |
 | 28 | Monitoring, logging, backups, docs | ✅ | ⚠️ | ❌ | ❌ | Backup logic tested against moto on loopback only. **R2 or any real bucket is unverified. Status stays `BACKUP_NOT_PROTECTED`** until a real independent destination passes upload, checksum and restore drill |
 | 29 | Automated tests pass | ✅ | ✅ | — | — | Locally: all pass. CI: functional jobs pass; `secrets-scan` fails (§5) |
 | 30 | Full workflow on real integrations | ✅ | ✅ | ❌ | ❌ | **Not achieved.** Passes end to end with provider doubles only. Needs credentials and the Places approval (or an imported list) |
+| 31 | Integrations Center: configure, test, disable and remove providers from the dashboard | ✅ | ✅ | ⚠️ | ❌ | Live: invalid-key detection verified for 5 providers (§1a). No provider validated as CONNECTED (no real keys) |
+| 32 | Credentials encrypted, never returned or logged, admin-only | ✅ | ✅ | — | ❌ | AES-256-GCM; fails closed without `JARVIS_ENCRYPTION_KEY` |
+| 33 | Voice and text share one command system | ✅ | ✅ | ❌ | ❌ | `/conversation/turn` and `/internal/voice/command` route to the same handlers |
+| 34 | Voice reports OPERATIONAL only after real validation and a live agent | ✅ | ✅ | ❌ | ❌ | |
 | — | Production deployment | ⚠️ | ⚠️ | — | ❌ | Compose, deploy script and hardening are implemented and checked statically; images build in CI. **No VPS: nothing deployed** |
 
 ## 3. What you must provide

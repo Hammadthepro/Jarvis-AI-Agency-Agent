@@ -24,6 +24,13 @@
 4. The deploy builds the images, pins the sandbox image ID into `env/runner.env`, and starts the stack. `migrate` must succeed before `api` and `worker` start, and the sandbox runner must be healthy before the worker starts. It then checks `/ready` and the runner's `/health`. `rsync` never touches `env/*.env`.
 5. Dashboard: create a Cloudflare Pages project, build `dashboard/` (`npx vite build`) and deploy `dist/`.
 
+## Provider credentials and voice
+- Provider keys can be saved in the dashboard (**Integrations**) by the administrators listed in `JARVIS_ADMIN_EMAILS`.
+  They are encrypted with `JARVIS_ENCRYPTION_KEY`, override environment values, and reach every API instance and worker
+  within about 30 seconds. Back up the encryption key separately from the database backups.
+- Voice: `docker compose --profile voice up -d voice`. The Voice page reports OPERATIONAL only when LiveKit is validated
+  and the agent has heartbeated in the last 90 seconds. Full guide: [INTEGRATIONS_AND_VOICE.md](INTEGRATIONS_AND_VOICE.md).
+
 ## Health and monitoring
 - `GET /health` (liveness) and `GET /ready` (database). Readiness returns 503 when the DB is unreachable or paused.
 - `GET /system/readiness` is the production checklist: providers, the compliance gate, workers, terms/privacy, backups and outreach.

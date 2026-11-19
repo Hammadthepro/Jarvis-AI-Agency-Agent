@@ -1,5 +1,12 @@
 # JARVIS Changelog
 
+## Revision 7: Integrations Center, voice agent and Command Center (2026-11-19)
+- **Integrations Center:** provider credentials can be saved, tested, disabled and removed from the dashboard by deployment administrators. Stored AES-256-GCM encrypted (`JARVIS_ENCRYPTION_KEY`, previously unused); fails closed without a key; never returned, logged or echoed. Explicit states including NOT_TESTED, PERMISSION_DENIED and CONNECTION_FAILED. Changes reach every API instance and worker. Migration 0007.
+- **Voice:** one conversation router for voice and text (clarification answers, confirm, cancel, status, new commands). The agent heartbeats, narrates real progress, accepts interrupt and end controls from the session owner only, and can fetch LiveKit credentials saved in the dashboard. Voice is OPERATIONAL only after LiveKit validation and a live agent heartbeat. Tokens: 10 minutes, microphone only. Migration 0008.
+- **Dashboard:** new navigation, Command Center (attention items, active work, integration health, spend), Integrations, Voice Agent and Usage & Costs pages.
+- **Fixes found by live checks:** Resend rejects keys with HTTP 400, now reported as INVALID_CREDENTIALS; provider errors show the provider's own message.
+- **Parser:** "prepare two redesign previews" and similar phrasings now enable the build, QA and deploy stages.
+
 ## Revision 6: consistency and data-integrity audit (2026-11-19)
 - **Docker architecture docs:** every document now states that only `sandbox-runner` mounts the Docker socket. A static regression test fails if docs, scripts, CI or config describe the removed socket proxy as current.
 - **Evidence retention integrity:** migration 0005 adds content-free `evidence_tombstones` (trigger on every evidence delete), a `dangling_evidence_refs` integrity view (recorded on each retention run) and a backfill. Verification references resolve as live or expired.
