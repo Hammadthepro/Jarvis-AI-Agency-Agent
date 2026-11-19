@@ -1,0 +1,29 @@
+{
+  "name": "JARVIS",
+  // The standard Codespaces image: Python, Node and Docker (docker-in-docker) are already included.
+  "image": "mcr.microsoft.com/devcontainers/universal:2",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  // Once, when the Codespace is created or rebuilt: install backend, dashboard and QA runner dependencies.
+  "postCreateCommand": "bash scripts/dev-setup.sh",
+  // Every time the Codespace starts or resumes: safe fast-forward to origin/main (only if the tree is clean),
+  // then database -> migrations -> API -> worker -> dashboard. Idempotent; never duplicates processes.
+  "postStartCommand": "bash scripts/dev-up.sh --sync > .jarvis-startup.log 2>&1 || true",
+  "forwardPorts": [5173, 8000],
+  "portsAttributes": {
+    "5173": { "label": "JARVIS dashboard", "onAutoForward": "openBrowser" },
+    "8000": { "label": "JARVIS API (private)", "onAutoForward": "silent" },
+    "5432": { "label": "PostgreSQL (dev)", "onAutoForward": "ignore" }
+  },
+  "otherPortsAttributes": { "onAutoForward": "ignore" },
+  "customizations": {
+    "codespaces": { "openFiles": ["docs/DEVELOPMENT.md"] },
+    "vscode": { "extensions": ["ms-python.python", "charliermarsh.ruff", "dbaeumer.vscode-eslint"] }
+  },
+  // Codespaces secrets (github.com > Settings > Codespaces) are passed in as environment variables and
+  // override .env. Recommended: JARVIS_ENCRYPTION_KEY.
+  "secrets": {
+    "JARVIS_ENCRYPTION_KEY": { "description": "Stable key that encrypts provider credentials saved in Integrations (openssl rand -base64 32)." }
+  }
+}

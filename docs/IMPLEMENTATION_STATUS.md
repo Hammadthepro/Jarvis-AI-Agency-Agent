@@ -90,6 +90,8 @@ Revision 6 tests (architecture consistency, evidence integrity, usage labels, ba
 | 32 | Credentials encrypted, never returned or logged, admin-only | ✅ | ✅ | — | ❌ | AES-256-GCM; fails closed without `JARVIS_ENCRYPTION_KEY` |
 | 33 | Voice and text share one command system | ✅ | ✅ | ❌ | ❌ | `/conversation/turn` and `/internal/voice/command` route to the same handlers |
 | 34 | Voice reports OPERATIONAL only after real validation and a live agent | ✅ | ✅ | ❌ | ❌ | |
+| 35 | Development startup: one command / automatic in Codespaces, migrations gate readiness, no duplicate processes | ✅ | ✅ | — | — | `scripts/tests/dev-startup-test.sh` (real Docker Postgres) + `test_dev_environment.py`. The Codespaces hooks themselves were not run here (no Codespace available to this session) |
+| 36 | No sign-in during development; local access refused outside `JARVIS_ENV=local` | ✅ | ✅ | — | — | Production sign-in is deferred; Supabase JWT verification remains for non-local environments |
 | — | Production deployment | ⚠️ | ⚠️ | — | ❌ | Compose, deploy script and hardening are implemented and checked statically; images build in CI. **No VPS: nothing deployed** |
 
 ## 3. What you must provide

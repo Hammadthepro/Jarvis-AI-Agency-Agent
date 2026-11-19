@@ -1,5 +1,13 @@
 # JARVIS Changelog
 
+## Revision 8: reliable development startup, Codespaces, no sign-in during development (2026-11-19)
+- **One database configuration:** every process reads the repository-root `.env`; the default `DATABASE_URL` matches `docker-compose.dev.yml` (previously the code defaulted to a different database with no password, causing password failures and missing tables when a terminal lacked the export). Empty `.env` values mean "not set". `postgresql+asyncpg://` URLs are accepted. Production requires an explicit `DATABASE_URL`.
+- **Migrations gate startup:** `/ready` reports pending or modified migrations (503) and the worker refuses to start until they are applied. The migrator has a `status` command and clear errors for wrong passwords, missing databases and failed migrations.
+- **One-command startup:** `scripts/dev-up.sh`, `dev-status.sh`, `dev-down.sh` (PID and log tracking, health checks, no duplicate processes, lock against concurrent runs, never deletes data). `.devcontainer/` starts everything on every Codespace start and fast-forwards to `origin/main` when safe. Postgres health check in `docker-compose.dev.yml`.
+- **No sign-in during development:** the login page is removed. An explicit local development access mode (`JARVIS_ENV=local` + `JARVIS_LOCAL_DEV_ACCESS=true`) acts as one local operator; settings refuse it in any other environment.
+- **Dashboard to API:** the browser calls `/api` on the dashboard's own origin (Vite proxy), so Codespaces never needs the API's address or a public API port.
+- Tests: `test_dev_environment.py` and `scripts/tests/dev-startup-test.sh` (real Docker startup workflow).
+
 ## Revision 7: Integrations Center, voice agent and Command Center (2026-11-19)
 - **Integrations Center:** provider credentials can be saved, tested, disabled and removed from the dashboard by deployment administrators. Stored AES-256-GCM encrypted (`JARVIS_ENCRYPTION_KEY`, previously unused); fails closed without a key; never returned, logged or echoed. Explicit states including NOT_TESTED, PERMISSION_DENIED and CONNECTION_FAILED. Changes reach every API instance and worker. Migration 0007.
 - **Voice:** one conversation router for voice and text (clarification answers, confirm, cancel, status, new commands). The agent heartbeats, narrates real progress, accepts interrupt and end controls from the session owner only, and can fetch LiveKit credentials saved in the dashboard. Voice is OPERATIONAL only after LiveKit validation and a live agent heartbeat. Tokens: 10 minutes, microphone only. Migration 0008.

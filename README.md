@@ -26,49 +26,29 @@ live-verified and deployed status.
 | `scripts/` | VPS setup, pinned-host-key deploy, encrypted backup, restore |
 | `docs/` | Architecture, requirements, contracts, schema, security/compliance, cost model, [integrations and voice setup](docs/INTEGRATIONS_AND_VOICE.md) |
 
-## Run locally
+## Run locally / in GitHub Codespaces
 
-Prerequisites: Python 3.12, Node 22, Docker, PostgreSQL 15+ (or `docker compose -f docker-compose.dev.yml up -d db`).
+In a Codespace, JARVIS starts automatically every time the Codespace starts. Otherwise run one command:
 
 ```bash
-cd backend && python -m venv .venv && .venv/bin/pip install -e ".[dev]"
+scripts/dev-up.sh
+```
+
+It starts PostgreSQL, applies migrations, then starts the API, worker and dashboard, checks their health and prints
+the URLs. The dashboard opens directly to the Command Center; there is no sign-in during development (explicit local
+access mode, refused outside `JARVIS_ENV=local`).
+
+```bash
+scripts/dev-status.sh
 ```
 
 ```bash
-export DATABASE_URL=postgresql://postgres:jarvis@localhost:5432/jarvis JARVIS_ENV=local SUPABASE_JWT_SECRET=$(openssl rand -hex 32) JARVIS_ENCRYPTION_KEY=$(openssl rand -base64 32) JARVIS_ADMIN_EMAILS=you@example.com
+scripts/dev-down.sh
 ```
 
-`JARVIS_ENCRYPTION_KEY` lets you save provider credentials from the dashboard (Integrations), and
-`JARVIS_ADMIN_EMAILS` names who may do so. Keep the key: credentials saved with it cannot be read without it.
-Then sign in, open **Integrations**, configure each provider and click **Test connection**. Voice setup is in
+Prerequisites outside Codespaces: Python 3.12, Node 22 and Docker. Full guide, configuration and troubleshooting:
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). Provider and voice setup:
 [docs/INTEGRATIONS_AND_VOICE.md](docs/INTEGRATIONS_AND_VOICE.md).
-
-```bash
-cd backend && .venv/bin/python -m jarvis.db.migrate
-```
-
-```bash
-cd backend && .venv/bin/uvicorn jarvis.api.app:get_app --factory --port 8000
-```
-
-```bash
-cd backend && .venv/bin/python -m jarvis.worker.main
-```
-
-```bash
-cd qa-runner && npm ci && npx playwright install chromium
-```
-
-```bash
-docker build -f docker/qa-sandbox.Dockerfile -t jarvis-qa-sandbox:latest .
-```
-
-```bash
-cd dashboard && npm ci && VITE_API_BASE_URL=http://localhost:8000 npm run dev
-```
-
-Without provider credentials every integration shows `NOT_CONFIGURED`, and campaigns stop with a
-`blocked` state that names the missing credential. Nothing is simulated.
 
 ## Tests
 

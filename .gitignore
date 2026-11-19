@@ -16,3 +16,5 @@ dashboard/dist/
 .mypy_cache/
 *.tsbuildinfo
 env/*.env
+.jarvis/
+.jarvis-startup.log
