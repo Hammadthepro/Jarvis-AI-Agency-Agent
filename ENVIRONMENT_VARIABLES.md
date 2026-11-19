@@ -202,3 +202,21 @@ needs manual approval. All **SECRET**.
 | `JARVIS_ENCRYPTION_KEY` | yearly | dual-key re-encryption script (Phase 9) |
 | Signing keys (`UNSUBSCRIBE_SIGNING_KEY`, `EDGE_TO_API_HMAC_SECRET`) | suspected leak | rotate with a `kid`. Old links stay valid until expiry |
 | Backup age key | if compromised | new key pair. Re-encrypt retained backups |
+
+
+## Revision 4 additions (implementation hardening)
+
+| Variable | Service | Purpose | Class |
+|---|---|---|---|
+| `QA_RUNNER_MODE` | api, worker | `runner` (required in production) \| `docker` \| `subprocess` (development only) | CONFIG |
+| `SANDBOX_RUNNER_URL` | worker | internal URL of the sandbox runner (`http://sandbox-runner:8090`) | CONFIG |
+| `SANDBOX_RUNNER_TOKEN` | worker, sandbox-runner | shared bearer token | **SECRET** |
+| `SANDBOX_IMAGE` | sandbox-runner | pinned image ID `sha256:...` (written by `scripts/deploy.sh`) | CONFIG |
+| `SITES_ARTIFACT_DIR` | worker, api, sandbox-runner | shared host path `/var/lib/jarvis/sites` | CONFIG |
+| `VOICE_AGENT_SHARED_SECRET` | api, voice | authenticates the voice agent to `/internal/voice/command` | **SECRET** |
+| `BACKUP_S3_ENDPOINT`, `BACKUP_S3_BUCKET`, `BACKUP_S3_REGION` | backup | independent off-site destination (for example Cloudflare R2) | CONFIG |
+| `BACKUP_S3_ACCESS_KEY_ID`, `BACKUP_S3_SECRET_ACCESS_KEY` | backup | bucket-scoped credentials | **SECRET** |
+| `BACKUP_AGE_IDENTITY_FILE`, `RESTORE_DRILL_DATABASE_URL` | restore drill (operator machine) | age private key and scratch DB for drills | **SECRET** |
+| `JARVIS_LIVE_TESTS`, `JARVIS_LIVE_USER_ID`, `JARVIS_LIVE_WORKSPACE_ID` | live tests only | enable credentialed live tests | CONFIG |
+
+Per-service env files: `env/app.env`, `env/runner.env`, `env/voice.env`, `env/backup.env` (see `env/*.env.example`).

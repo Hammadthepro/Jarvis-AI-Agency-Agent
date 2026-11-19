@@ -1,22 +1,28 @@
 # JARVIS — Implementation Status
 
-As of 2026-11-18. Branch `claude/sleepy-shannon-4lorvo`.
+As of 2026-11-19 (revision 5 hardening). Branch `claude/sleepy-shannon-4lorvo`.
 Every claim below is backed by an automated test or a run recorded in this document. "Live-verified" means
 exercised against the real third-party provider. **No provider credentials were available in the build
 environment, so no third-party integration has been live-verified yet.**
 
-## 1. Test results (latest run)
+## 1. Test results (latest run, 2026-11-19)
 
 | Suite | Result | What it exercises |
 |---|---|---|
-| Backend `pytest` | **77 passed, 4 skipped** | Real PostgreSQL 16 with real migrations and RLS; real Chromium via Playwright/axe; real Docker sandbox; provider HTTP served by test doubles (`tests/doubles.py`) |
-| Live provider tests (`tests/live`) | **4 skipped**: credentials not set | Claude, SerpApi, Firecrawl, Cloudflare. One capped call each |
-| Dashboard Vitest | **7 passed** | Validation, honest error states, command and clarification workflow, API-unreachable state |
-| Dashboard typecheck and build | **pass** | `tsc -b`, `vite build` |
-| Real-stack E2E (`dashboard/e2e/stack.e2e.mjs`) | **pass** | Real API, worker, Postgres and built dashboard in Chromium, with no credentials. Covers: the Places compliance block, an import campaign blocked with `NOT_CONFIGURED: … SERPAPI_API_KEY`, Settings showing all 7 providers `NOT_CONFIGURED`, and no page errors |
-| Docker QA sandbox | **pass** | `--network none`, read-only root, uid 10001, all capabilities dropped. Outbound fetch fails (`EAI_AGAIN`) and root-filesystem writes fail (`EROFS`) |
-| Backup and restore drill | **pass** | `scripts/backup.sh` (pg_dump + age) then `scripts/restore.sh` into a scratch DB. Recorded as `BACKUP_NOT_PROTECTED` (no off-site target) |
+| Backend `pytest` | **107 passed, 4 skipped** | Real PostgreSQL 16 (migrations 0001–0004, RLS); real Chromium (Playwright/axe); real Docker sandbox and sandbox runner; S3-protocol server (moto) for backups; provider HTTP via test doubles |
+| Backend live tests (`tests/live`) | **4 skipped**: no credentials | Claude, SerpApi, Firecrawl, Cloudflare. One capped call each |
+| Voice agent (`apps/voice/tests`) | **5 passed, 2 skipped** | Offline turn handling, identity binding, real-SDK object construction. The live LiveKit test skipped: credentials not set |
+| Dashboard Vitest / typecheck / build | **7 passed / clean / pass** | |
+| Real-stack E2E | **pass** | Real API, worker, Postgres and built dashboard in Chromium |
 | Lint | `ruff` clean | |
+
+New regression tests this revision:
+- `test_ratelimit.py` (4): concurrency across 3 pools; refill; 2 API instances sharing a bucket; provider limit across worker pools before any reservation.
+- `test_sandbox_runner.py` (5): fixed hardened flags; auth; path confinement and symlink rejection; no pull for a missing image; a real run through runner mode; an in-sandbox probe (no socket, no host filesystem, no secrets, uid 10001, all capabilities zero, no network).
+- `test_retention_usage_scheduler.py` (5): every retention rule including 180-day SERP cleanup; protected record types; legal hold and release; usage sync never writes zero for unknown usage; the `/usage` figures; scheduler locking and once-per-interval.
+- `test_repair_loop.py` (8): Sonnet repairs 1 and 2, Opus repair 3, success at each stage, failure after the limit, unrepairable failure, contrast repair without a model call, no model call after the limit even on resume.
+- `test_backup.py` (4): off-site upload with checksum; restore drill from the off-site copy (row counts match); `PROTECTED` only for an independent destination with a drill; tampered copy rejected; independence check.
+- `test_production_config.py` (4): production settings refuse test doubles, subprocess or docker QA, a missing runner, or a missing JWKS; no test-double imports in the package; compose hardening invariants; deploy retry after a crash never re-uploads.
 
 ## 2. Acceptance criteria
 
@@ -38,7 +44,7 @@ environment, so no third-party integration has been live-verified yet.**
 | 14 | Isolated builds | ✅ the model never writes code (structured SiteSpec → owned renderer). QA runs in the no-network Docker sandbox |
 | 15 | Real browser QA | ✅ Playwright + axe on desktop and mobile |
 | 16 | QA findings stored | ✅ `qa_runs`, `qa_findings`, screenshots |
-| 17 | Bounded repairs | ⚠️ implemented (max 3: Sonnet ×2, then Opus; contrast and copy repair). Loop termination is enforced in code but **not covered by a dedicated test** |
+| 17 | Bounded repairs | ✅ max 3 (Sonnet, Sonnet, Opus). 8 dedicated tests, including the hard stop and no model call after the limit |
 | 18 | Cloudflare real API | ⚠️ implemented (wrangler Direct Upload + REST confirmation and cleanup). **Not live-verified**: no token |
 | 19 | Deployment verified before success | ✅ API confirmation + live URL, title and noindex check. Tested with doubles |
 | 20 | Preview URLs in dashboard | ✅ |
@@ -48,8 +54,8 @@ environment, so no third-party integration has been live-verified yet.**
 | 24 | Safe job recovery | ✅ leases, heartbeats, dead letters, backoff, per-workspace kill switch |
 | 25 | Drafts from verified evidence | ✅ tested |
 | 26 | Sending protected by gates | ✅ tested: readiness, authorization, limits, suppression re-check, harvesting flag, ambiguous result never resent, fail-closed unsubscribe |
-| 27 | Voice implemented and testable | ⚠️ LiveKit agent (`apps/voice`, livekit-agents 1.8.12) + token endpoint + internal pipeline endpoint (tested). **Not live-verified**: no LiveKit project |
-| 28 | Monitoring, logging, backups, docs | ✅ (off-site backup target not configured → `BACKUP_NOT_PROTECTED`) |
+| 27 | Voice implemented and testable | ⚠️ Audited and hardened. Offline tests pass. A credentialed live test (`apps/voice/tests/test_voice_live.py`) covers auth, audio in, transcription, command execution, spoken reply and reconnect, but **has not run: no LiveKit project**. Voice is **not** production-ready until it passes |
+| 28 | Monitoring, logging, backups, docs | ✅ Off-site backup and restore drill implemented and tested against an S3-protocol server on loopback. **`BACKUP_NOT_PROTECTED` remains** until a real independent bucket (for example R2) is configured and a drill from it succeeds |
 | 29 | Automated tests pass | ✅ |
 | 30 | Full workflow on real integrations | ❌ **Not achieved**: needs credentials and the Places approval (or an imported list). The full workflow passes end to end with provider doubles |
 
@@ -77,7 +83,7 @@ environment, so no third-party integration has been live-verified yet.**
 - **Docker access:** the worker reaches Docker only through a restricted socket proxy (container lifecycle only). Sandboxes never see the socket.
 
 ## 5. Known limitations
-- Provider-reported usage sync is on demand (Settings → Test) rather than scheduled. Google usage is entered manually.
-- Retention purge covers task events (90 days) and raw scraped pages (90 days). Purging SERP results after 180 days is not yet scheduled.
-- The rate limiter is in-process, so it only covers a single API instance.
-- The Docker sandbox image build needs registry access during `npm ci`. In this build environment it was verified with pre-installed, lockfile-identical modules.
+- **App image build not verified in this environment.** The Docker build cannot reach apt/npm registries through this container's proxy (TLS interception). CI builds both images (`images` job). The QA sandbox image was verified here from lockfile-identical modules.
+- **Google usage is not reported automatically.** No usage API is integrated; reports are `unavailable` until imported or entered manually.
+- **Claude reported usage is per-response token counts priced locally.** The organisation billing API is not integrated.
+- **Dangling evidence references after SERP cleanup.** Retention removes uncited SERP evidence after 180 days. Verification records keep their check summaries, but their `evidence_ids` may then point to purged rows.

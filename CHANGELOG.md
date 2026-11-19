@@ -1,5 +1,18 @@
 # JARVIS Changelog
 
+## Revision 5: hardening before live provider testing (2026-11-19)
+- **Shared rate limiting:** Postgres token buckets for the API (IP, user, commands) and provider throughput, across all instances. The in-process limiter was removed.
+- **Sandbox:** a dedicated sandbox runner (the only Docker-socket holder, with one fixed operation) replaces the generic socket proxy, which allowed privileged container creation. Images are pinned by digest; `--pull=never`; production requires the runner mode and a pinned image. Base image pinned by digest.
+- **Retention:** one scheduled module covering all rules, including 180-day SERP cleanup, legal holds, protected record types, and run logs.
+- **Provider usage reconciliation:** scheduled hourly, account-level reports with explicit statuses. Unknown is never shown as zero. `/usage` separates estimated, reserved, committed, ambiguous, released and provider-reported.
+- **Scheduler fix:** the advisory lock is now taken and released on the same connection (previously it could leak across pooled connections). Per-job timing is stored in `scheduled_jobs`.
+- **Repair loop:** dedicated tests for all stages and the hard stop.
+- **Voice:** sessions bound to the authenticated participant, explicit close-on-disconnect, closed HTTP client, non-deprecated interruption config, offline tests, and a credentialed live test.
+- **Backups:** boto3 off-site upload with checksum verification, a restore drill from the off-site copy, and `PROTECTED` only for an independent destination with a recent drill.
+- **Production config:** least-privilege per-service env files, read-only containers with dropped capabilities, migrate-first startup, worker heartbeat healthcheck, and deploy retry that never re-uploads.
+- **Deploy script:** `rsync --delete` no longer deletes the server's `env/*.env` secrets.
+- Migrations 0003 and 0004 (additive; existing records preserved).
+
 ## Revision 4: implementation (2026-11-18)
 - Implemented the full platform. See docs/IMPLEMENTATION_STATUS.md for verified status, test results, blockers and decisions that differ from revision 3 (structured-spec renderer, Postgres-checkpointed engine, VERIFIED_* website statuses, API-served unsubscribe, socket-proxy sandbox access).
 - New docs: docs/IMPLEMENTATION_STATUS.md, docs/OPERATIONS.md. README rewritten with run instructions.
