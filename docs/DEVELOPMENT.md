@@ -41,6 +41,15 @@ two runs overlapping. Processes are tracked in `.jarvis/run/*.pid`, and logs go 
 - Port 5173 (the dashboard) opens in the browser automatically. Port 8000 (the API) stays private: the dashboard
   reaches it through its own `/api` proxy.
 
+**Container user and image.** The devcontainer uses `mcr.microsoft.com/devcontainers/universal:2` as is. Its existing
+non-root user is `codespace` (uid 1000, in the `docker` group), which `devcontainer.json` names explicitly. Docker-in-Docker
+is already part of that image, so no Features are added: a Feature would make Codespaces rebuild the ~15 GB image at
+creation time, and a failure there puts the Codespace into recovery mode.
+
+**Known limitation:** `universal:2` is Ubuntu 20.04, and Playwright 1.63 does not ship Chromium for Ubuntu 20.04. In the
+Codespace, the QA runner install therefore fails (startup warns and continues), and website QA cannot run there until
+the QA runner uses a supported environment, for example the Docker QA sandbox (`QA_RUNNER_MODE=docker`).
+
 **First time only:** after this configuration is added to a Codespace that already exists, run **Codespaces: Rebuild
 Container** from the Command Palette once. Until then the hooks are not active, but `scripts/dev-up.sh` still works
 when run by hand.

@@ -1,10 +1,14 @@
 {
   "name": "JARVIS",
-  // The standard Codespaces image: Python, Node and Docker (docker-in-docker) are already included.
+  // The standard Codespaces image. It already includes Python 3.12, Node 22 and Docker-in-Docker (its
+  // docker-in-docker:2 feature, privileged mode and /usr/local/share/docker-init.sh come from the image's own
+  // metadata), so NO extra features are added: adding one forces Codespaces to rebuild this ~15 GB image at
+  // creation time, and a failure there drops the Codespace into recovery mode.
   "image": "mcr.microsoft.com/devcontainers/universal:2",
-  "features": {
-    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
-  },
+  // The non-root user that exists in this image (/etc/passwd: codespace, uid 1000, member of the docker group).
+  // It is also the image's own default; stated here so it never depends on another image's user.
+  "containerUser": "codespace",
+  "remoteUser": "codespace",
   // Once, when the Codespace is created or rebuilt: install backend, dashboard and QA runner dependencies.
   "postCreateCommand": "bash scripts/dev-setup.sh",
   // Every time the Codespace starts or resumes: safe fast-forward to origin/main (only if the tree is clean),

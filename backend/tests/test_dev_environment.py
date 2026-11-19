@@ -219,3 +219,18 @@ def test_env_example_loads_and_empty_values_mean_not_configured(tmp_path, monkey
     assert s.jarvis_env == "local" and s.local_dev_access_active and s.database_url == DEV_DATABASE_URL
     assert s.email_provider is None and s.resend_api_key is None and s.livekit_url is None and s.anthropic_api_key is None
     assert str(s.sites_artifact_dir).startswith(str(ROOT))
+
+
+def test_devcontainer_uses_the_images_existing_user_and_adds_no_rebuild_features():
+    """Codespaces regression: the configured user must exist in the image, and no Feature may force a rebuild of the
+    ~15 GB universal image at creation (a failed rebuild drops the Codespace into recovery mode)."""
+    import json
+    import re
+    raw = (ROOT / ".devcontainer" / "devcontainer.json").read_text()
+    cfg = json.loads(re.sub(r"^\s*//.*$", "", raw, flags=re.M))
+    assert cfg["image"] == "mcr.microsoft.com/devcontainers/universal:2"
+    # verified in that image: /etc/passwd has codespace:x:1000:1000::/home/codespace:/bin/bash (docker group member)
+    assert cfg["remoteUser"] == cfg["containerUser"] == "codespace"
+    assert not cfg.get("features"), "universal:2 already includes docker-in-docker; extra features force an image rebuild"
+    assert not cfg.get("build") and not cfg.get("dockerFile")
+    assert "dev-setup.sh" in cfg["postCreateCommand"] and "dev-up.sh --sync" in cfg["postStartCommand"]
