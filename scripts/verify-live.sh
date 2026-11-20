@@ -45,10 +45,12 @@ done
 
 info "2. Claude conversation (one real turn through the same agent voice uses)"
 r="$(curl -s --max-time 120 -X POST "$API/conversation/turn" -H 'Content-Type: application/json' -d '{"text":"What have you completed today?"}')"
-agent="$(curl -s "$API/conversation/messages?limit=1" | jq_ "d[-1]['meta'].get('agent')" 2>/dev/null || echo none)"
-say="$(printf '%s' "$r" | jq_ "d.get('say','')[:200]" 2>/dev/null || echo "$r")"
-if [ "$agent" = "claude" ]; then pass "Claude answered with tools: \"$say\""
-else flunk "conversation did not use Claude (agent=$agent): $say $(printf '%s' "$r" | jq_ "d.get('notice','')" 2>/dev/null)"; fi
+kind="$(printf '%s' "$r" | jq_ "d.get('kind')" 2>/dev/null || echo none)"
+agent="$(printf '%s' "$r" | jq_ "d.get('agent') or 'claude'" 2>/dev/null || echo none)"
+say="$(printf '%s' "$r" | jq_ "d.get('say','')[:300]" 2>/dev/null || echo "$r")"
+if [ "$kind" = "provider_error" ]; then flunk "Claude FAILED: $say"
+elif [ "$agent" = "claude" ] && [ -n "$say" ]; then pass "Claude answered (real message, tools available): \"$say\""
+else flunk "conversation did not use Claude (agent=$agent): $say"; fi
 
 info "3. Voice"
 vs="$(curl -s "$API/voice/status")"
@@ -74,9 +76,16 @@ else
   me="$(curl -s "$API/me")"
   if (export LIVEKIT_URL="$(printf '%s' "$cfg" | jq_ "d['url']")" LIVEKIT_API_KEY="$(printf '%s' "$cfg" | jq_ "d['api_key']")" \
              LIVEKIT_API_SECRET="$(printf '%s' "$cfg" | jq_ "d['api_secret']")" VOICE_AGENT_SHARED_SECRET="$secret" JARVIS_API_URL="$API" \
-             JARVIS_LIVE_USER_ID="$(printf '%s' "$me" | jq_ "d['user_id']")" JARVIS_LIVE_WORKSPACE_ID="$(printf '%s' "$me" | jq_ "d['workspace_id']")";
-      cd apps/voice && timeout 600 .venv/bin/python -m pytest -q -rs tests/test_voice_live.py) >"$LOG_DIR/voice-live-test.log" 2>&1; then
-    pass "real spoken round trip: speech in, transcription, JARVIS reply, spoken audio out, reconnect ($(tail -n 1 "$LOG_DIR/voice-live-test.log"))"
+             JARVIS_LIVE_USER_ID="$(printf '%s' "$me" | jq_ "d['user_id']")" JARVIS_LIVE_WORKSPACE_ID="$(printf '%s' "$me" | jq_ "d['workspace_id']")" \
+             JARVIS_LIVE_USE_RUNNING_AGENT=1 VOICE_AGENT_NAME="$(setting voice_agent_name)";
+      cd apps/voice && timeout 600 .venv/bin/python -m pytest -q -rs -s tests/test_voice_live.py) >"$LOG_DIR/voice-live-test.log" 2>&1; then
+    last="$(curl -s "$API/conversation/messages?limit=1")"
+    if [ "$(printf '%s' "$last" | jq_ "d[-1]['channel'] + ':' + str(d[-1]['meta'].get('agent')) + ':' + str(d[-1]['meta'].get('kind'))")" = "voice:claude:reply" ] ||
+       printf '%s' "$last" | jq_ "d[-1]['channel']=='voice' and d[-1]['meta'].get('agent')=='claude' and d[-1]['meta'].get('kind')!='provider_error'" | grep -q True; then
+      pass "real spoken round trip: agent joined, speech transcribed, CLAUDE generated the reply, reply audio received, reconnect ($(grep -o 'agent joined after [0-9.]* s' "$LOG_DIR/voice-live-test.log" | head -1))"
+    else
+      flunk "voice round trip ran but the reply was not a Claude answer: $(printf '%s' "$last" | jq_ "d[-1]['content'][:200]")"
+    fi
   else flunk "spoken round trip failed (see .jarvis/logs/voice-live-test.log): $(tail -n 3 "$LOG_DIR/voice-live-test.log" | tr '\n' ' ')"; fi
   unset secret cfg
 fi

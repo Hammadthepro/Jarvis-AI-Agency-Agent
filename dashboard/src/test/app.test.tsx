@@ -273,3 +273,36 @@ describe("Voice-first JARVIS screen", () => {
     await waitFor(() => expect(posts[1]).toEqual({ path: "/conversation/turn", body: JSON.stringify({ text: "What have you completed today?" }) }));
   });
 });
+
+describe("Voice join and provider honesty", () => {
+  it("is not ready until the agent publishes a live state, and waits long enough for a cold start", async () => {
+    const { agentReady, AGENT_JOIN_TIMEOUT_MS } = await import("../lib/voice");
+    const { orbMode } = await import("../pages/CommandCenter");
+    expect(agentReady(undefined)).toBe(false);
+    expect(agentReady("initializing")).toBe(false);
+    expect(agentReady("listening")).toBe(true);
+    expect(AGENT_JOIN_TIMEOUT_MS).toBeGreaterThanOrEqual(30_000);
+    expect(orbMode("waiting_agent", true, false, false)).toBe("joining");
+    expect(orbMode("connecting", true, false, false)).toBe("connecting");
+    expect(orbMode("reconnecting", true, false, false)).toBe("connecting");
+  });
+
+  it("marks a Claude failure as a provider failure, never as an answer", async () => {
+    const convo = [
+      { id: 1, role: "user", channel: "voice", content: "Find dentists in Miami", meta: {}, created_at: "2026-11-20T10:00:00Z" },
+      { id: 0, role: "assistant", channel: "text", content: "Older basic reply.", meta: { agent: "deterministic" }, created_at: "2026-11-19T10:00:00Z" },
+      { id: 2, role: "assistant", channel: "voice", content: "Claude unavailable: PaymentRequiredError HTTP 402 billing_error: Credit balance too low. I haven't done anything with that request.",
+        meta: { kind: "provider_error", agent: "claude", provider_error: { state: "QUOTA_EXCEEDED", http_status: 402 } }, created_at: "2026-11-20T10:00:01Z" },
+    ];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const p = pathOf(input);
+      if (p === "/conversation/messages") return new Response(JSON.stringify(convo), { status: 200 });
+      return new Response("[]", { status: 200 });
+    });
+    const { default: CommandCenterPage } = await import("../pages/CommandCenter");
+    wrap(<CommandCenterPage />);
+    expect(await screen.findByText(/Claude unavailable · QUOTA_EXCEEDED/)).toBeInTheDocument();
+    expect(screen.getByText("basic parser")).toBeInTheDocument();              // old non-Claude replies stay labelled
+    expect(screen.queryByRole("button", { name: "Yes, go ahead" })).toBeNull();      // nothing to confirm
+  });
+});

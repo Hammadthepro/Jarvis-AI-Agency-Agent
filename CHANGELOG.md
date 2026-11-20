@@ -1,5 +1,12 @@
 # JARVIS Changelog
 
+## Revision 10: Claude failures reported honestly, reliable voice dispatch (2026-11-20)
+- **Anthropic errors keep their meaning.** Authentication, billing (402 and spend-limit classes, "credit balance"), permission, model access, invalid request, rate limit, overload and timeout each carry the class, HTTP status, Anthropic error type, sanitized message and request id. They are logged without secrets.
+- **Test connection sends one tiny real message**, so CONNECTED is no longer based on a model lookup alone.
+- **No silent Basic Mode.** Claude failures produce an explicit "Claude unavailable: reason" reply, and nothing runs. The basic parser is opt-in only and labelled.
+- **Voice:** explicit agent dispatch through the token's room configuration, VAD prewarm, a distinct "JARVIS is joining" state, a 45-second join window with a clean failure, and handling of the agent leaving. The live test uses the SDK's `http_context.open()` for its standalone speech synthesis, can drive the running agent, and asserts that the reply came from Claude and that the reply's audio was received.
+- `dev-up.sh` restarts services that were started from an older commit.
+
 ## Revision 9: one JARVIS conversation, managed voice agent, voice-first screen (2026-11-19)
 - **One conversation brain for voice and text:** Claude with fixed tools over existing operations, persistent memory and focus (migration 0009). Work starts only after an explicit yes (checked server-side). Budget-gated. Website text is fenced as untrusted. Deterministic fallback, labelled.
 - **Work on a named business:** verify, research, qualify, build, browser-QA and deploy a preview for one business through the normal durable pipeline.

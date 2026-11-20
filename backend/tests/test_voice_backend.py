@@ -130,3 +130,13 @@ async def test_viewer_cannot_start_work_by_voice(voice, db):
     r = await voice.post("/internal/voice/command", headers=agent_h(),
                          json={"user_id": str(uuid.uuid4()), "workspace_id": str(ws), "text": "status"})
     assert r.status_code == 403
+
+
+async def test_token_dispatches_the_named_jarvis_agent(voice):
+    """Explicit dispatch: the browser token itself asks LiveKit to send the 'jarvis' agent into this new room."""
+    a = await login(voice, "dispatch@voice.dev")
+    r = (await voice.post("/voice/token", headers=a["headers"])).json()
+    claims = jwt.decode(r["token"], "s" * 40, algorithms=["HS256"])
+    agents = claims["roomConfig"]["agents"]
+    assert agents == [{"agentName": "jarvis", "metadata": claims["metadata"]}]
+    assert a["me"]["workspace_id"] in claims["metadata"]

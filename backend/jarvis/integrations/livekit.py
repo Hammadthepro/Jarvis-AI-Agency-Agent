@@ -34,7 +34,7 @@ class LiveKitClient:
         return s.livekit_url, s.livekit_api_key.get_secret_value(), s.livekit_api_secret.get_secret_value()
 
     def token(self, *, identity: str, name: str, room: str, ttl_s: int = 900, metadata: str = "",
-              agent: bool = False, room_admin: bool = False) -> str:
+              agent: bool = False, room_admin: bool = False, dispatch_agent: str | None = None) -> str:
         _url, key, secret = self._require()
         now = int(time.time())
         # Browser tokens: join ONE room, publish only the microphone (no camera/screen), subscribe to the agent,
@@ -47,6 +47,9 @@ class LiveKitClient:
                   "video": video, "metadata": metadata}
         if agent:
             claims["kind"] = "agent"
+        if dispatch_agent:
+            # LiveKit room configuration in the join token: the named agent is dispatched when this room is created.
+            claims["roomConfig"] = {"agents": [{"agentName": dispatch_agent, "metadata": metadata}]}
         return jwt.encode(claims, secret, algorithm="HS256")
 
     def http_url(self) -> str:

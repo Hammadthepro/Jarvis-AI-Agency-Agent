@@ -49,10 +49,22 @@ start_proc() {
   # The outer redirection detaches it from the caller's stdout, so callers (and Codespaces hooks) never block on it.
   ( exec 9>&-; cd "$dir" || exit 1; JARVIS_PROC="$name" exec setsid nohup "$@" >>"$LOG_DIR/$name.log" 2>&1 </dev/null ) >/dev/null 2>&1 &
   echo $! >"$RUN_DIR/$name.pid"
+  git -C "$ROOT" rev-parse HEAD >"$RUN_DIR/$name.rev" 2>/dev/null || true
   sleep 0.3
   pid="$(cat "$RUN_DIR/$name.pid")"
   kill -0 "$pid" 2>/dev/null || { tail -n 40 "$LOG_DIR/$name.log" >&2; die "$name exited immediately (log: .jarvis/logs/$name.log)"; }
   ok "$name started (pid $pid, log .jarvis/logs/$name.log)"
+}
+
+# Restart a running service that was started from different code (e.g. after git pull), so updates take effect.
+restart_if_stale() {
+  local name="$1" pid cur
+  pid="$(managed_pid "$name")"; [ -n "$pid" ] || return 0
+  cur="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+  if [ "$(cat "$RUN_DIR/$name.rev" 2>/dev/null || echo none)" != "$cur" ]; then
+    info "Code changed since $name started: restarting it"
+    stop_proc "$name"
+  fi
 }
 
 stop_proc() {

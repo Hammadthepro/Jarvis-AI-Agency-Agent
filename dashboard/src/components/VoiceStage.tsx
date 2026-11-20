@@ -4,7 +4,7 @@ import type { VoicePhase } from "../lib/voice";
 
 export const PHASE_LABEL: Record<VoicePhase, string> = {
   idle: "Ready when you are", requesting_mic: "Waiting for microphone permission…", mic_denied: "Microphone blocked",
-  connecting: "Connecting securely…", waiting_agent: "Waiting for JARVIS to join…", listening: "Listening",
+  connecting: "Connecting securely…", waiting_agent: "JARVIS is joining…", listening: "Listening",
   thinking: "Working on it…", speaking: "Speaking", reconnecting: "Connection lost. Reconnecting…", ended: "Session ended",
   not_ready: "Voice is not available yet", error: "Voice error",
 };

@@ -96,8 +96,21 @@ Voice and the text field on the JARVIS screen share one conversation per operato
   deploy a preview), status, findings, verified preview links and today's work.
 - **Starting anything needs your explicit yes.** The server checks that your latest message is a yes before it starts
   any work. Every Claude call is budget-gated.
-- **Without Claude**, or when it is unavailable or over budget, the deterministic command router answers, and the reply
-  is marked "basic mode".
+- **If Claude is unavailable** (not configured, disabled, over budget, or failing), the reply says "Claude unavailable"
+  with the real reason and does nothing else. The reason includes Anthropic's error type and request id, for example
+  `PaymentRequiredError HTTP 402 billing_error: ...` or `BadRequestError HTTP 400 invalid_request_error: Your credit
+  balance is too low...`. There is no silent fallback. The basic command parser runs only when you explicitly set
+  `JARVIS_CONVERSATION_AGENT=deterministic`, and its replies are labelled "basic parser".
+- **Test connection for Anthropic** checks every configured model, then sends one tiny real message with the fast model
+  (8 tokens maximum, budget-gated). CONNECTED therefore means messages and billing work, not just that the key exists.
+
+### Voice dispatch
+The agent registers with LiveKit as `jarvis` (`VOICE_AGENT_NAME`) using explicit dispatch, and each browser token minted
+by the API names that agent in its room configuration. LiveKit therefore sends exactly one JARVIS agent into each new
+room as soon as the browser joins. The VAD model is loaded when a job process is prepared, not while you wait.
+
+The browser shows "JARVIS is joining" until the agent has joined and published a live state. It waits up to 45 seconds;
+if the agent doesn't start in that time, it ends the room and explains what to check.
 
 ### Using it
 Open **Voice Agent** (or "Talk to JARVIS" in the Command Center), allow the microphone, and speak. You can interrupt

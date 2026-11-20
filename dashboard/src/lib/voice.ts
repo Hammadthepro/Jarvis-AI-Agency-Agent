@@ -11,6 +11,15 @@ export type VoiceStatus = {
   checks: Record<string, boolean>; missing: string[]; agent: { agent_id: string; last_seen_at: string } | null; token_ttl_s: number;
 };
 
+/** How long the browser waits for the JARVIS agent to join AND start its voice session. The first job on a small
+ *  machine can take well over 15 s (process start, model load); after this the room is ended and the user can retry. */
+export const AGENT_JOIN_TIMEOUT_MS = 45_000;
+
+/** Agent readiness from the participant's published state: joined but still initializing is not ready. */
+export function agentReady(state: string | undefined): boolean {
+  return state === "listening" || state === "thinking" || state === "speaking";
+}
+
 export type TranscriptLine = { id: string; who: "you" | "jarvis" | "system"; text: string; final: boolean; at: number };
 
 /** Maps the LiveKit agent's published state (participant attribute `lk.agent.state`) to the UI phase. */
@@ -133,6 +142,7 @@ export function useVoiceSession() {
       const room = new Room({ adaptiveStream: true, dynacast: true, disconnectOnPageLeave: true });
       roomRef.current = room;
       const isAgent = (p?: Participant) => Boolean(p && p.identity !== room.localParticipant.identity);
+      const agentState = () => [...room.remoteParticipants.values()].find((p) => isAgent(p))?.attributes["lk.agent.state"];
 
       room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
         if (track.kind === Track.Kind.Audio) {
@@ -145,7 +155,13 @@ export function useVoiceSession() {
         const ph = phaseFromAgentState(p.attributes["lk.agent.state"]);
         if (ph) setPhase(ph);
       });
-      room.on(RoomEvent.ParticipantConnected, (p: Participant) => { if (isAgent(p)) setPhase((cur) => (cur === "waiting_agent" ? "listening" : cur)); });
+      // Joining is not ready: stay in "waiting_agent" until the agent publishes listening/thinking/speaking.
+      room.on(RoomEvent.ParticipantConnected, (p: Participant) => {
+        if (isAgent(p)) { setDetail("JARVIS joined; starting its voice…"); const ph = phaseFromAgentState(p.attributes["lk.agent.state"]); if (ph && ph !== "waiting_agent") setPhase(ph); }
+      });
+      room.on(RoomEvent.ParticipantDisconnected, (p: Participant) => {
+        if (isAgent(p) && roomRef.current === room) { setPhase("error"); setDetail("The JARVIS voice agent left the room. Start a new session."); void end("error"); }
+      });
       room.on(RoomEvent.DataReceived, (payload: Uint8Array, _p?: Participant, _k?: unknown, topic?: string) => {
         if (topic !== "jarvis") return;
         const m = parseJarvisMessage(payload);
@@ -161,7 +177,7 @@ export function useVoiceSession() {
         upsert({ id, who, text, final: true, at: Date.now() });
       });
       room.on(RoomEvent.Reconnecting, () => setPhase("reconnecting"));
-      room.on(RoomEvent.Reconnected, () => setPhase("listening"));
+      room.on(RoomEvent.Reconnected, () => setPhase(phaseFromAgentState(agentState()) ?? "waiting_agent"));
       room.on(RoomEvent.Disconnected, () => {
         if (roomRef.current === room) { roomRef.current = null; teardownAudio(); setPhase("ended"); setDetail("The voice session ended."); }
       });
@@ -170,15 +186,16 @@ export function useVoiceSession() {
       await room.localParticipant.setMicrophoneEnabled(true);
       const pub = room.localParticipant.getTrackPublication(Track.Source.Microphone);
       if (pub?.track?.mediaStreamTrack) attachAnalyser("mic", pub.track.mediaStreamTrack);
-      const agentPresent = [...room.remoteParticipants.values()].some((p) => isAgent(p));
-      setPhase(agentPresent ? "listening" : "waiting_agent");
+      setPhase(agentReady(agentState()) ? phaseFromAgentState(agentState())! : "waiting_agent");
       if (room.state !== ConnectionState.Connected) setPhase("reconnecting");
       setTimeout(() => {
-        if (roomRef.current === room && ![...room.remoteParticipants.values()].some((p) => isAgent(p))) {
-          setPhase("error"); setDetail("The JARVIS voice agent did not join within 15 seconds. Check that the voice agent is running.");
-          void end("error");
-        }
-      }, 15000);
+        if (roomRef.current !== room || agentReady(agentState())) return;
+        const joined = [...room.remoteParticipants.values()].some((p) => isAgent(p));
+        setPhase("error");
+        setDetail(joined ? "JARVIS joined but its voice session did not start within 45 seconds (speech services unavailable?). Check scripts/dev-status.sh and .jarvis/logs/voice.log, then try again."
+          : "The JARVIS voice agent did not join within 45 seconds. Check that it is running (scripts/dev-status.sh), then try again.");
+        void end("error");
+      }, AGENT_JOIN_TIMEOUT_MS);
     } catch (e) {
       teardownAudio();
       if (e instanceof ApiError && e.status === 424) { setPhase("not_ready"); setDetail(String((e.details as { detail?: string }).detail ?? e.message)); }

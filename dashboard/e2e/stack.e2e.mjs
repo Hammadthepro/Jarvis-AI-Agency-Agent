@@ -12,11 +12,14 @@ const assert = (c, m) => { if (!c) { throw new Error("ASSERT: " + m); } };
 // 0) No sign-in: the dashboard opens directly to the Command Center (local development access mode).
 await page.goto(base);
 await page.getByLabel("Message JARVIS").waitFor();                       // voice-first JARVIS screen
-// A real text turn through the SAME conversation the voice agent uses. Without an Anthropic key here the
-// deterministic router answers and the reply is labelled "basic mode" (never a fake Claude answer).
+// A real text turn through the SAME conversation the voice agent uses. This environment has no Anthropic key, so the
+// honest result is an explicit provider failure: no silent basic-parser answer, nothing started.
+const unavailable = page.getByText(/Claude unavailable: Anthropic is not configured/);
+const before = await unavailable.count();
 await page.getByLabel("Message JARVIS").fill("Find 10 roofers in Denver, CO");
 await page.getByRole("button", { name: "Send" }).click();
-await page.getByText(/roofing businesses in Denver, CO/).first().waitFor({ timeout: 30000 });
+for (let i = 0; i < 60 && (await unavailable.count()) <= before; i++) await page.waitForTimeout(500);
+assert((await unavailable.count()) === before + 1, "the new reply must be an explicit 'Claude unavailable' failure");
 await page.screenshot({ path: `${out}/e2e-jarvis.png` });
 await page.goto(`${base}/commands`);
 await page.getByText("What should JARVIS work on?").waitFor();

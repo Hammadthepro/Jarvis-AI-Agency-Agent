@@ -117,6 +117,7 @@ out="$("$PY" -m jarvis.db.migrate status 2>&1)" || die "$out"
 ok "$out"
 
 # ---- 5. API --------------------------------------------------------------------------------------------------------
+for svc in api worker voice; do restart_if_stale "$svc"; done
 info "API"
 if [ "$RESTART_API" = 1 ] && [ -n "$(managed_pid api)" ]; then stop_proc api; fi
 if [ -z "$(managed_pid api)" ] && port_in_use "$API_PORT"; then die "port $API_PORT is used by a process not started by dev-up; stop it first"; fi

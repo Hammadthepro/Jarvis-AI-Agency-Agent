@@ -18,6 +18,9 @@ Credentials: LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET from the environ
 in the Integrations Center, fetched once at startup from the API's internal endpoint (internal network +
 VOICE_AGENT_SHARED_SECRET). The agent heartbeats to the API so the dashboard can report voice as OPERATIONAL.
 
+Dispatch: the agent registers as VOICE_AGENT_NAME (default "jarvis") with explicit dispatch; the API puts that name in
+each browser token's room configuration, so LiveKit dispatches exactly one JARVIS agent to each new room on join.
+
 Run: python apps/voice/agent.py start   (JARVIS_API_URL, VOICE_AGENT_SHARED_SECRET, optionally LIVEKIT_*)
 """
 
@@ -38,6 +41,9 @@ API = os.environ.get("JARVIS_API_URL", "http://api:8000")
 SECRET = os.environ.get("VOICE_AGENT_SHARED_SECRET", "")
 STT = os.environ.get("VOICE_STT_MODEL", "deepgram/nova-3")
 TTS = os.environ.get("VOICE_TTS_MODEL", "cartesia/sonic-2")
+# Explicit dispatch: the API names this agent in each browser token (roomConfig.agents), so every new JARVIS room gets
+# exactly one agent as soon as the browser joins. Automatic dispatch is not used.
+AGENT_NAME = os.environ.get("VOICE_AGENT_NAME", "jarvis")
 GREETING = "JARVIS here. What should I work on?"
 TURN_HANDLING = {"interruption": {"enabled": True}}   # barge-in: the operator can interrupt JARVIS mid-sentence
 VERSION = "2"
@@ -188,10 +194,15 @@ def start_heartbeat(interval_s: float = 30.0) -> threading.Event:
     return stop
 
 
+def prewarm(proc) -> None:
+    """Runs once per job process before any job: load the VAD model here, not while the user waits."""
+    from livekit.plugins import silero
+    proc.userdata["vad"] = silero.VAD.load()
+
+
 def build_worker():
     """Imports LiveKit only when running the agent (keeps TurnHandler testable without it)."""
     from livekit.agents import Agent, AgentSession, JobContext, RoomInputOptions, WorkerOptions
-    from livekit.plugins import silero
 
     class JarvisVoice(Agent):
         def __init__(self, turns: TurnHandler) -> None:
@@ -216,7 +227,11 @@ def build_worker():
             await ctx.room.local_participant.publish_data(json.dumps({"type": kind, "text": text, "final": True}).encode(),
                                                           reliable=True, topic="jarvis")
 
-        session = AgentSession(stt=STT, tts=TTS, vad=silero.VAD.load(), turn_handling=TURN_HANDLING)
+        vad = ctx.proc.userdata.get("vad")
+        if vad is None:                                   # prewarm did not run (e.g. a custom launcher): load now
+            from livekit.plugins import silero
+            vad = silero.VAD.load()
+        session = AgentSession(stt=STT, tts=TTS, vad=vad, turn_handling=TURN_HANDLING)
 
         async def speak(text: str) -> None:
             session.say(text, allow_interruptions=True)
@@ -236,7 +251,7 @@ def build_worker():
                             room_input_options=RoomInputOptions(participant_identity=participant.identity, close_on_disconnect=True))
         await session.say(GREETING, allow_interruptions=True)
 
-    return WorkerOptions(entrypoint_fnc=entrypoint)
+    return WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm, agent_name=AGENT_NAME)
 
 
 if __name__ == "__main__":

@@ -454,7 +454,8 @@ async def voice_token(request: Request, me: Principal = CurrentPrincipal):
         return JSONResponse({"state": "NOT_CONFIGURED", "detail": _missing("livekit")}, status_code=424)
     room = f"jarvis-{me.workspace_id}-{uuid.uuid4().hex[:8]}"
     meta = json.dumps({"workspace_id": str(me.workspace_id), "user_id": str(me.user_id)})
-    tok = lk.token(identity=f"user-{me.user_id}", name=me.email or "operator", room=room, ttl_s=VOICE_TOKEN_TTL_S, metadata=meta)
+    tok = lk.token(identity=f"user-{me.user_id}", name=me.email or "operator", room=room, ttl_s=VOICE_TOKEN_TTL_S, metadata=meta,
+                   dispatch_agent=request.app.state.settings.voice_agent_name)
     await request.app.state.db.execute("""insert into audit_logs(workspace_id, actor_type, actor_id, action, entity_type, entity_id)
                                           values ($1,'user',$2,'voice.session_started','livekit_room',$3)""", me.workspace_id, str(me.user_id), room)
     return {"url": lk.settings.livekit_url, "token": tok, "room": room, "expires_in_s": VOICE_TOKEN_TTL_S}

@@ -11,11 +11,12 @@ import { ErrorState } from "../components/ui";
 import { IconMic, IconMicOff, IconPhoneOff, IconStop } from "../components/icons";
 
 export type ConversationMessage = { id: number; role: "user" | "assistant"; channel: "text" | "voice"; content: string;
-  meta: { kind?: string; agent?: string; notice?: string; campaign_id?: string; tools?: string[] }; created_at: string };
+  meta: { kind?: string; agent?: string; notice?: string; campaign_id?: string; tools?: string[];
+    provider_error?: { state?: string; http_status?: number; error_type?: string; request_id?: string } }; created_at: string };
 export const turnSchema = z.string().trim().min(1, "Say or type something for JARVIS").max(2000);
 
 const VOICE_TO_ORB: Partial<Record<VoicePhase, OrbMode>> = {
-  listening: "listening", thinking: "thinking", speaking: "speaking", connecting: "connecting", waiting_agent: "connecting",
+  listening: "listening", thinking: "thinking", speaking: "speaking", connecting: "connecting", waiting_agent: "joining",
   requesting_mic: "connecting", reconnecting: "connecting", error: "error", mic_denied: "error", not_ready: "unavailable",
 };
 
@@ -124,10 +125,11 @@ function Bubble({ m }: { m: ConversationMessage }) {
   const you = m.role === "user";
   return (
     <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
-      className={`max-w-[85%] rounded-2xl px-4 py-2 text-sm ${you ? "ml-auto bg-arc-500/10 text-ink-100" : "mr-auto border border-arc-700/30 bg-ink-900/80 text-ink-100"}`}>
+      className={`max-w-[85%] rounded-2xl px-4 py-2 text-sm ${you ? "ml-auto bg-arc-500/10 text-ink-100" : m.meta?.kind === "provider_error" ? "mr-auto border border-bad-500/40 bg-bad-500/10 text-ink-100" : "mr-auto border border-arc-700/30 bg-ink-900/80 text-ink-100"}`}>
       <div className="mb-0.5 flex items-center gap-2 text-[10px] uppercase tracking-wider text-ink-500">
         <span>{you ? "You" : "JARVIS"}</span><span>{m.channel === "voice" ? "voice" : "text"}</span>
-        {!you && m.meta?.agent === "deterministic" && <span title="Claude unavailable: basic command parser">basic mode</span>}
+        {!you && (m.meta?.agent === "basic_parser" || m.meta?.agent === "deterministic") && <span title="Configured to use the basic command parser, not Claude">basic parser</span>}
+        {!you && m.meta?.kind === "provider_error" && <span className="text-bad-500">Claude unavailable{m.meta.provider_error?.state ? ` · ${m.meta.provider_error.state}` : ""}</span>}
       </div>
       <div className="whitespace-pre-wrap leading-relaxed">{m.content}</div>
       {m.meta?.notice && <div className="mt-1 text-[11px] text-warn-500">{m.meta.notice}</div>}

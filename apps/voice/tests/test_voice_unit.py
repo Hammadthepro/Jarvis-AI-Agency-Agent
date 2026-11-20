@@ -139,3 +139,28 @@ def test_heartbeat_reports_failure_honestly():
     bad = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(401)))
     assert agent.heartbeat_once(ok, "http://api", "s") is True
     assert agent.heartbeat_once(bad, "http://api", "s") is False
+
+
+def test_worker_uses_explicit_dispatch_and_prewarm(monkeypatch):
+    monkeypatch.setenv("LIVEKIT_URL", "wss://example.livekit.cloud")
+    monkeypatch.setenv("LIVEKIT_API_KEY", "k")
+    monkeypatch.setenv("LIVEKIT_API_SECRET", "s")
+    opts = agent.build_worker()
+    assert opts.agent_name == "jarvis" == agent.AGENT_NAME            # must match the API's VOICE_AGENT_NAME
+    assert opts.prewarm_fnc is agent.prewarm
+
+
+def test_prewarm_loads_vad_before_any_job():
+    proc = SimpleNamespace(userdata={})
+    agent.prewarm(proc)
+    assert proc.userdata["vad"] is not None
+
+
+@pytest.mark.asyncio
+async def test_plugins_outside_a_job_need_the_sdk_http_context():
+    """The live test's speech synthesis runs outside a job; the SDK requires http_context.open() there."""
+    from livekit.agents.utils import http_context
+    with pytest.raises(RuntimeError, match="outside of a job context"):
+        http_context.http_session()
+    async with http_context.open():
+        assert http_context.http_session() is not None

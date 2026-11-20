@@ -37,18 +37,25 @@ AGENT = Path(__file__).resolve().parents[1] / "agent.py"
 def token(identity: str, room: str, metadata: dict) -> str:
     from livekit import api
     return (api.AccessToken(os.environ["LIVEKIT_API_KEY"], os.environ["LIVEKIT_API_SECRET"]).with_identity(identity)
-            .with_metadata(json.dumps(metadata)).with_grants(api.VideoGrants(room_join=True, room=room)).to_jwt())
+            .with_metadata(json.dumps(metadata)).with_grants(api.VideoGrants(room_join=True, room=room))
+            # explicit dispatch, exactly like the JARVIS API's browser tokens
+            .with_room_config(api.RoomConfiguration(agents=[api.RoomAgentDispatch(agent_name=os.environ.get("VOICE_AGENT_NAME", "jarvis"))]))
+            .to_jwt())
 
 
 async def speak_into(room, text: str) -> None:
+    """Plays synthesized speech into the room as the user's microphone. This runs in the TEST process, outside any
+    agent job, so the plugin's HTTP session is opened explicitly with the SDK's supported context manager."""
     from livekit import rtc
     from livekit.agents import inference
+    from livekit.agents.utils import http_context
     source = rtc.AudioSource(24000, 1)
     track = rtc.LocalAudioTrack.create_audio_track("mic", source)
     await room.local_participant.publish_track(track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE))
-    tts = inference.TTS(model=os.environ.get("VOICE_TTS_MODEL", "cartesia/sonic-2"), sample_rate=24000)
-    async for chunk in tts.synthesize(text):
-        await source.capture_frame(chunk.frame)
+    async with http_context.open():
+        tts = inference.TTS(model=os.environ.get("VOICE_TTS_MODEL", "cartesia/sonic-2"), sample_rate=24000)
+        async for chunk in tts.synthesize(text):
+            await source.capture_frame(chunk.frame)
     silence = rtc.AudioFrame.create(24000, 1, 2400)
     for _ in range(20):                       # trailing silence so endpointing closes the turn
         await source.capture_frame(silence)
@@ -57,11 +64,16 @@ async def speak_into(room, text: str) -> None:
 async def session(identity: str, room_name: str, *, speak: str | None, expect_agent: bool, timeout: float = 60) -> dict:
     from livekit import rtc
     room = rtc.Room()
-    got: dict = {"messages": [], "audio_frames": 0}
+    got: dict = {"messages": [], "audio_frames": 0, "frames_after_reply": 0, "agent_joined_s": None}
+    t0 = time.monotonic()
 
     def on_data(pkt: rtc.DataPacket) -> None:
         if pkt.topic == "jarvis":
             got["messages"].append(json.loads(pkt.data.decode()))
+
+    def on_join(p) -> None:
+        if got["agent_joined_s"] is None and not p.identity.startswith("user-"):
+            got["agent_joined_s"] = round(time.monotonic() - t0, 1)
 
     def on_track(track, _pub, _p) -> None:
         if track.kind == rtc.TrackKind.KIND_AUDIO:
@@ -69,9 +81,12 @@ async def session(identity: str, room_name: str, *, speak: str | None, expect_ag
                 async for ev in rtc.AudioStream(track):
                     if any(ev.frame.data):
                         got["audio_frames"] += 1
+                        if any(m["type"] == "status" for m in got["messages"]):
+                            got["frames_after_reply"] += 1
             asyncio.ensure_future(pump())
     room.on("data_received", on_data)
     room.on("track_subscribed", on_track)
+    room.on("participant_connected", on_join)
     await room.connect(os.environ["LIVEKIT_URL"], token(identity, room_name, {"workspace_id": os.environ["JARVIS_LIVE_WORKSPACE_ID"]}))
     try:
         deadline = time.monotonic() + timeout
@@ -80,6 +95,9 @@ async def session(identity: str, room_name: str, *, speak: str | None, expect_ag
         if speak:
             await speak_into(room, speak)
             while time.monotonic() < deadline and not any(m["type"] == "status" for m in got["messages"]):
+                await asyncio.sleep(0.5)
+            settle = time.monotonic() + 15                  # give JARVIS time to speak the reply
+            while time.monotonic() < settle and got["frames_after_reply"] < 50:
                 await asyncio.sleep(0.5)
         if not expect_agent:
             await asyncio.sleep(10)
@@ -90,6 +108,9 @@ async def session(identity: str, room_name: str, *, speak: str | None, expect_ag
 
 @pytest.fixture(scope="module")
 def agent_worker():
+    if os.environ.get("JARVIS_LIVE_USE_RUNNING_AGENT") == "1":   # verify the managed production agent itself
+        yield None
+        return
     proc = subprocess.Popen([sys.executable, str(AGENT), "dev"], env=os.environ.copy(), stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True)
     time.sleep(8)
@@ -111,8 +132,12 @@ async def test_spoken_command_round_trip_and_reconnect(agent_worker):
     got = await session(ident, f"jarvis-live-{uuid.uuid4().hex[:8]}", speak="Find ten roofers in Denver", expect_agent=True)
     transcripts = [m["text"].lower() for m in got["messages"] if m["type"] == "transcript"]
     statuses = [m["text"] for m in got["messages"] if m["type"] == "status"]
-    assert any("roof" in t and "denver" in t for t in transcripts), got["messages"]
-    assert statuses and ("roofing" in statuses[-1].lower() or "denver" in statuses[-1].lower()), statuses
-    assert got["audio_frames"] > 0                                     # JARVIS spoke (greeting and reply)
+    replies = [json.loads(m["text"]) for m in got["messages"] if m["type"] == "reply"]
+    print("agent joined after", got["agent_joined_s"], "s; transcript:", transcripts, "; reply:", statuses[-1:] if statuses else None)
+    assert got["agent_joined_s"] is not None, "the JARVIS agent never joined the room"
+    assert any("roof" in t and "denver" in t for t in transcripts), got["messages"]          # speech was transcribed
+    assert statuses, "no reply from JARVIS"
+    assert all(r.get("kind") != "provider_error" for r in replies), f"Claude failed: {statuses[-1]}"
+    assert got["frames_after_reply"] > 0, "JARVIS's reply was not heard (no audio after the reply)"   # TTS published
     again = await session(ident, f"jarvis-live-{uuid.uuid4().hex[:8]}", speak=None, expect_agent=True)
     assert again["audio_frames"] > 0                                   # a new session after disconnect works

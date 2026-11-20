@@ -190,6 +190,9 @@ Safeguards:
     address.
 
 ## 9. After pulling new code
+`scripts/dev-up.sh` restarts the API, worker and voice agent automatically when they were started from an older commit.
+The dashboard hot-reloads.
+
 
 ```bash
 scripts/dev-up.sh
