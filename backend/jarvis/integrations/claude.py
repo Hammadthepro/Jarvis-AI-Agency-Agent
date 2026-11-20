@@ -7,10 +7,12 @@ max_tokens before each call; actual cost is committed from `response.usage`."""
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
 import anthropic
+import structlog
 
 from jarvis.config import Settings
 from jarvis.core import budget
@@ -18,6 +20,7 @@ from jarvis.core.errors import IntegrationState, ProviderError, not_configured
 from jarvis.integrations.base import CallContext, CallOutcome, gateway_call
 
 PROVIDER = "anthropic"
+log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -28,26 +31,56 @@ class ClaudeResult:
     tokens_out: int
 
 
+_KEYLIKE = re.compile(r"sk-ant-[A-Za-z0-9_\-]+")
+_BILLING_CLASSES = tuple(getattr(anthropic, n) for n in (
+    "PaymentRequiredError", "OrganizationOnHoldError", "EnforcedSpendLimitReachedError", "ContractSpendLimitReachedError",
+    "LinkedOrganizationSpendLimitReachedError", "LinkedOrganizationBillingUnavailableError") if hasattr(anthropic, n))
+
+
+def error_info(exc: Exception) -> dict[str, Any]:
+    """Safe, structured description of an Anthropic failure (never contains the API key)."""
+    body = getattr(exc, "body", None)
+    err = body.get("error") if isinstance(body, dict) and isinstance(body.get("error"), dict) else {}
+    msg = err.get("message") or getattr(exc, "message", None) or str(exc)
+    return {"exception": type(exc).__name__, "http_status": getattr(exc, "status_code", None), "error_type": err.get("type"),
+            "message": _KEYLIKE.sub("sk-ant-***", str(msg))[:400], "request_id": getattr(exc, "request_id", None)}
+
+
 def _map(exc: Exception) -> ProviderError:
+    """Keeps Anthropic's distinctions (authentication, billing, permission, model access, invalid request, rate limit,
+    overload/server, timeout) instead of one generic error, and logs them without secrets."""
+    info = error_info(exc)
+    low = info["message"].lower()
+    reason = (f"{info['exception']}" + (f" HTTP {info['http_status']}" if info["http_status"] else "")
+              + (f" {info['error_type']}" if info["error_type"] else "") + f": {info['message']}"
+              + (f" (request id {info['request_id']})" if info["request_id"] else ""))
+    log.warning("anthropic.error", **info)
+    code = info["http_status"]
+    S = IntegrationState
     if isinstance(exc, anthropic.AuthenticationError):
-        return ProviderError(PROVIDER, IntegrationState.INVALID_CREDENTIALS, str(exc), http_status=401)
-    if isinstance(exc, anthropic.PermissionDeniedError):
-        return ProviderError(PROVIDER, IntegrationState.PERMISSION_DENIED, str(exc), http_status=403)
-    if isinstance(exc, anthropic.RateLimitError):
-        return ProviderError(PROVIDER, IntegrationState.RATE_LIMITED, str(exc), http_status=429, retryable=True)
-    if isinstance(exc, anthropic.APITimeoutError):
-        return ProviderError(PROVIDER, IntegrationState.TEMPORARILY_UNAVAILABLE, "timeout; billing outcome unknown",
-                             billing_ambiguous=True)
-    if isinstance(exc, anthropic.APIConnectionError):
-        return ProviderError(PROVIDER, IntegrationState.TEMPORARILY_UNAVAILABLE, str(exc), retryable=True,
-                             billing_ambiguous=True)
-    if isinstance(exc, anthropic.NotFoundError):
-        return ProviderError(PROVIDER, IntegrationState.PROVIDER_ERROR, f"model or resource not found: {exc}", http_status=404)
-    if isinstance(exc, anthropic.APIStatusError):
-        code = exc.status_code
-        state = IntegrationState.TEMPORARILY_UNAVAILABLE if code in (500, 529, 503) else IntegrationState.PROVIDER_ERROR
-        return ProviderError(PROVIDER, state, str(exc), http_status=code, retryable=code >= 500)
-    return ProviderError(PROVIDER, IntegrationState.PROVIDER_ERROR, str(exc))
+        state, retry = S.INVALID_CREDENTIALS, False
+    elif isinstance(exc, _BILLING_CLASSES) or info["error_type"] == "billing_error" or "credit balance" in low or "billing" in low:
+        state, retry = S.QUOTA_EXCEEDED, False
+    elif isinstance(exc, anthropic.PermissionDeniedError):
+        state, retry = S.PERMISSION_DENIED, False
+    elif isinstance(exc, anthropic.RateLimitError):
+        state, retry = S.RATE_LIMITED, True
+    elif isinstance(exc, anthropic.APITimeoutError):
+        return ProviderError(PROVIDER, S.TEMPORARILY_UNAVAILABLE, f"{reason}; billing outcome unknown", billing_ambiguous=True,
+                             details=info)
+    elif isinstance(exc, anthropic.APIConnectionError):
+        return ProviderError(PROVIDER, S.TEMPORARILY_UNAVAILABLE, reason, retryable=True, billing_ambiguous=True, details=info)
+    elif isinstance(exc, anthropic.NotFoundError):
+        state, retry = S.PROVIDER_ERROR, False
+        reason = "model not available to this API key or not found. " + reason
+    elif isinstance(exc, anthropic.APIStatusError) and (code or 0) >= 500:
+        state, retry = S.TEMPORARILY_UNAVAILABLE, True
+    elif isinstance(exc, anthropic.BadRequestError):
+        state, retry = S.PROVIDER_ERROR, False
+        reason = "invalid request. " + reason
+    else:
+        state, retry = S.PROVIDER_ERROR, False
+    return ProviderError(PROVIDER, state, reason, http_status=code, retryable=retry, details=info)
 
 
 @dataclass(frozen=True)
@@ -135,8 +168,11 @@ class ClaudeClient:
         client = self.client()
 
         async def do() -> CallOutcome:
+            kw: dict[str, Any] = {"model": model, "max_tokens": max_tokens, "system": system, "messages": messages}
+            if tools:
+                kw["tools"] = tools
             try:
-                msg = await client.messages.create(model=model, max_tokens=max_tokens, system=system, messages=messages, tools=tools)
+                msg = await client.messages.create(**kw)
             except Exception as exc:
                 raise _map(exc) from exc
             if msg.stop_reason == "refusal":
@@ -155,3 +191,15 @@ class ClaudeClient:
         return await gateway_call(ctx, provider=PROVIDER, operation=operation, unit="usd_micros", units=est_in + max_tokens,
                                   estimated_micros=worst, fn=do)
 
+
+    async def ping(self, ctx: CallContext, *, model: str) -> dict:
+        """One minimal real message (a few tokens, budget-gated): proves the key, its organization's billing and access
+        to `model`. Model listing alone does not prove the account can be billed."""
+        return await self.converse_text(ctx, model=model, prompt="Reply with the single word: ready", max_tokens=8,
+                                        operation="integration.test")
+
+    async def converse_text(self, ctx: CallContext, *, model: str, prompt: str, max_tokens: int, operation: str) -> dict:
+        res = await self.converse(ctx, model=model, system="You are a connectivity check.", messages=[{"role": "user", "content": prompt}],
+                                  tools=[], max_tokens=max_tokens, operation=operation)
+        text = " ".join(b["text"] for b in res.content if b["type"] == "text").strip()
+        return {"model": res.model, "reply": text[:40], "stop_reason": res.stop_reason}

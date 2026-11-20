@@ -198,31 +198,44 @@ async def _store(db, me: Principal, role: str, channel: str, content: str, meta:
 
 
 async def handle_turn(request: Request, me: Principal, text: str, channel: str) -> dict:
-    """One turn of the single JARVIS conversation. Claude with tools when Anthropic is available; otherwise (or if the
-    model is unavailable or over budget) the deterministic router. Both use the same command system and memory."""
+    """One turn of the single JARVIS conversation (voice and text alike).
+
+    Mode "auto"/"claude": Claude with tools. If Claude is not configured or the call fails, the reply says so plainly
+    (`kind: provider_error`, with the sanitized provider reason) and NOTHING else happens: there is no silent switch to
+    another agent. Mode "deterministic" (explicit setting) uses the basic command parser, labelled as such."""
     from jarvis.api.conversation_agent import claude_available, claude_turn
     from jarvis.core.errors import BudgetBlocked, ProviderError
+    from jarvis.core.integrations import DISABLED
     db = request.app.state.db
+    s = request.app.state.deps.settings
     await _store(db, me, "user", channel, text)
-    out: dict | None = None
-    note = None
-    if claude_available(request):
+    if s.jarvis_conversation_agent == "deterministic":
+        out = await deterministic_turn(request, me, text, channel)
+        out["agent"] = "basic_parser"
+    elif not claude_available(request):
+        why = "Anthropic is disabled in Integrations" if "anthropic" in DISABLED else \
+            "Anthropic is not configured (Integrations > Anthropic)"
+        out = _provider_failure(f"Claude unavailable: {why}.", {"state": "DISABLED" if "anthropic" in DISABLED else "NOT_CONFIGURED"})
+    else:
         try:
             out = await claude_turn(request, me, text, channel)
         except BudgetBlocked as exc:
-            note = f"Claude budget limit reached ({exc.message}); using the basic command parser."
+            out = _provider_failure(f"Claude unavailable: the Anthropic budget limit was reached ({exc.message}).",
+                                    {"state": "BUDGET_BLOCKED"})
         except ProviderError as exc:
-            note = f"Claude unavailable ({exc.state.value}); using the basic command parser."
-    if out is None:
-        out = await deterministic_turn(request, me, text, channel)
-        out["agent"] = "deterministic"
-        if note:
-            out["notice"] = note
-    meta = {k: out.get(k) for k in ("kind", "command_id", "campaign_id", "agent", "notice") if out.get(k)}
+            out = _provider_failure(f"Claude unavailable: {getattr(exc, 'reason', exc.message)}",
+                                    {"state": exc.state.value, **{k: v for k, v in (exc.details or {}).items()
+                                                                  if k in ("exception", "http_status", "error_type", "request_id")}})
+    meta = {k: out.get(k) for k in ("kind", "command_id", "campaign_id", "agent", "provider_error") if out.get(k)}
     meta.update({k: v for k, v in (out.get("meta") or {}).items() if k in ("tools", "agent")})
     await _store(db, me, "assistant", channel, out.get("say") or "", meta)
     out.pop("meta", None)
     return out
+
+
+def _provider_failure(reason: str, info: dict) -> dict:
+    return {"kind": "provider_error", "agent": "claude", "provider_error": info,
+            "say": f"{reason} I haven't done anything with that request. Ask again once it's fixed."}
 
 
 @router.get("/conversation/messages")

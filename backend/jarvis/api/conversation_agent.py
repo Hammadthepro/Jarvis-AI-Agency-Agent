@@ -117,7 +117,8 @@ class Turn:
     async def history(self) -> list[dict]:
         rows = await self.db.fetch("""select role, content from conversation_messages where workspace_id=$1 and user_id=$2
                                       order by id desc limit $3""", self.me.workspace_id, self.me.user_id, HISTORY + 1)
-        msgs = [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+        # Empty contents are rejected by the Messages API, so they are never replayed.
+        msgs = [{"role": r["role"], "content": r["content"]} for r in reversed(rows) if (r["content"] or "").strip()]
         if msgs and msgs[-1]["role"] == "user" and msgs[-1]["content"] == self.text:
             msgs = msgs[:-1]                      # the current message is appended separately
         while msgs and msgs[0]["role"] != "user":
@@ -334,7 +335,8 @@ class Turn:
         final = ""
         for _ in range(MAX_STEPS):
             res = await self.deps.claude.converse(ctx, model=model, system=system, messages=messages, tools=TOOLS, max_tokens=700)
-            messages.append({"role": "assistant", "content": res.content})
+            content = [b for b in res.content if b["type"] != "text" or b["text"].strip()]   # no empty text blocks
+            messages.append({"role": "assistant", "content": content or [{"type": "text", "text": "(no reply)"}]})
             uses = [b for b in res.content if b["type"] == "tool_use"]
             final = " ".join(b["text"] for b in res.content if b["type"] == "text").strip()
             if not uses:

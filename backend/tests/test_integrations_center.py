@@ -297,3 +297,43 @@ async def test_stale_usage_hidden_and_refreshed_after_successful_test(center, de
     assert (await center.post("/integrations/serp_api/test", headers=a["headers"])).json()["state"] == "CONNECTED"
     u = cards(await center.get("/integrations", headers=a["headers"]))["serp_api"]["usage"]
     assert u["status"] == "ok" and u["reported_units"] == 50                                             # real usage, now
+
+
+def anthropic_sdk(on_messages):
+    import anthropic
+    import httpx2
+
+    def handler(req):
+        if req.url.path.startswith("/v1/models/"):
+            return httpx2.Response(200, json={"id": req.url.path.rsplit("/", 1)[1], "type": "model", "display_name": "x",
+                                              "created_at": "2026-01-01T00:00:00Z"})
+        return on_messages(req)
+    return anthropic.AsyncAnthropic(api_key="sk-ant-x", max_retries=0, http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)))
+
+
+async def test_anthropic_test_connection_sends_one_real_message(center, deps, db):
+    import httpx2
+    a = await login(center, ADMIN)
+    sent = []
+
+    def ok(req):
+        sent.append(json.loads(req.content))
+        return httpx2.Response(200, json={"id": "msg_1", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+                                          "content": [{"type": "text", "text": "ready"}], "stop_reason": "end_turn",
+                                          "stop_sequence": None, "usage": {"input_tokens": 12, "output_tokens": 2}})
+    deps.claude._client = anthropic_sdk(ok)
+    r = (await center.post("/integrations/anthropic/test", headers=a["headers"])).json()
+    assert r["state"] == "CONNECTED" and r["result"]["message_test"]["reply"] == "ready"
+    assert len(sent) == 1 and sent[0]["model"] == "claude-haiku-5-5" and sent[0]["max_tokens"] == 8      # one tiny message
+    assert await db.fetchval("select count(*) from usage_events where provider='anthropic' and operation='integration.test'") >= 1
+
+
+async def test_anthropic_test_connection_reports_billing_not_connected(center, deps):
+    import httpx2
+    a = await login(center, ADMIN)
+    deps.claude._client = anthropic_sdk(lambda req: httpx2.Response(
+        400, json={"type": "error", "error": {"type": "invalid_request_error",
+                                              "message": "Your credit balance is too low to access the Anthropic API."}},
+        headers={"request-id": "req_bill_1"}))
+    r = (await center.post("/integrations/anthropic/test", headers=a["headers"])).json()
+    assert r["state"] == "QUOTA_EXCEEDED" and "credit balance is too low" in r["detail"] and "req_bill_1" in r["detail"]

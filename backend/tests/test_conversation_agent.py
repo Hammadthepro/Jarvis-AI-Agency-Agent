@@ -106,12 +106,13 @@ async def test_places_restriction_is_explained_not_bypassed(client, agent, web):
     assert "restricted" in r["say"]
 
 
-async def test_budget_block_falls_back_honestly(client, agent, db):
+async def test_budget_block_is_reported_not_hidden(client, agent, db):
     a = await login(client, "budget@agent.dev")
     await db.execute("update budget_limits set cap=0 where workspace_id=$1 and provider='anthropic'", a["me"]["workspace_id"])
     r = await turn(client, a, "Find 10 roofers in Denver, CO")
-    assert r["agent"] == "deterministic" and "budget" in r["notice"] and "roofing" in r["say"]
+    assert r["kind"] == "provider_error" and "budget limit" in r["say"] and "haven't done anything" in r["say"]
     assert agent.seen == []                                                             # Claude was not called
+    assert await db.fetchval("select count(*) from commands where workspace_id=$1", a["me"]["workspace_id"]) == 0  # no silent parser
 
 
 async def test_previews_only_verified_and_today_counts_are_real(client, agent, db):
@@ -140,3 +141,94 @@ async def test_research_text_is_fenced_as_untrusted(client, agent, db):
     f = agent.tool_results()[0]
     assert f["verified_facts"][0]["value"].startswith("<untrusted_data>")
     _ = new_ws
+
+
+# ---------------------------------------------------------------- real SDK error shapes (anthropic 2.x over a mock transport)
+def real_client(status: int, body: dict):
+    import anthropic
+    import httpx2
+
+    def handler(req):
+        AUTH_SEEN.append(req.headers.get("authorization"))                    # the decrypted key reaches the SDK request
+        return httpx2.Response(status, json=body, headers={"request-id": "req_test_123"})
+    return anthropic.AsyncAnthropic(api_key="sk-ant-api03-SECRETVALUE", max_retries=0,
+                                    http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)))
+
+
+AUTH_SEEN: list = []
+ERR = lambda t, m: {"type": "error", "error": {"type": t, "message": m}}  # noqa: E731
+
+
+@pytest.mark.parametrize("status,body,state,fragment", [
+    (400, ERR("invalid_request_error", "Your credit balance is too low to access the Anthropic API."), "QUOTA_EXCEEDED", "credit balance"),
+    (402, ERR("billing_error", "Credit balance too low"), "QUOTA_EXCEEDED", "billing_error"),
+    (401, ERR("authentication_error", "invalid x-api-key"), "INVALID_CREDENTIALS", "authentication_error"),
+    (403, ERR("permission_error", "Your API key does not have permission"), "PERMISSION_DENIED", "permission_error"),
+    (404, ERR("not_found_error", "model: claude-haiku-5-5"), "PROVIDER_ERROR", "model not available"),
+    (429, ERR("rate_limit_error", "Number of requests exceeded"), "RATE_LIMITED", "rate_limit_error"),
+    (529, ERR("overloaded_error", "Overloaded"), "TEMPORARILY_UNAVAILABLE", "overloaded_error"),
+    (400, ERR("invalid_request_error", "messages: text content blocks must be non-empty"), "PROVIDER_ERROR", "invalid request"),
+])
+async def test_anthropic_errors_keep_their_meaning(client, agent, db, deps, status, body, state, fragment):
+    deps.claude._client = real_client(status, body)
+    a = await login(client, f"err{status}{state}@agent.dev")
+    r = await turn(client, a, "What have you completed today?")
+    assert r["kind"] == "provider_error" and r["agent"] == "claude"
+    pe = r["provider_error"]
+    assert pe["state"] == state and pe["http_status"] == status and pe["request_id"] == "req_test_123"
+    assert fragment in r["say"] and "SECRETVALUE" not in r["say"] and "haven't done anything" in r["say"]
+    assert AUTH_SEEN[-1] == "Bearer sk-ant-api03-SECRETVALUE"
+    assert await db.fetchval("select count(*) from commands where workspace_id=$1", a["me"]["workspace_id"]) == 0
+    stored = await db.fetchrow("select content, meta from conversation_messages where workspace_id=$1 and role='assistant'",
+                               a["me"]["workspace_id"])
+    assert stored["meta"]["kind"] == "provider_error" and stored["meta"]["provider_error"]["state"] == state
+
+
+async def test_timeout_is_reported_as_unavailable(client, agent, deps):
+    import anthropic
+    import httpx2
+
+    def handler(req):
+        raise httpx2.ReadTimeout("timed out", request=req)
+    deps.claude._client = anthropic.AsyncAnthropic(api_key="sk-ant-x", max_retries=0,
+                                                   http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)))
+    a = await login(client, "timeout@agent.dev")
+    r = await turn(client, a, "status?")
+    assert r["kind"] == "provider_error" and r["provider_error"]["state"] == "TEMPORARILY_UNAVAILABLE"
+    assert "billing outcome unknown" in r["say"]
+
+
+async def test_not_configured_says_so_instead_of_switching_agent(client, agent, deps, db):
+    deps.claude._client = None
+    deps.claude.settings = deps.claude.settings.model_copy(update={"anthropic_api_key": None})
+    a = await login(client, "nokey@agent.dev")
+    r = await turn(client, a, "Find 10 roofers in Denver, CO")
+    assert r["kind"] == "provider_error" and "not configured" in r["say"] and r["provider_error"]["state"] == "NOT_CONFIGURED"
+    assert await db.fetchval("select count(*) from commands where workspace_id=$1", a["me"]["workspace_id"]) == 0
+
+
+async def test_success_through_the_real_sdk_and_multi_turn_context(client, agent, deps, db):
+    """A real SDK request/response cycle (mock transport): the reply text is Claude's, and turn 2 carries turn 1."""
+    import anthropic
+    import httpx2
+    sent = []
+
+    def handler(req):
+        sent.append(json.loads(req.content))
+        n = len(sent)
+        return httpx2.Response(200, json={"id": f"msg_{n}", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+                                          "content": [{"type": "text", "text": f"Answer {n} from Claude."}],
+                                          "stop_reason": "end_turn", "stop_sequence": None,
+                                          "usage": {"input_tokens": 50, "output_tokens": 6}})
+    deps.claude._client = anthropic.AsyncAnthropic(api_key="sk-ant-x", max_retries=0,
+                                                   http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)))
+    a = await login(client, "multi@agent.dev")
+    r1 = await turn(client, a, "Hello Jarvis", channel="voice")
+    r2 = await turn(client, a, "And what did I just say?", channel="text")
+    assert r1["say"] == "Answer 1 from Claude." and r2["say"] == "Answer 2 from Claude." and r2["kind"] == "reply"
+    assert sent[0]["model"] == "claude-haiku-5-5" and sent[0]["max_tokens"] == 700 and sent[0]["tools"]
+    assert [m["role"] for m in sent[1]["messages"]] == ["user", "assistant", "user"]       # context carried across channels
+    assert sent[1]["messages"][0]["content"] == "Hello Jarvis"
+    rows = await db.fetch("select meta from conversation_messages where workspace_id=$1 and role='assistant' order by id",
+                          a["me"]["workspace_id"])
+    assert all(r["meta"].get("agent") == "claude" for r in rows)

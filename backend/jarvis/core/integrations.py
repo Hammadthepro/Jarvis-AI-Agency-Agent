@@ -312,9 +312,12 @@ async def validate(provider: str, deps, livekit, db, workspace_id) -> tuple[dict
     """Calls the real provider (free endpoints only). Returns (result, quota). Raises ProviderError."""
     s = deps.settings
     if provider == "anthropic":
+        from jarvis.integrations.base import CallContext
         models = {s.claude_model_fast, s.claude_model_build, s.claude_model_escalation}
         res = {m: await deps.claude.validate_model(m) for m in sorted(models)}
-        return {"models": sorted(models), "validated": res}, None
+        # One tiny real message with the fast model: proves billing/credit and message access, not just the key.
+        msg = await deps.claude.ping(CallContext(db, workspace_id), model=s.claude_model_fast)
+        return {"models": sorted(models), "validated": res, "message_test": msg}, None
     if provider == "serp_api":
         acct = await deps.serp.account()
         if acct.get("error"):

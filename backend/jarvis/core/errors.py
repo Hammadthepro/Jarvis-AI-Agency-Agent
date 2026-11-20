@@ -65,8 +65,8 @@ class ProviderError(JarvisError):
 
     def __init__(self, provider: str, state: IntegrationState, message: str, *,
                  http_status: int | None = None, retryable: bool | None = None,
-                 billing_ambiguous: bool = False) -> None:
-        super().__init__(f"{provider}: {state}: {message}")
+                 billing_ambiguous: bool = False, details: dict | None = None) -> None:
+        super().__init__(f"{provider}: {state}: {message}", details=details)
         self.reason = message            # the provider's own explanation, without the provider/state prefix
         self.provider = provider
         self.state = state
