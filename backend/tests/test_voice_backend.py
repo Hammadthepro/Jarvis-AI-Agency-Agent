@@ -102,7 +102,7 @@ async def test_conversation_multi_turn_clarify_status_cancel(voice):
                              json={"user_id": me["user_id"], "workspace_id": me["workspace_id"], "text": text})
         assert r.status_code == 200, r.text
         return r.json()
-    r = await say("Find 10 roofers in Houston with at least a 3.5 Google rating")
+    r = await say("Find 10 roofers in Houston with at least a 3.5 Google rating using Google Places")
     assert r["kind"] == "clarify" and "rating" in r["say"].lower()
     r = await say("hmm, purple")                                       # unclear answer: asks again, nothing created
     assert r["kind"] == "clarify" and r["say"].startswith("Sorry")
@@ -123,9 +123,10 @@ async def test_example_agency_command_is_understood_and_blocker_explained(voice)
     a = await login(voice, "example@voice.dev")
     r = (await voice.post("/conversation/turn", headers=a["headers"], json={
         "text": "Find 10 independent roofing companies in Houston with outdated websites and prepare two redesign previews."})).json()
-    assert r["kind"] == "blocked"
+    # SerpApi discovery is not covered by the Google Places restriction: the plan is offered for confirmation
+    assert r["kind"] == "confirm_needed", r
     assert "10 roofing businesses in Houston, TX" in r["say"] and "outdated websites" in r["say"]
-    assert "2 preview websites" in r["say"] and "Import a business list" in r["say"]
+    assert "2 preview websites" in r["say"] and "blocked" not in r["say"]
     cmds = (await voice.get("/commands", headers=a["headers"])).json()
     assert cmds[0]["channel"] == "text"                                 # same router, text channel
 

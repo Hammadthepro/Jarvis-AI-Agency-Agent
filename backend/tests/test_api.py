@@ -44,7 +44,7 @@ async def test_viewer_cannot_write(client):
 
 async def test_t12_places_gate_blocks_with_zero_requests(client, deps, web):
     a = await login(client, "gate@t.dev")
-    r = await client.post("/commands", headers=a["headers"], json={"text": "Find 100 plumbers in Houston with at least a 3.5 Google rating and no website."})
+    r = await client.post("/commands", headers=a["headers"], json={"text": "Find 100 plumbers in Houston with at least a 3.5 Google rating and no website, using Google Places."})
     body = r.json()
     assert body["status"] == "needs_clarification" and body["questions"][0]["field"] == "missing_rating_policy"
     r = await client.post(f"/commands/{body['id']}/answer", headers=a["headers"], json={"answers": {"missing_rating_policy": "exclude"}})
@@ -118,7 +118,8 @@ async def test_voice_internal_endpoint_auth_and_pipeline(client, deps):
     r = await client.post("/internal/voice/command", json=body, headers={"X-Voice-Agent-Key": "wrong"})
     assert r.status_code == 401
     r = await client.post("/internal/voice/command", json=body, headers={"X-Voice-Agent-Key": "voice-secret-0123456789abcdef"})
-    assert r.status_code == 200 and "roofing" in r.json()["say"] and "blocked" in r.json()["say"]
+    # SerpApi is the default discovery source: the Google Places restriction does not apply to it
+    assert r.status_code == 200 and "roofing" in r.json()["say"] and "blocked" not in r.json()["say"]
     cmds = (await client.get("/commands", headers=a["headers"])).json()
     assert cmds[0]["channel"] == "voice" and cmds[0]["raw_text"] == "Find 10 roofers in Denver"
     r = await client.post("/voice/token", headers=a["headers"])
@@ -130,7 +131,9 @@ async def test_system_readiness_reports_real_gaps(client):
     r = (await client.get("/system/readiness", headers=a["headers"])).json()
     items = {i["key"]: i for i in r["items"]}
     assert r["ready"] is False
-    assert items["discovery_provider"]["ok"] is False and "BLOCKED_PENDING_APPROVAL" in items["discovery_provider"]["detail"]
+    # discovery works through SerpApi; Google Places stays BLOCKED_PENDING_APPROVAL, reported separately
+    assert items["discovery_provider"]["ok"] is True and "SerpApi configured" in items["discovery_provider"]["detail"]
+    assert "Google Places API (New): BLOCKED_PENDING_APPROVAL" in items["discovery_provider"]["detail"]
     assert items["terms_of_use_published"]["ok"] is False and items["privacy_policy_published"]["ok"] is False
     assert items["claude_api"]["ok"] is True          # configured with a test credential in this fixture
 

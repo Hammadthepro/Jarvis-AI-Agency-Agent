@@ -69,8 +69,8 @@ real stage changes read from the database.
 |---|---|---|
 | Speech to text | LiveKit Inference `deepgram/nova-3` | Yes: interim and final transcripts |
 | End of turn | LiveKit turn detector model (`inference.TurnDetector`, v1 with local fallback) + Silero VAD; endpointing 0.6 s min / 4.0 s max | Decides from the audio whether you finished; a pause mid-sentence doesn't end the turn |
-| Reply | `POST /internal/voice/command` → the shared Claude conversation | **No.** The reply arrives whole once Claude's tool loop finishes (it may call tools before answering) |
-| Text to speech | LiveKit Inference `cartesia/sonic-2` | Yes: playback starts as audio is synthesized |
+| Reply | `POST /internal/voice/command/stream` → the shared Claude conversation | **Yes.** Claude's text is streamed from the Messages API as it is written (NDJSON deltas); speech starts on the first sentence. While Claude runs a tool (a search, a proposal), nothing is spoken until that step's text arrives |
+| Text to speech | LiveKit Inference `cartesia/sonic-3`, voice pinned (`VOICE_TTS_VOICE`), 24 kHz PCM | Yes: sentence by sentence as text streams in |
 
 - **Exactly one message per spoken turn.** Interim transcripts only update the live caption. Preemptive generation is off,
   so Claude never runs on words you haven't finished.
@@ -80,6 +80,26 @@ real stage changes read from the database.
   recent speech. Headphones still give the best results.
 - Settings: `VOICE_TURN_DETECTION` (`model` or `vad`), `VOICE_ENDPOINT_MIN_DELAY`, `VOICE_ENDPOINT_MAX_DELAY`,
   `VOICE_LOG_TRANSCRIPTS=1` (include transcript text in logs; off by default).
+- If the owner talks over a reply, the speech stops at once; the turn still completes on the server and is stored, so
+  JARVIS remembers it. Links in replies are not read out ("the link in the chat"); they are clickable in the feed.
+
+### The voice JARVIS speaks with
+Audit of the previous setup: `cartesia/sonic-2` (now **retired** in LiveKit Inference), **no voice selected** (the
+gateway default), and synthesis started only after the whole reply had been generated. That is what sounded robotic
+and slow.
+
+| Option | Through | Price (LiveKit Build/Ship tier) | Notes |
+|---|---|---|---|
+| **Cartesia Sonic 3** (chosen) | LiveKit Inference: billed by the existing LiveKit account | $50 per million characters (Scale: $37.50) | Current Cartesia generation; WebSocket streaming; voice, speed, emotion and language options; documented voices |
+| Cartesia Sonic 3.5 / 3.6 | LiveKit Inference | same | Newer; 3.6 is not in the installed SDK's model list yet, 3.5 is (`VOICE_TTS_MODEL=cartesia/sonic-3.5`) |
+| Inworld TTS 2.0 / 2.0 Flash | LiveKit Inference | $25 / $15 per million characters | Cheaper; worth an A/B listen |
+| ElevenLabs Flash / Turbo | **Plugin only**: needs its own ElevenLabs account, API key and paid plan | $0.04 per 1,000 characters ($40 per million), ~75 ms | Excellent naturalness; not enabled because it needs a new subscription (not purchased) |
+
+A typical spoken reply is 150–300 characters, so at $50 per million characters a reply costs about 1–1.5 cents to
+synthesize. Settings (agent environment): `VOICE_TTS_MODEL` (default `cartesia/sonic-3`), `VOICE_TTS_VOICE` (default
+`9626c31c-bec5-4cca-baa8-f8ba9e84c8bc`, LiveKit's documented en-US Cartesia voice "Jacqueline"; for example
+`a167e0f3-df7e-4d52-a9c3-f949145efdab` is "Blake", en-US male), `VOICE_TTS_SPEED` (`slow`, `normal`, `fast` or a number),
+`VOICE_TTS_EMOTION` (optional, Cartesia), `VOICE_TTS_LANGUAGE` (default `en`). Restart the agent after changing them.
 
 **Diagnosing a session:** every stage is logged in `.jarvis/logs/voice.log` as
 `voice.pipeline turn=<room>:t<n> stage=<stage> t_ms=<ms since session start>`. The stages, in order:
@@ -111,6 +131,35 @@ Integrations. STT/TTS run through LiveKit Inference (`deepgram/nova-3`, `cartesi
   ends when that participant leaves. `POST /voice/end` (or End session) deletes the room.
 - Viewers can ask for status by voice but cannot start work. All commands go through the same authorization and
   compliance checks as text.
+
+### Objectives, not commands
+JARVIS keeps the owner's **objective** as structured state (in `conversation_state.objective`, and copied onto the
+campaign when approved): the original request, the task (find and build previews, or find only), business category,
+area (city, state or the whole US), number of businesses, minimum rating and what to do with unrated businesses,
+website preference, number of previews, exclusions, status. Claude updates it with `set_objective` as the owner talks, so
+nothing said earlier is asked again. Defaults instead of questions: 10 businesses; "build their websites and show me" =
+previews for the top 3 qualified prospects; "preferably without a website" = rank those first; unrated businesses kept
+for review when a minimum rating is set. Only the business type and the area are essential; JARVIS asks for one missing
+thing at a time.
+
+When the objective is complete, JARVIS proposes it. One yes approves every internal step (discovery, verification,
+research, qualification, building, browser QA, repairs, private preview deployment); the API checks that the yes is the
+owner's own latest message, then creates the campaign and confirms its first task is really in the durable queue
+before saying it started. Production deployment and outreach are never part of it. Progress updates are posted into the
+conversation by the worker from real database counts whenever the work changes stage, a preview passes QA or a preview
+is deployed ("Found 10 candidate businesses. Researching them now", "3 qualified. Building 3 preview websites: 1 passed
+browser QA so far", "Done. … 3 preview websites are ready").
+
+### Discovery sources (each with its own rules)
+| Source | Status | Basis |
+|---|---|---|
+| SerpApi (Google Maps results) | **Default.** Usable when configured and enabled | SerpApi Terms of Service: lawful use is the customer's responsibility; SerpApi's U.S. Legal Shield (larger plans only, not Free/Starter/Developer) covers collecting public search data. Listing data (name, address, phone, website, rating, review count) is stored with its source and retrieval time |
+| Google Places API (New) | **Restricted** until written approval is recorded (Settings > Compliance) | Unchanged. Used only when the owner explicitly asks for Google Places |
+| Imported list | Usable | Operator attests the right to use it |
+| Licensed business data | Not integrated | |
+
+A restriction on one source is never reported as a restriction on all of them. "Anywhere in the US" searches 40 large
+metros across every region, one page each, so results are spread out.
 
 ### Conversation brain (voice and text)
 Voice and the text field on the JARVIS screen share one conversation per operator: the same history (stored in

@@ -140,7 +140,7 @@ async def test_t14_no_google_content_persisted(client, deps, web):
         {"id": "ChIJzzB", "displayName": {"text": "Qwertyu Rooter"}, "businessStatus": "OPERATIONAL"},          # unrated -> excluded
         {"id": "ChIJzzC", "displayName": {"text": "Lowrated Pipes"}, "businessStatus": "OPERATIONAL", "rating": 3.0},
         {"id": "ChIJzzD", "displayName": {"text": "Closedco"}, "businessStatus": "CLOSED_PERMANENTLY", "rating": 4.9}]})
-    r = await client.post("/commands", headers=h, json={"text": "Find 3 plumbers in Houston with a minimum Google rating of 3.5"})
+    r = await client.post("/commands", headers=h, json={"text": "Find 3 plumbers in Houston with a minimum Google rating of 3.5 using Google Places"})
     cmd = r.json()
     r = await client.post(f"/commands/{cmd['id']}/answer", headers=h, json={"answers": {"missing_rating_policy": "exclude"}})
     r = await client.post(f"/commands/{cmd['id']}/confirm", headers=h, json={})
@@ -171,7 +171,7 @@ async def test_places_not_configured_blocks_campaign(client, deps, web):
                       "approver_name": "Google", "document_ref": "CASE-1", "approved_at": now.isoformat(),
                       "review_by": (now + timedelta(days=30)).isoformat(), "intended_use_text": INTENDED_USE["google_places_prospect_selection"][1]})
     deps.places.settings = deps.settings.model_copy(update={"google_places_api_key": None})
-    r = await client.post("/commands", headers=h, json={"text": "Find 5 electricians in Austin"})
+    r = await client.post("/commands", headers=h, json={"text": "Find 5 electricians in Austin using Google Places"})
     r = await client.post(f"/commands/{r.json()['id']}/confirm", headers=h, json={})
     cid = r.json()["campaign_id"]
     assert await run_until(deps, cid) == "blocked"

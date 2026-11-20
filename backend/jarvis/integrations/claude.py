@@ -159,8 +159,11 @@ class ClaudeClient:
                                   estimated_micros=worst, fn=do)
 
     async def converse(self, ctx: CallContext, *, model: str, system: str, messages: list[dict],
-                        tools: list[dict], max_tokens: int, operation: str = "conversation.turn") -> ConverseResult:
-        """One tool-using conversation step. Worst-case cost is reserved first (budget-gated like every call)."""
+                        tools: list[dict], max_tokens: int, operation: str = "conversation.turn",
+                        on_text: Any = None) -> ConverseResult:
+        """One tool-using conversation step. Worst-case cost is reserved first (budget-gated like every call).
+        With `on_text`, the response is streamed from the Messages API and each text delta is passed on as it arrives
+        (used by voice so speech can start before the reply is complete)."""
         if model not in budget.pricing()["anthropic"]:
             raise ProviderError(PROVIDER, IntegrationState.PROVIDER_ERROR, f"model {model} has no configured price")
         est_in = (len(system) + len(json.dumps(messages)) + len(json.dumps(tools))) // 3 + 200
@@ -172,7 +175,16 @@ class ClaudeClient:
             if tools:
                 kw["tools"] = tools
             try:
-                msg = await client.messages.create(**kw)
+                if on_text is None:
+                    msg = await client.messages.create(**kw)
+                else:
+                    async with client.messages.stream(**kw) as stream:
+                        async for delta in stream.text_stream:
+                            if delta:
+                                on_text(delta)
+                        msg = await stream.get_final_message()
+            except ProviderError:
+                raise
             except Exception as exc:
                 raise _map(exc) from exc
             if msg.stop_reason == "refusal":

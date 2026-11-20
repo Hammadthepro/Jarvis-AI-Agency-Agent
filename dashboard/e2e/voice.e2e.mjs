@@ -1,7 +1,9 @@
 // LIVE browser voice test: the real dashboard in Chromium, a real LiveKit room, the running JARVIS voice agent, real
 // STT/TTS and Claude. Chromium's microphone is a WAV of real synthesized speech (apps/voice/tests/make_speech_wav.py):
-//   15 s silence (agent joins and greets) · "Find potential customers for" · 0.7 s pause · "web development in Denver"
-//   · 30 s silence (JARVIS replies) · "Focus on roofing companies, and prioritize businesses with outdated websites."
+//   15 s silence (agent joins and greets) · "Find potential customers for website development." · 0.7 s pause ·
+//   "Build their websites and show me." · 30 s · "Veterinary businesses." · 30 s · "Anywhere in the US. Only businesses
+//   rated at least three point five, preferably without websites."   (no "yes": nothing is started, nothing is spent
+//   beyond STT/TTS/Claude)
 // Verifies: one live caption while speaking, exactly ONE stored user message per spoken turn (no fragments), a Claude
 // reply to each turn (not provider_error), the follow-up in the same conversation, and that the browser actually PLAYS
 // JARVIS's audio. Nothing here is simulated: the transcripts come from LiveKit STT of the audio above.
@@ -46,31 +48,35 @@ try {
     throw new Error(`timed out waiting for ${what}; messages: ${JSON.stringify(await turns())}`);
   };
 
-  // Turn 1: long request with a mid-sentence pause -> ONE user message, then a Claude reply
-  const t1 = await until(async () => { const m = await turns(); return m.some((x) => x.role === "assistant") ? m : null; }, 90_000, "reply 1");
-  const users1 = t1.filter((m) => m.role === "user");
-  log("turn 1:", users1.map((m) => m.content), "->", t1.find((m) => m.role === "assistant").content);
-  assert(users1.length === 1, `one spoken request must be ONE message, got ${users1.length}: ${JSON.stringify(users1.map((m) => m.content))}`);
-  assert(/customers/i.test(users1[0].content) && /denver/i.test(users1[0].content), `turn 1 was cut off: ${users1[0].content}`);
-  const r1 = t1.find((m) => m.role === "assistant");
-  assert(r1.meta.kind !== "provider_error", `Claude failed: ${r1.content}`);
-  assert(r1.meta.turn_id && r1.meta.turn_id === users1[0].meta.turn_id, "reply and request share the turn's correlation id");
-  await until(async () => seen.playing, 20_000, "the browser to play JARVIS's reply");
-
-  // Turn 2: follow-up in the same conversation
-  const t2 = await until(async () => { const m = await turns(); return m.filter((x) => x.role === "assistant").length >= 2 ? m : null; }, 90_000, "reply 2");
-  const users2 = t2.filter((m) => m.role === "user");
-  const r2 = t2.filter((m) => m.role === "assistant")[1];
-  log("turn 2:", users2.at(-1).content, "->", r2.content);
-  assert(users2.length === 2 && /roof/i.test(users2[1].content), `follow-up not received as one turn: ${JSON.stringify(users2.map((m) => m.content))}`);
-  assert(r2.meta.kind !== "provider_error", `Claude failed: ${r2.content}`);
-
+  // The owner's conversation, spoken: each turn must be ONE stored message, answered by Claude, without re-asking for
+  // anything already said.
+  const expected = [
+    { said: /customers/i, alsoSaid: /website/i },
+    { said: /veterinar/i, mustNotAsk: /what (kind|type) of business|which industry/i },
+    { said: /(US|United States|anywhere)/i, mustNotAsk: /which (area|city|region)|where should I look|what (kind|type) of business|which industry/i },
+  ];
+  let users = [], replies = [];
+  for (let i = 0; i < expected.length; i++) {
+    const msgs = await until(async () => { const m = await turns(); return m.filter((x) => x.role === "assistant").length > i ? m : null; },
+      120_000, `reply ${i + 1}`);
+    users = msgs.filter((m) => m.role === "user"); replies = msgs.filter((m) => m.role === "assistant");
+    const e = expected[i], u = users[i], r = replies[i];
+    log(`turn ${i + 1}:`, u?.content, "->", r.content);
+    assert(users.length === i + 1, `turn ${i + 1} must be ONE message, got: ${JSON.stringify(users.map((m) => m.content))}`);
+    assert(e.said.test(u.content) && (!e.alsoSaid || e.alsoSaid.test(u.content)), `turn ${i + 1} was misheard or cut off: ${u.content}`);
+    assert(r.meta.kind !== "provider_error" && r.meta.agent === "claude", `turn ${i + 1}: Claude failed: ${r.content}`);
+    assert(r.meta.turn_id && r.meta.turn_id === u.meta.turn_id, "reply and request share the turn's correlation id");
+    if (e.mustNotAsk) assert(!e.mustNotAsk.test(r.content), `turn ${i + 1}: JARVIS re-asked for something already given: ${r.content}`);
+    if (i === 0) await until(async () => seen.playing, 20_000, "the browser to play JARVIS's reply");
+  }
+  const state = await api("/conversation/messages?limit=1");
+  log("objective-driven conversation OK; last reply:", state.at(-1)?.content);
   assert(seen.caption, "no live caption was shown while speaking");
   assert(seen.playing, "JARVIS's audio never played in the browser");
   await page.screenshot({ path: `${out}/e2e-voice.png` });
   // The feed shows each turn once (no partial-transcript bubbles)
   const feed = await page.getByLabel("Conversation").textContent();
-  assert(feed.split(users1[0].content).length === 2, "turn 1 appears more than once in the feed");
+  assert(feed.split(users[0].content).length === 2, "turn 1 appears more than once in the feed");
   assert(!errors.length, "page errors: " + errors.join("; "));
   log("captions seen:", [...seen.captions].slice(0, 6));
   log("VOICE BROWSER E2E OK");

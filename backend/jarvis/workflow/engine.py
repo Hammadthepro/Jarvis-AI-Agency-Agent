@@ -9,6 +9,9 @@ enqueues the next stage exactly once (idempotent keys). Stages absent from campa
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import secrets
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
@@ -90,7 +93,10 @@ async def campaign_start(deps: Deps, task: Task) -> dict:
     c = await _campaign(deps, task.campaign_id)
     await set_campaign_state(deps, c["id"], "running", stage="discovery")
     async with deps.db.transaction() as conn:
-        if c["discovery_provider"] == "google_places":
+        if c["discovery_provider"] == "serp_api":
+            await enqueue(conn, workspace_id=c["workspace_id"], campaign_id=c["id"], task_type="discovery.serp",
+                          idempotency_key=f"c:{c['id']}:serp:0:0", payload={"target_index": 0, "page": 0})
+        elif c["discovery_provider"] == "google_places":
             await enqueue(conn, workspace_id=c["workspace_id"], campaign_id=c["id"], task_type="discovery.page",
                           idempotency_key=f"c:{c['id']}:disc:0:0", payload={"query_index": 0, "page": 0})
         elif c["discovery_provider"] == "manual_import":
@@ -193,6 +199,136 @@ def _install_discovery_page() -> None:
 _install_discovery_page()
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# SerpApi discovery (Google Maps engine through SerpApi). Separate from Google Places API (New), which stays gated.
+# ---------------------------------------------------------------------------------------------------------------------
+STATE_NAMES = {"AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California", "CO": "Colorado",
+               "CT": "Connecticut", "DE": "Delaware", "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
+               "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas", "KY": "Kentucky", "LA": "Louisiana",
+               "ME": "Maine", "MD": "Maryland", "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota",
+               "MS": "Mississippi", "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada",
+               "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York", "NC": "North Carolina",
+               "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma", "OR": "Oregon", "PA": "Pennsylvania",
+               "RI": "Rhode Island", "SC": "South Carolina", "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas",
+               "UT": "Utah", "VT": "Vermont", "VA": "Virginia", "WA": "Washington", "WV": "West Virginia",
+               "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia"}
+# "Anywhere in the US": large metros across every region, searched one page each so results are spread out.
+US_METROS = [("New York", "NY"), ("Los Angeles", "CA"), ("Chicago", "IL"), ("Houston", "TX"), ("Phoenix", "AZ"),
+             ("Philadelphia", "PA"), ("San Antonio", "TX"), ("San Diego", "CA"), ("Dallas", "TX"), ("Jacksonville", "FL"),
+             ("Austin", "TX"), ("Columbus", "OH"), ("Charlotte", "NC"), ("Indianapolis", "IN"), ("Seattle", "WA"),
+             ("Denver", "CO"), ("Nashville", "TN"), ("Oklahoma City", "OK"), ("Boston", "MA"), ("Portland", "OR"),
+             ("Las Vegas", "NV"), ("Detroit", "MI"), ("Memphis", "TN"), ("Louisville", "KY"), ("Baltimore", "MD"),
+             ("Milwaukee", "WI"), ("Albuquerque", "NM"), ("Atlanta", "GA"), ("Kansas City", "MO"), ("Omaha", "NE"),
+             ("Miami", "FL"), ("Minneapolis", "MN"), ("Tampa", "FL"), ("New Orleans", "LA"), ("Salt Lake City", "UT"),
+             ("Birmingham", "AL"), ("Boise", "ID"), ("Richmond", "VA"), ("Des Moines", "IA"), ("Little Rock", "AR")]
+SERP_MAX_PAGES = 3
+
+
+def serp_targets(location: dict) -> list[tuple[str, int, str | None, str | None]]:
+    """(SerpApi location, zoom, city, state) to search, in order."""
+    if location.get("nationwide"):
+        return [(f"{c}, {STATE_NAMES[s]}, United States", 11, c, s) for c, s in US_METROS]
+    city, st = location.get("city"), location.get("state")
+    if city:
+        return [(", ".join(x for x in (city, STATE_NAMES.get(st or "", st), "United States") if x), 11, city, st)]
+    return [(f"{STATE_NAMES.get(st, st)}, United States", 7, None, st)]
+
+
+_ADDR = re.compile(r",\s*([^,]+?),\s*([A-Z]{2})\s+\d{5}(?:-\d{4})?\s*(?:,\s*United States)?\s*$")
+
+
+def address_city_state(address: str | None) -> tuple[str | None, str | None]:
+    m = _ADDR.search(address or "")
+    return (m.group(1).strip(), m.group(2)) if m and m.group(2) in STATE_NAMES else (None, None)
+
+
+@handler("discovery.serp")
+async def discovery_serp(deps: Deps, task: Task) -> dict:
+    c = await _campaign(deps, task.campaign_id)
+    ctx = ctx_for(deps, task)
+    ti, page_no = task.payload["target_index"], task.payload["page"]
+    targets = serp_targets(c["location"] or {})
+    if ti >= len(targets) or await accepted_count(deps, c["id"]) >= c["target_count"]:
+        return {"done": True}
+    loc, zoom, t_city, t_state = targets[ti]
+    nationwide = bool((c["location"] or {}).get("nationwide"))
+    per_target_cap = max(2, -(-c["target_count"] // 5)) if nationwide else c["target_count"]
+    page = await deps.serp.maps_search(ctx, c["niche"], location=loc, zoom=zoom, start=page_no * 20)
+    min_rating = validate_min_rating(c["minimum_google_rating"])
+    policy = c["missing_rating_policy"]
+    stats = {"target": loc, "returned": len(page.listings), "duplicate": 0, "not_operational": 0, "below_rating": 0,
+             "unrated_dropped": 0, "unrated_review": 0, "accepted": 0, "filtered_website": 0, "out_of_area": 0}
+    verifier = WebsiteVerifier(deps)
+    exclusions = [str(e).lower() for e in ((c["objective"] or {}).get("exclusions") or []) if str(e).strip()]
+    stats["excluded"] = 0
+    taken = 0
+    for li in page.listings:
+        if await accepted_count(deps, c["id"]) >= c["target_count"] or taken >= per_target_cap:
+            break
+        if li.closed:
+            stats["not_operational"] += 1
+            continue
+        if any(e in f"{li.title} {li.type or ''}".lower() for e in exclusions):      # the owner's exclusions
+            stats["excluded"] += 1
+            continue
+        city, st = address_city_state(li.address)
+        if not nationwide and t_state and st and st != t_state:
+            stats["out_of_area"] += 1
+            continue
+        review_reason = None
+        if min_rating is not None:
+            if li.rating is None:
+                if policy == "exclude":
+                    stats["unrated_dropped"] += 1
+                    continue
+                review_reason, stats["unrated_review"] = "discovery_filter_unconfirmed", stats["unrated_review"] + 1
+            elif Decimal(str(li.rating)) < min_rating:
+                stats["below_rating"] += 1
+                continue
+        excerpt = json.dumps({"title": li.title, "address": li.address, "phone": li.phone, "website": li.website,
+                              "rating": li.rating, "reviews": li.reviews, "type": li.type, "open_state": li.open_state})
+        async with deps.db.transaction() as conn:
+            pid = await conn.fetchval(
+                """insert into prospects(workspace_id, campaign_id, discovery_provider, external_ref, business_category,
+                                         review_reason, state) values ($1,$2,'serp_api',$3,$4,$5,'discovered')
+                   on conflict (campaign_id, external_ref) where external_ref is not null do nothing returning id""",
+                c["workspace_id"], c["id"], f"serp:{li.listing_id}", c["niche"], review_reason)
+            if pid is None:
+                stats["duplicate"] += 1
+                continue
+            ev = await conn.fetchval(
+                """insert into evidence(workspace_id, prospect_id, source_type, source_ref, retention_policy, content_excerpt,
+                                        content_sha256) values ($1,$2,'serp_result',$3,'days_180',$4,$5) returning id""",
+                c["workspace_id"], pid, f"serpapi:google_maps:{page.search_id or 'n/a'}:{li.listing_id}", excerpt,
+                hashlib.sha256(excerpt.encode()).hexdigest())
+            facts = [("business_name", li.title, li.title), ("phone", li.phone, li.phone),
+                     ("city", city or t_city, li.address), ("state", st or t_state, li.address),
+                     ("listing_rating", li.rating, f"{li.rating} stars" if li.rating is not None else None),
+                     ("listing_review_count", li.reviews, f"{li.reviews} reviews" if li.reviews is not None else None)]
+            for key, val, quote in facts:
+                if val is not None and quote:
+                    await conn.execute(
+                        """insert into research_facts(workspace_id, prospect_id, fact_key, value, status, evidence_id, quote,
+                                                      confidence) values ($1,$2,$3,$4,'verified',$5,$6,0.8)""",
+                        c["workspace_id"], pid, key, val, ev, str(quote)[:300])
+        taken += 1
+        cand = Candidate(li.title, li.phone, city or t_city, st or t_state, li.website, "serp_api")
+        await _verify_and_record(deps, task, ctx, c, pid, cand, verifier, stats)
+    async with deps.db.transaction() as conn:
+        await emit(conn, workspace_id=c["workspace_id"], task_id=task.id, campaign_id=c["id"],
+                   message=f"SerpApi listings for {loc} (page {page_no + 1}): {stats['returned']} returned, "
+                           f"{stats['accepted']} accepted", data=stats)
+        if await accepted_count(deps, c["id"]) < c["target_count"]:
+            if page.has_more and page_no + 1 < (1 if nationwide else SERP_MAX_PAGES):
+                await enqueue(conn, workspace_id=c["workspace_id"], campaign_id=c["id"], task_type="discovery.serp",
+                              idempotency_key=f"c:{c['id']}:serp:{ti}:{page_no + 1}",
+                              payload={"target_index": ti, "page": page_no + 1})
+            elif ti + 1 < len(targets):
+                await enqueue(conn, workspace_id=c["workspace_id"], campaign_id=c["id"], task_type="discovery.serp",
+                              idempotency_key=f"c:{c['id']}:serp:{ti + 1}:0", payload={"target_index": ti + 1, "page": 0})
+    return stats
+
+
 @handler("verify.prospect")
 async def verify_prospect(deps: Deps, task: Task) -> dict:
     c = await _campaign(deps, task.campaign_id)
@@ -240,7 +376,9 @@ async def qualify_campaign(deps: Deps, task: Task) -> dict:
             c["workspace_id"], r["id"], sc["rule_set_version"], sc["total"], sc["components"], sc["inputs_hash"])
         if r["state"] != "requires_human_review":
             await deps.db.execute("update prospects set state=$2 where id=$1", r["id"], "qualified" if sc["qualified"] else "researched")
-        results.append((sc["total"], sc["qualified"] and r["state"] != "requires_human_review", r["id"]))
+        # Kept for the owner's review (identity unconfirmed, or no rating when a minimum rating was asked for):
+        # scored and shown, but no preview is built until the owner decides.
+        results.append((sc["total"], sc["qualified"] and r["state"] != "requires_human_review" and not r["review_reason"], r["id"]))
     results.sort(key=lambda x: (-x[0], str(x[2])))
     selected = [pid for total, q, pid in results if q][: c["sites_to_build"]]
     async with deps.db.transaction() as conn:
@@ -248,7 +386,8 @@ async def qualify_campaign(deps: Deps, task: Task) -> dict:
             slug = f"{c['niche'].replace(' ', '-')}-{secrets.token_hex(4)}"
             await conn.execute("""insert into generated_sites(workspace_id, prospect_id, campaign_id, slug) values ($1,$2,$3,$4)
                                   on conflict (prospect_id) do nothing""", c["workspace_id"], pid, c["id"], slug)
-    return {"scored": len(results), "qualified": sum(1 for r in results if r[1]), "selected": [str(s) for s in selected]}
+    return {"scored": len(results), "qualified": sum(1 for r in results if r[1]), "selected": [str(s) for s in selected],
+            "kept_for_review": sum(1 for r in rows if r["review_reason"])}
 
 
 @handler("site.build")
@@ -278,7 +417,7 @@ async def campaign_finalize(deps: Deps, task: Task) -> dict:
     return {}
 
 
-STAGE_TASKS = {"discovery": ("discovery.page", "verify.prospect", "campaign.start"), "research": ("research.prospect",),
+STAGE_TASKS = {"discovery": ("discovery.page", "discovery.serp", "verify.prospect", "campaign.start"), "research": ("research.prospect",),
                "qualification": ("qualify.campaign",), "build": ("site.build",), "deploy": ("site.deploy",),
                "outreach_draft": ("outreach.draft",)}
 

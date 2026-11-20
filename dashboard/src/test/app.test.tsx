@@ -264,6 +264,13 @@ describe("No login screen", () => {
 });
 
 describe("Voice-first JARVIS screen", () => {
+  it("shows preview links in replies as links, and nothing else", async () => {
+    const { linkify } = await import("../pages/CommandCenter");
+    expect(linkify("Ready: https://vet-ab12.jarvis-previews.pages.dev. Want changes?")).toEqual(
+      ["Ready: ", { url: "https://vet-ab12.jarvis-previews.pages.dev" }, ". Want changes?"]);
+    expect(linkify("javascript:alert(1) http://x.test")).toEqual(["javascript:alert(1) http://x.test"]);   // https only
+  });
+
   it("derives the orb state only from real signals", async () => {
     const { orbMode } = await import("../pages/CommandCenter");
     expect(orbMode("listening", true, false, false)).toBe("listening");

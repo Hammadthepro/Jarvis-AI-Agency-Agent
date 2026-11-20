@@ -102,7 +102,9 @@ export default function CommandCenterPage() {
           )}
           {list.map((m) => <Bubble key={m.id} m={m} />)}
           {interim && <div data-testid="live-caption" className="ml-auto max-w-[85%] rounded-2xl bg-arc-500/10 px-4 py-2 text-sm italic text-ink-300">{interim}…</div>}
-          {(send.isPending || v.phase === "thinking") && <div className="mr-auto rounded-2xl bg-ink-850 px-4 py-2 text-sm text-ink-400">JARVIS is thinking…</div>}
+          {v.reply && v.phase === "speaking"
+            ? <div data-testid="live-reply" className="mr-auto max-w-[85%] rounded-2xl border border-arc-700/30 bg-ink-900/80 px-4 py-2 text-sm text-ink-100">{v.reply}</div>
+            : (send.isPending || v.phase === "thinking") && <div className="mr-auto rounded-2xl bg-ink-850 px-4 py-2 text-sm text-ink-400">JARVIS is thinking…</div>}
           {send.error && <ErrorState error={send.error} />}
         </div>
 
@@ -132,17 +134,33 @@ export default function CommandCenterPage() {
   );
 }
 
+/** Turns https URLs in a reply into links (preview links JARVIS shows you); everything else stays plain text. */
+export function linkify(text: string): (string | { url: string })[] {
+  const out: (string | { url: string })[] = [];
+  let last = 0;
+  for (const mt of text.matchAll(/https:\/\/[^\s<>"')]+[^\s<>"').,;:!?]/g)) {
+    if (mt.index! > last) out.push(text.slice(last, mt.index));
+    out.push({ url: mt[0] });
+    last = mt.index! + mt[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
 function Bubble({ m }: { m: ConversationMessage }) {
   const you = m.role === "user";
   return (
     <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
       className={`max-w-[85%] rounded-2xl px-4 py-2 text-sm ${you ? "ml-auto bg-arc-500/10 text-ink-100" : m.meta?.kind === "provider_error" ? "mr-auto border border-bad-500/40 bg-bad-500/10 text-ink-100" : "mr-auto border border-arc-700/30 bg-ink-900/80 text-ink-100"}`}>
       <div className="mb-0.5 flex items-center gap-2 text-[10px] uppercase tracking-wider text-ink-500">
-        <span>{you ? "You" : "JARVIS"}</span><span>{m.channel === "voice" ? "voice" : "text"}</span>
+        <span>{you ? "You" : "JARVIS"}</span><span>{m.meta?.kind === "progress" ? "update" : m.channel === "voice" ? "voice" : "text"}</span>
         {!you && (m.meta?.agent === "basic_parser" || m.meta?.agent === "deterministic") && <span title="Configured to use the basic command parser, not Claude">basic parser</span>}
         {!you && m.meta?.kind === "provider_error" && <span className="text-bad-500">Claude unavailable{m.meta.provider_error?.state ? ` · ${m.meta.provider_error.state}` : ""}</span>}
       </div>
-      <div className="whitespace-pre-wrap leading-relaxed">{m.content}</div>
+      <div className="whitespace-pre-wrap leading-relaxed">
+        {linkify(m.content).map((part, i) => typeof part === "string" ? <span key={i}>{part}</span>
+          : <a key={i} href={part.url} target="_blank" rel="noopener noreferrer" className="break-all text-arc-300 underline">{part.url}</a>)}
+      </div>
       {m.meta?.notice && <div className="mt-1 text-[11px] text-warn-500">{m.meta.notice}</div>}
       {m.meta?.campaign_id && <Link to={`/campaigns/${m.meta.campaign_id}`} className="mt-1 inline-block text-[11px] text-arc-300 hover:underline">Open the work</Link>}
     </motion.div>

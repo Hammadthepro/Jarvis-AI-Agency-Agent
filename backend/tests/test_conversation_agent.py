@@ -95,15 +95,99 @@ async def test_model_cannot_start_work_without_an_explicit_yes(client, agent, db
     assert await db.fetchval("select count(*) from campaigns where workspace_id=$1", a["me"]["workspace_id"]) == 0
 
 
-async def test_places_restriction_is_explained_not_bypassed(client, agent, web):
+async def test_places_restriction_is_specific_to_google_places(client, agent, web):
+    """Asking for Google Places explicitly is blocked with the Places reason; SerpApi is reported as available, not
+    'all search sources are prohibited'. No Places request is ever sent."""
     a = await login(client, "miami@agent.dev")
-    agent.queue += [msg(tools=[("start_prospect_search", {"request": "find 20 dentists in Miami, FL that need a new website"})]),
-                    msg("Google Places discovery is restricted, so I can't search Miami directly. Name a business or import a list.")]
-    r = await turn(client, a, "Jarvis, find dentists in Miami that need a new website.")
-    res = agent.tool_results()[0]
-    assert res["blocked"] is True and "restricted" in res["blocked_reason"]
+    agent.queue += [msg(tools=[("set_objective", {"business_category": "dentist", "area": {"scope": "city", "city": "Miami"},
+                                                  "discovery_source": "google_places"}), ("propose_objective", {})]),
+                    msg("Google Places is restricted until written approval is recorded, but I can search with SerpApi instead.")]
+    r = await turn(client, a, "Find dentists in Miami using Google Places.")
+    _, prop = agent.tool_results()
+    assert prop["blocked"] is True and prop["source"] == "Google Places API (New)" and "approval" in prop["reason"].lower()
+    serp = next(x for x in prop["other_sources"] if x["source"].startswith("SerpApi"))
+    assert serp["available"] is True and serp["reason"] is None
     assert not [c for c in web.calls if "places.googleapis.com" in c[1]]
-    assert "restricted" in r["say"]
+    assert "SerpApi" in r["say"]
+
+
+async def test_serpapi_unavailable_names_serpapi_not_places(client, agent, deps):
+    a = await login(client, "noserp2@agent.dev")
+    deps.serp.settings = deps.settings.model_copy(update={"serpapi_api_key": None})
+    agent.queue += [msg(tools=[("set_objective", {"business_category": "roofing", "area": {"scope": "state", "state": "TX"}}),
+                               ("propose_objective", {})]), msg("SerpApi isn't configured yet.")]
+    await turn(client, a, "Find roofers in Texas")
+    prop = agent.tool_results()[1]
+    assert prop["blocked"] is True and "SerpApi" in prop["source"] and "SERPAPI_API_KEY" in prop["reason"]
+    places = next(x for x in prop["other_sources"] if x["source"].startswith("Google Places"))
+    assert places["available"] is False and "approval" in places["reason"].lower()
+
+
+async def test_owner_objective_survives_clarification_and_starts_the_full_workflow(client, agent, db):
+    """The owner's example conversation: every detail is kept across turns, nothing is asked twice, the website-building
+    requirement survives, and the yes queues ONE durable campaign with the whole objective."""
+    a = await login(client, "vets@agent.dev")
+    ws = a["me"]["workspace_id"]
+    agent.queue += [msg(tools=[("set_objective", {"task": "find_and_build_previews"})]), msg("Happy to. What industry should I focus on?")]
+    await turn(client, a, "Find potential customers for website development. Build their websites and show me.")
+    agent.queue += [msg(tools=[("set_objective", {"business_category": "veterinary clinic"})]), msg("Veterinary businesses it is. Which area?")]
+    await turn(client, a, "Veterinary businesses.", channel="voice")
+    agent.queue += [msg(tools=[("set_objective", {"area": {"scope": "nationwide"}, "minimum_rating": 3.5,
+                                                  "website_preference": "prefer_no_or_poor_website"})]),
+                    msg("Across the US, 3.5 and up, no-website businesses first. Should I keep unrated ones for your review?")]
+    r3 = await turn(client, a, "Anywhere in the US. Only businesses rated at least 3.5, preferably without websites.", channel="voice")
+    set3 = agent.tool_results()[0]
+    assert set3["objective"]["task"] == "find_and_build_previews" and set3["objective"]["business_category"] == "veterinary clinic"
+    assert set3["ready_to_propose"] is True and set3["still_needed"] is None          # nothing essential left to ask
+    assert "Which area" not in r3["say"]
+    agent.queue += [msg(tools=[("set_objective", {"unrated_policy": "include_for_review", "target_count": 10}),
+                               ("propose_objective", {})]),
+                    msg("I'll target 10 veterinary businesses across the US, prioritise those without websites, keep unrated "
+                        "ones for your review, and build previews for the best qualified. Shall I start?")]
+    r4 = await turn(client, a, "Yes.", channel="voice")
+    prop = agent.tool_results()[1]
+    assert r4["kind"] == "proposal" and prop["needs_owner_yes"] is True and prop["discovery_source"].startswith("SerpApi")
+    assert "build, browser-test and privately deploy 3 tailored preview websites" in prop["plan"]
+    assert await db.fetchval("select count(*) from campaigns where workspace_id=$1", ws) == 0      # nothing started yet
+    # Claude saw the whole objective in every later turn (no re-asking)
+    assert '"business_category": "veterinary clinic"' in agent.seen[-1]["system"]
+
+    agent.queue += [msg(tools=[("confirm_pending_action", {})]),
+                    msg("Queued. I'll verify the candidates first, then build their previews.")]
+    r5 = await turn(client, a, "Yes, go ahead.")
+    started = agent.tool_results()[0]
+    assert started["started"] is True and r5["kind"] == "confirmed" and started["first_task_id"]
+    c = await db.fetchrow("select * from campaigns where id=$1::uuid", started["campaign_id"])
+    assert c["discovery_provider"] == "serp_api" and c["location"]["nationwide"] is True and c["target_count"] == 10
+    assert str(c["minimum_google_rating"]) == "3.5" and c["missing_rating_policy"] == "include_for_review"
+    assert c["website_filter"] == ["ANY"] and c["sites_to_build"] == 3
+    assert {"build", "qa", "deploy"} <= set(c["stages"]) and "outreach_draft" not in c["stages"]    # no outreach
+    assert c["objective"]["original_request"].startswith("Find potential customers for website development. Build their websites")
+    assert await db.fetchval("select status::text from tasks where campaign_id=$1 and task_type='campaign.start'", c["id"]) == "pending"
+    st = await db.fetchrow("select objective, pending_action from conversation_state where workspace_id=$1", ws)
+    assert st["objective"]["status"] == "running" and st["pending_action"] is None
+
+
+async def test_changing_the_objective_after_a_proposal_needs_a_new_yes(client, agent, db):
+    a = await login(client, "change@agent.dev")
+    agent.queue += [msg(tools=[("set_objective", {"business_category": "roofing", "area": {"scope": "city", "city": "Denver"}}),
+                               ("propose_objective", {})]), msg("Ten Denver roofers with previews for the top three. Start?")]
+    await turn(client, a, "Find roofers in Denver and build them sites")
+    agent.queue += [msg(tools=[("set_objective", {"area": {"scope": "city", "city": "Austin"}})]), msg("Austin instead. Start?")]
+    await turn(client, a, "Actually do the same for Austin")
+    agent.queue += [msg(tools=[("confirm_pending_action", {})]), msg("Okay.")]
+    await turn(client, a, "Yes")
+    assert agent.tool_results()[0]["ok"] is False                                      # the Denver proposal was withdrawn
+    assert await db.fetchval("select count(*) from campaigns where workspace_id=$1", a["me"]["workspace_id"]) == 0
+    st = await db.fetchval("select objective from conversation_state where workspace_id=$1", a["me"]["workspace_id"])
+    assert st["area"]["city"] == "Austin" and st["business_category"] == "roofing"     # rest of the objective kept
+
+
+async def test_identity_question_names_the_configured_model(client, agent):
+    a = await login(client, "who@agent.dev")
+    agent.queue += [msg("I'm JARVIS, running on Anthropic's Claude.")]
+    await turn(client, a, "Are you Claude or JARVIS?")
+    assert '"intelligence": "Anthropic Claude, model claude-haiku-5-5"' in agent.seen[0]["system"]
 
 
 async def test_budget_block_is_reported_not_hidden(client, agent, db):
@@ -279,3 +363,51 @@ async def test_interrupted_reply_context_reaches_claude(client, agent):
     assert r.status_code == 200 and r.json()["say"] == "Understood, Austin instead."
     system = agent.seen[0]["system"]
     assert '"previous_reply_interrupted": true' in system and "I'll look for roofers in" in system
+
+
+async def test_voice_stream_sends_claude_text_as_it_is_written(client, agent, fake_claude, db):
+    """The streaming voice endpoint passes Claude's text on in deltas (real Messages streaming surface), then the final
+    reply; the turn is stored once, like any other."""
+    a = await login(client, "stream@agent.dev")
+    agent.queue += [msg(tools=[("set_objective", {"business_category": "dentist"})]),
+                    msg("Dentists it is. Where should I look: a city, a state, or anywhere in the US?")]
+    body = {"user_id": a["me"]["user_id"], "workspace_id": a["me"]["workspace_id"], "text": "Find me dentists", "turn_id": "R:t1"}
+    async with client.stream("POST", "/internal/voice/command/stream", headers={"X-Voice-Agent-Key": SECRET}, json=body) as r:
+        assert r.status_code == 200 and r.headers["content-type"].startswith("application/x-ndjson")
+        lines = [json.loads(x) async for x in r.aiter_lines() if x.strip()]
+    deltas = [x["delta"] for x in lines if "delta" in x]
+    assert len(deltas) > 5 and "".join(deltas).strip() == "Dentists it is. Where should I look: a city, a state, or anywhere in the US?"
+    assert lines[-1]["final"]["say"] == "".join(deltas).strip() and lines[-1]["final"]["turn_id"] == "R:t1"
+    assert fake_claude.streamed == 2                                                    # both tool steps streamed
+    rows = await db.fetch("select role from conversation_messages where workspace_id=$1", a["me"]["workspace_id"])
+    assert [r["role"] for r in rows] == ["user", "assistant"]
+
+
+async def test_streaming_through_the_real_sdk(client, agent, deps):
+    """anthropic SDK streaming over a mock HTTP transport (server-sent events): deltas reach the voice stream."""
+    import anthropic
+    import httpx2
+
+    def sse(events):
+        return "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events)
+
+    def handler(req):
+        assert json.loads(req.content)["stream"] is True
+        ev = [{"type": "message_start", "message": {"id": "msg_s", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+                                                    "content": [], "stop_reason": None, "stop_sequence": None,
+                                                    "usage": {"input_tokens": 40, "output_tokens": 1}}},
+              {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+              {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hello, "}},
+              {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "I'm JARVIS."}},
+              {"type": "content_block_stop", "index": 0},
+              {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 6}},
+              {"type": "message_stop"}]
+        return httpx2.Response(200, text=sse(ev), headers={"content-type": "text/event-stream"})
+    deps.claude._client = anthropic.AsyncAnthropic(api_key="sk-ant-x", max_retries=0,
+                                                   http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)))
+    a = await login(client, "sdkstream@agent.dev")
+    body = {"user_id": a["me"]["user_id"], "workspace_id": a["me"]["workspace_id"], "text": "Hi"}
+    async with client.stream("POST", "/internal/voice/command/stream", headers={"X-Voice-Agent-Key": SECRET}, json=body) as r:
+        lines = [json.loads(x) async for x in r.aiter_lines() if x.strip()]
+    assert [x["delta"] for x in lines if "delta" in x] == ["Hello, ", "I'm JARVIS."]
+    assert lines[-1]["final"]["say"] == "Hello, I'm JARVIS." and lines[-1]["final"]["kind"] == "reply"

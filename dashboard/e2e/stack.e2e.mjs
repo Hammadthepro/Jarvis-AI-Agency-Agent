@@ -34,8 +34,19 @@ assert(await page.locator('input[type="email"], input[type="password"]').count()
 assert(!(await page.getByRole("button", { name: /sign in/i }).count()), "no sign-in button");
 await page.getByText("Local development mode").waitFor();
 
-// 1) Places-based command: parsed, plan shown, compliance gate blocks authorization
-await page.getByLabel("Command").fill("Find 20 plumbers in Houston with at least a 3.5 Google rating and no website.");
+// 1a) A normal search uses SerpApi, which has its own status (here: not configured). The Places gate does not apply.
+await page.getByLabel("Command").fill("Find 20 plumbers in Houston with at least a 3.5 rating and no website.");
+await page.getByRole("button", { name: "Send" }).click();
+await page.getByText(/Exclude them, or keep them/).waitFor();
+await page.getByRole("button", { name: "exclude" }).click();
+await page.getByText(/Discovery source: SerpApi \(Google Maps results\): SerpApi \(Google Maps results\) is not configured/).waitFor();
+assert(!(await page.getByText(/blocked pending approval/).count()), "the Google Places restriction must not be shown for SerpApi");
+await page.getByRole("button", { name: "Authorize campaign" }).click();
+await page.getByText("NOT_CONFIGURED").first().waitFor();
+
+// 1b) Explicitly asking for Google Places: parsed, plan shown, compliance gate blocks authorization
+await page.goto(`${base}/commands`);
+await page.getByLabel("Command").fill("Find 20 plumbers in Houston with at least a 3.5 Google rating and no website, using Google Places.");
 await page.getByRole("button", { name: "Send" }).click();
 await page.getByText(/Exclude them, or keep them/).waitFor();
 await page.getByRole("button", { name: "exclude" }).click();

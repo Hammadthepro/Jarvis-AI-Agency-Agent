@@ -89,29 +89,7 @@ def answer_from_speech(question: dict, text: str):
     return None
 
 
-async def campaign_progress(db, workspace_id, campaign_id) -> dict:
-    c = await db.fetchrow("""select id, name, state, current_stage, blocked_reason, sites_to_build from campaigns
-                             where id=$1 and workspace_id=$2""", campaign_id, workspace_id)
-    if c is None:
-        return {"found": False, "say": "I can't find that campaign."}
-    n = await db.fetchrow(
-        """select (select count(*) from prospects where campaign_id=$1) prospects,
-                  (select count(*) from prospects where campaign_id=$1 and state not in ('rejected')) eligible,
-                  (select count(*) from generated_sites where campaign_id=$1) sites,
-                  (select count(*) from generated_sites where campaign_id=$1 and state in ('passed','deployed')) sites_passed,
-                  (select count(distinct v.site_id) from deployments d join site_versions v on v.id=d.site_version_id
-                     join generated_sites g on g.id=v.site_id where g.campaign_id=$1 and d.status='verified') deployed""", campaign_id)
-    say = f"{c['name']} is {c['state'].replace('_', ' ')}"
-    if c["current_stage"] and c["state"] not in ("completed",):
-        say += f", at the {c['current_stage'].replace('_', ' ')} stage"
-    say += f". {n['prospects']} prospects so far"
-    if c["sites_to_build"]:
-        say += f", {n['sites']} previews built, {n['sites_passed']} passed QA, {n['deployed']} deployed and verified"
-    say += "."
-    if c["blocked_reason"]:
-        say += f" It is blocked: {c['blocked_reason']}"
-    return {"found": True, "campaign_id": str(c["id"]), "state": c["state"], "stage": c["current_stage"],
-            "blocked_reason": c["blocked_reason"], "counts": dict(n), "say": say}
+from jarvis.workflow.progress import campaign_progress  # noqa: E402  (re-exported: used by voice and the agent)
 
 
 async def _status(db, me: Principal) -> dict:
@@ -189,6 +167,9 @@ def _describe(res: dict) -> dict:
     plan = res.get("plan") or {}
     if plan.get("estimated_usd_max_if_paid") is not None:
         say += f". Worst-case provider cost if billed: about {plan['estimated_usd_max_if_paid']} dollars"
+    pol = res.get("provider_policy") or {}
+    if pol and not pol.get("allowed", True) and not (res.get("compliance") and not res["compliance"].get("open")):
+        return {**base, "kind": "blocked", "say": say + f". But {pol['reason']} {pol.get('fix') or ''}".rstrip()}
     if res.get("compliance") and not res["compliance"].get("open"):
         return {**base, "kind": "blocked", "say": say + ". But Google Places discovery is blocked until written approval is "
                 "recorded, so I can't start it. Import a business list from Campaigns and I'll run the rest of the workflow on it."}
@@ -202,7 +183,7 @@ async def _store(db, me: Principal, role: str, channel: str, content: str, meta:
 
 
 async def handle_turn(request: Request, me: Principal, text: str, channel: str, turn_id: str | None = None,
-                      voice: dict | None = None) -> dict:
+                      voice: dict | None = None, on_text=None) -> dict:
     """One turn of the single JARVIS conversation (voice and text alike).
 
     Mode "auto"/"claude": Claude with tools. If Claude is not configured or the call fails, the reply says so plainly
@@ -237,7 +218,7 @@ async def handle_turn(request: Request, me: Principal, text: str, channel: str, 
     else:
         log.info("conversation.claude_request_start turn=%s", turn_id)
         try:
-            out = await claude_turn(request, me, text, channel, voice)
+            out = await claude_turn(request, me, text, channel, voice, on_text)
         except BudgetBlocked as exc:
             out = _provider_failure(f"Claude unavailable: the Anthropic budget limit was reached ({exc.message}).",
                                     {"state": "BUDGET_BLOCKED"})
@@ -329,6 +310,51 @@ async def voice_command(body: VoiceIn, request: Request, x_voice_agent_key: str 
     voice = {"previous_reply_interrupted": True, "owner_heard_only": body.interrupted_heard} \
         if body.interrupted_heard is not None else None
     return await handle_turn(request, me, body.text.strip(), "voice", body.turn_id, voice)
+
+
+@router.post("/internal/voice/command/stream")
+async def voice_command_stream(body: VoiceIn, request: Request, x_voice_agent_key: str | None = Header(None)):
+    """Streaming variant for the voice agent: NDJSON lines {"delta": text} as Claude writes, then {"final": reply}.
+    The turn runs as a server task, so if the agent stops listening (the owner interrupted) the turn still completes and
+    is stored in the conversation; only the remaining speech is dropped."""
+    import asyncio
+    import json as _json
+
+    from fastapi.responses import StreamingResponse
+    _check_agent(request, x_voice_agent_key)
+    me = await _member(request, body.user_id, body.workspace_id)
+    q: asyncio.Queue = asyncio.Queue()
+
+    async def run() -> None:
+        try:
+            if me.role == "viewer":
+                out = {"kind": "error", "say": "Your role is viewer, so I can report status but not start work."} \
+                    if not STATUS.search(body.text.lower()) else await _status(request.app.state.db, me)
+            else:
+                voice = {"previous_reply_interrupted": True, "owner_heard_only": body.interrupted_heard} \
+                    if body.interrupted_heard is not None else None
+                out = await handle_turn(request, me, body.text.strip(), "voice", body.turn_id, voice, on_text=q.put_nowait)
+            q.put_nowait({"final": out})
+        except JarvisError as exc:
+            q.put_nowait({"error": {"code": exc.code, "message": exc.message[:300]}})
+        except Exception as exc:                                      # never leave the agent waiting
+            log.exception("conversation.stream_failed turn=%s", body.turn_id)
+            q.put_nowait({"error": {"code": "INTERNAL_ERROR", "message": type(exc).__name__}})
+
+    task = asyncio.create_task(run())
+    tasks = request.app.state.__dict__.setdefault("voice_turn_tasks", set())
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+
+    async def lines():
+        while True:
+            item = await q.get()
+            if isinstance(item, str):
+                yield _json.dumps({"delta": item}) + "\n"
+                continue
+            yield _json.dumps(item, default=str) + "\n"
+            return
+    return StreamingResponse(lines(), media_type="application/x-ndjson")
 
 
 @router.get("/internal/voice/progress")

@@ -15,6 +15,7 @@ const CommandResp = z.object({
   plan: z.object({ places_requests_max: z.number(), serp_searches_max: z.number(), firecrawl_credits_max: z.number(), claude_usd_max: z.number(),
     estimated_usd_max_if_paid: z.number(), note: z.string() }).optional(),
   compliance: z.object({ open: z.boolean(), reason: z.string().nullable().optional(), intended_use: z.string().nullable().optional() }).optional(),
+  provider_policy: z.object({ allowed: z.boolean(), label: z.string(), reason: z.string().nullable(), fix: z.string().nullable().optional() }).optional(),
 });
 type Cmd = z.infer<typeof CommandResp>;
 export const commandSchema = z.string().trim().min(3, "Tell JARVIS what to do").max(2000);
@@ -155,6 +156,12 @@ function CommandCard({ cmd, onAnswer, onConfirm, confirming, confirmError, confi
             <Field k="Firecrawl credits" v={cmd.plan.firecrawl_credits_max} /><Field k="Claude (max)" v={usd(cmd.plan.claude_usd_max * 1e6)} />
           </div>
           <p className="mt-2 text-xs text-ink-400">{cmd.plan.note}</p>
+          {cmd.provider_policy && (
+            <div className={`mt-3 rounded-md border p-2 text-xs ${cmd.provider_policy.allowed ? "border-ok-500/30 bg-ok-500/10 text-ink-200" : "border-warn-500/30 bg-warn-500/10 text-warn-500"}`}>
+              Discovery source: {cmd.provider_policy.label}{cmd.provider_policy.allowed ? " (available)" : `: ${cmd.provider_policy.reason}`}
+              {!cmd.provider_policy.allowed && cmd.provider_policy.fix && <div className="mt-1 text-ink-300">{cmd.provider_policy.fix}</div>}
+            </div>
+          )}
           {cmd.compliance && !cmd.compliance.open && (
             <div className="mt-3 rounded-md border border-warn-500/30 bg-warn-500/10 p-2 text-xs text-warn-500">
               Google Places discovery is blocked pending approval: {cmd.compliance.reason}

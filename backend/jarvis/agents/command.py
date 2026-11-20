@@ -55,6 +55,7 @@ class Location(BaseModel):
     city: str | None = None
     state: str | None = None
     country: Literal["US"] = "US"
+    nationwide: bool = False          # "anywhere in the US": discovery spreads across major US metros
 
     @field_validator("state")
     @classmethod
@@ -68,19 +69,23 @@ class Location(BaseModel):
 
     @model_validator(mode="after")
     def _some(self) -> Location:
-        if not (self.city or self.state):
-            raise ValueError("location needs a city or a state")
+        if self.nationwide:
+            self.city = self.state = None
+        elif not (self.city or self.state):
+            raise ValueError("location needs a city, a state, or nationwide")
         return self
 
     def label(self) -> str:
-        return ", ".join(p for p in (self.city, self.state) if p)
+        return "United States" if self.nationwide else ", ".join(p for p in (self.city, self.state) if p)
 
 
 class CampaignParameters(BaseModel):
     niche: str = Field(min_length=2, max_length=80)
     location: Location
     target_count: int = Field(ge=1, le=1000)
-    discovery_provider: Literal["google_places", "manual_import", "licensed_business_data"] = "google_places"
+    # SerpApi is the default discovery source. Google Places API (New) is only used when asked for explicitly, and stays
+    # blocked until its written approval is recorded (jarvis.core.provider_policy).
+    discovery_provider: Literal["serp_api", "google_places", "manual_import", "licensed_business_data"] = "serp_api"
     minimum_google_rating: Decimal | None = None
     missing_rating_policy: Literal["exclude", "include_for_review"] | None = None
     website_filter: list[WebsiteFilter] = Field(default_factory=lambda: ["ANY"])
@@ -100,8 +105,8 @@ class CampaignParameters(BaseModel):
 
     @model_validator(mode="after")
     def _rules(self) -> CampaignParameters:
-        if self.minimum_google_rating is not None and self.discovery_provider != "google_places":
-            raise ValueError("minimum_google_rating is only available with the google_places provider")
+        if self.minimum_google_rating is not None and self.discovery_provider not in ("google_places", "serp_api"):
+            raise ValueError("a minimum rating is only available with listing providers (serp_api, google_places)")
         if self.minimum_google_rating is None and self.missing_rating_policy is not None:
             raise ValueError("missing_rating_policy is only valid when minimum_google_rating is set")
         if "ANY" in self.website_filter and len(self.website_filter) > 1:
@@ -145,9 +150,11 @@ def _rating_from_text(t: str) -> tuple[str | None, str | None]:
 def deterministic_parse(text: str) -> ParseResult:
     t = " ".join(text.strip().split())
     low = t.lower()
-    draft: dict = {"discovery_provider": "google_places"}
+    draft: dict = {"discovery_provider": "serp_api"}
     questions: list[dict] = []
 
+    if re.search(r"\b(?:google places|places api)\b", low):    # only when explicitly asked for (it is approval-gated)
+        draft["discovery_provider"] = "google_places"
     m = re.search(r"\b(?:find|get|search for|look for|discover)\s+(?:me\s+)?(\d{1,5}|" + "|".join(_NUM_WORDS) + r")\b\s+(.+?)\s+in\s+", low)
     m2 = None if m else re.search(r"\b(?:find|get|search for|look for|discover)\s+(?:me\s+)?(.+?)\s+in\s+", low)
     if m:
@@ -170,7 +177,7 @@ def deterministic_parse(text: str) -> ParseResult:
             draft["include_service_area_businesses"] = niche in SERVICE_AREA_NICHES or niche not in NICHES.values()
 
     loc = re.search(r"\bin\s+([a-z][a-z .'-]*?)(?:,\s*([a-z]{2}))?(?=\s+(?:with|that|who|which|rated|having|without|and|"
-                    r"don't|do not|lacking|having)\b|[.?!]|$)", low)
+                    r"don't|do not|lacking|having|using|via|through|from|on)\b|[,.?!]\s|[.?!]|$)", low)
     if loc:
         city = loc.group(1).strip()
         state = (loc.group(2) or "").upper() or CITY_STATE.get(city)
@@ -272,7 +279,7 @@ CLAUDE_SYSTEM = (
 
 
 def from_claude(data: dict) -> ParseResult:
-    draft: dict = {"discovery_provider": "google_places"}
+    draft: dict = {"discovery_provider": "serp_api"}
     questions: list[dict] = []
     if data.get("niche"):
         draft["niche"] = data["niche"].strip().lower()

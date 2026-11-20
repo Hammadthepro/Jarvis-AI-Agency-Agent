@@ -30,6 +30,8 @@ class FakeWeb:
         self.places_pages: list[dict] = []       # Text Search responses served in order
         self.serp: dict[str, dict] = {}          # query substring -> serpapi json
         self.serp_error: str | None = None
+        self.maps: dict[str, list[dict]] = {}    # SerpApi google_maps: location substring -> local_results (all pages)
+        self.maps_requests: list[dict] = []
         self.firecrawl_pages: dict[str, str] = {}
         self.calls: list[tuple[str, str]] = []
         self.places_requests: list[dict] = []
@@ -81,6 +83,17 @@ class FakeWeb:
                     return httpx.Response(200, json={"plan_name": "Free", "this_month_usage": 3, "searches_per_month": 250})
                 if self.serp_error:
                     return httpx.Response(429 if "run out" in self.serp_error else 200, json={"error": self.serp_error})
+                if u.params.get("engine") == "google_maps":
+                    loc, start = u.params.get("location", ""), int(u.params.get("start", "0"))
+                    self.maps_requests.append(dict(u.params))
+                    rows = next((v for k, v in self.maps.items() if k in loc), [])
+                    page = rows[start:start + 20]
+                    more = {"serpapi_pagination": {"next": "x"}} if len(rows) > start + 20 else {}
+                    if not page:
+                        return httpx.Response(200, json={"search_metadata": {"id": "m0", "status": "Success"},
+                                                         "error": "Google Maps hasn't returned any results for this query."})
+                    return httpx.Response(200, json={"search_metadata": {"id": f"m-{loc[:12]}-{start}", "status": "Success"},
+                                                     "local_results": page, **more})
                 q = u.params.get("q", "")
                 for k, v in self.serp.items():
                     if k in q:
@@ -118,8 +131,36 @@ class FakeAnthropic:
     def __init__(self) -> None:
         self.calls: list[dict] = []
         self.responders: list = []
-        self.messages = SimpleNamespace(create=self._create)
+        self.messages = SimpleNamespace(create=self._create, stream=self._stream)
+        self.streamed = 0
         self.models = SimpleNamespace(retrieve=self._retrieve)
+
+    def _stream(self, **kw):
+        """Messages streaming surface: text arrives in small deltas, then the final message (as the SDK provides)."""
+        outer = self
+
+        class _S:
+            async def __aenter__(self):
+                self.msg = await outer._create(**kw)
+                outer.streamed += 1
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            @property
+            def text_stream(self):
+                async def gen():
+                    for b in self.msg.content:
+                        if getattr(b, "type", None) == "text":
+                            words = b.text.split(" ")
+                            for i, w in enumerate(words):
+                                yield w + (" " if i < len(words) - 1 else "")
+                return gen()
+
+            async def get_final_message(self):
+                return self.msg
+        return _S()
 
     async def _retrieve(self, model):
         return SimpleNamespace(id=model, display_name=model)

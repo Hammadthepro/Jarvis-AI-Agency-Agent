@@ -37,6 +37,11 @@ class Pub:
         return [m[0] for m in self.msgs]
 
 
+async def said(reply):
+    """What JARVIS would speak for a `respond` result (an async text stream, or None for silence)."""
+    return None if reply is None else "".join([c async for c in reply]).strip()
+
+
 def item(role, text, id=None, interrupted=False):
     return SimpleNamespace(role=role, text_content=text, id=id or f"{role}-{text[:8]}", interrupted=interrupted)
 
@@ -52,7 +57,7 @@ async def test_turn_executes_command_and_returns_spoken_reply():
     trace = agent.PipelineTrace("RM_room")
     t = agent.TurnHandler("u1", "w1", pub, http=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
                           api="http://api", secret="s3cret", trace=trace)
-    say = await t.respond([item("user", "Find 10 roofers in Denver", "i1")])
+    say = await said(await t.respond([item("user", "Find 10 roofers in Denver", "i1")]))
     assert "roofing" in say
     assert seen == [("s3cret", {"user_id": "u1", "workspace_id": "w1", "text": "Find 10 roofers in Denver", "turn_id": "RM_room:t1"})]
     assert pub.msgs[0] == ("transcript", "Find 10 roofers in Denver", "RM_room:t1", None)
@@ -111,7 +116,7 @@ async def test_a_turn_is_sent_once_even_if_generation_runs_again():
     t = agent.TurnHandler("u1", "w1", pub, http=httpx.AsyncClient(transport=httpx.MockTransport(
         lambda r: calls.append(1) or httpx.Response(200, json={"say": "OK.", "kind": "reply"}))))
     items = [item("user", "Find potential customers for web development in Denver", "u1")]
-    assert await t.respond(items) == "OK."
+    assert await said(await t.respond(items)) == "OK."
     assert await t.respond(items) is None and len(calls) == 1     # already sent: no second request, no repeated reply
 
 
@@ -340,7 +345,10 @@ async def test_real_agent_session_routes_a_committed_turn_to_jarvis_and_replies(
 
     def handler(req):
         calls.append(json.loads(req.content))
-        return httpx.Response(200, json={"say": "Denver web development prospects. Which industry first?", "kind": "reply"})
+        lines = [{"delta": "Denver web development prospects. "}, {"delta": "Which industry first?"},
+                 {"final": {"say": "Denver web development prospects. Which industry first?", "kind": "reply"}}]
+        return httpx.Response(200, headers={"content-type": "application/x-ndjson"},
+                              content="".join(json.dumps(x) + "\n" for x in lines).encode())
     turns = agent.TurnHandler("u1", "w1", Pub(), http=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
                               trace=agent.PipelineTrace("R"))
     async with AgentSession(llm=agent.jarvis_bridge_llm_class()()) as s:
@@ -354,3 +362,67 @@ async def test_real_agent_session_routes_a_committed_turn_to_jarvis_and_replies(
         await s.start(agent.jarvis_agent_class()(turns))
         with pytest.raises(RuntimeError, match="without an LLM"):
             await s.run(user_input="hello")
+
+
+@pytest.mark.asyncio
+async def test_reply_is_streamed_to_speech_as_claude_writes_it():
+    """NDJSON deltas from the API are yielded one by one (TTS starts on the first sentence); the final reply is
+    published once; the turn's stages are traced."""
+    lines = [{"delta": "Veterinary businesses it is. "}, {"delta": "I'll search across the US."},
+             {"final": {"say": "Veterinary businesses it is. I'll search across the US.", "kind": "reply", "agent": "claude"}}]
+    pub, seen = Pub(), []
+
+    def handler(req):
+        seen.append(req.url.path)
+        return httpx.Response(200, headers={"content-type": "application/x-ndjson"},
+                              content="".join(json.dumps(x) + "\n" for x in lines).encode())
+    t = agent.TurnHandler("u1", "w1", pub, http=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                          trace=agent.PipelineTrace("R"))
+    stream = await t.respond([item("user", "Veterinary businesses.", "v1")])
+    chunks = [c async for c in stream]
+    assert chunks == ["Veterinary businesses it is. ", "I'll search across the US."]
+    assert seen == ["/internal/voice/command/stream"]
+    assert [m for m in pub.msgs if m[0] == "status"] == [("status", "Veterinary businesses it is. I'll search across the US.", "R:t1", None)]
+    assert "claude_first_text" in t.trace.stages("R:t1")
+
+
+@pytest.mark.asyncio
+async def test_interrupting_a_streamed_reply_stops_speech_without_losing_the_turn():
+    lines = [{"delta": "Here is a long explanation "}, {"delta": "that the owner talks over. "}, {"final": {"say": "x"}}]
+    t = agent.TurnHandler("u1", "w1", Pub(), http=httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, headers={"content-type": "application/x-ndjson"},
+                                 content="".join(json.dumps(x) + "\n" for x in lines).encode()))), trace=agent.PipelineTrace("R"))
+    stream = await t.respond([item("user", "Explain how you qualify prospects", "q1")])
+    assert await stream.__anext__() == "Here is a long explanation "
+    await stream.aclose()                                        # LiveKit closes the reply when the owner barges in
+    assert "reply_interrupted" in t.trace.stages("R:t1")
+    assert t.recent_agent[-1] == "Here is a long explanation "  # what was actually said, for echo detection
+
+
+@pytest.mark.asyncio
+async def test_links_are_not_read_out():
+    async def chunks():
+        for c in ["Your preview is at https://vet-", "ab12.jarvis-previews.pages.dev ", "if you want a look."]:
+            yield c
+    out = "".join([c async for c in agent.speakable_stream(chunks())])
+    assert out == "Your preview is at the link in the chat if you want a look."
+
+
+def test_tts_is_a_current_model_with_a_pinned_voice_and_configurable_speed(monkeypatch):
+    opts = agent.tts_options()
+    assert opts["model"] == "cartesia/sonic-3" and opts["voice"] == "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
+    assert opts["extra_kwargs"] == {"speed": "normal"} and opts["language"] == "en"
+    monkeypatch.setattr(agent, "TTS_SPEED", "1.1")
+    monkeypatch.setattr(agent, "TTS_EMOTION", "calm")
+    assert agent.tts_options()["extra_kwargs"] == {"speed": 1.1, "emotion": "calm"}
+    monkeypatch.setattr(agent, "TTS_SPEED", "warp")
+    with pytest.raises(ValueError, match="VOICE_TTS_SPEED"):
+        agent.tts_options()
+
+
+def test_tts_object_constructs_with_the_real_sdk(monkeypatch):
+    pytest.importorskip("livekit.agents")
+    monkeypatch.setenv("LIVEKIT_API_KEY", "placeholder")
+    monkeypatch.setenv("LIVEKIT_API_SECRET", "placeholder")
+    tts = agent.build_tts()
+    assert tts.model == "cartesia/sonic-3" and tts.capabilities.streaming is True and tts.sample_rate == 24000

@@ -14,8 +14,16 @@ from pydantic import BaseModel, Field
 from jarvis.agents import command as cmd
 from jarvis.agents.deps import Deps
 from jarvis.api.auth import CurrentPrincipal, Principal
+from jarvis.core import provider_policy
 from jarvis.core.compliance import gate_status
-from jarvis.core.errors import ComplianceBlocked, InvalidTransition, NotFound, ProviderError, ValidationFailed
+from jarvis.core.errors import (
+    ComplianceBlocked,
+    IntegrationState,
+    InvalidTransition,
+    NotFound,
+    ProviderError,
+    ValidationFailed,
+)
 from jarvis.db.audit import audit, emit
 from jarvis.db.queue import enqueue, request_cancel
 from jarvis.integrations.base import CallContext
@@ -55,6 +63,8 @@ async def plan_estimate(deps: Deps, ws: UUID, p: cmd.CampaignParameters) -> dict
     per = r * d * (w * v if no_site else 1)
     places = 0 if p.discovery_provider != "google_places" else int(-(-p.target_count // max(per, 0.1)))
     serp = int(p.target_count * (3.75 if no_site else 1.4))
+    if p.discovery_provider == "serp_api":          # Google Maps listing pages via SerpApi (20 per page)
+        serp += min(40 if p.location.nationwide else 3, int(-(-p.target_count * 3 // 20)) + 2)
     fc = int(p.target_count * (2.9 if no_site else 1.0))
     claude = claude_cost("claude-haiku-5-5", 8000, 2000) * fc + p.sites_to_build * 1_560_000 \
         + claude_cost("claude-sonnet-5-5", 6000, 1200) * p.sites_to_build
@@ -76,6 +86,9 @@ async def _render(request: Request, row) -> dict:
         async with deps.db.acquire() as conn:
             out["compliance"] = await gate_status(conn, row["workspace_id"], "google_places_prospect_selection") \
                 if p.discovery_provider == "google_places" else {"open": True}
+            if p.discovery_provider != "manual_import":
+                out["provider_policy"] = await provider_policy.evaluate(conn, deps, row["workspace_id"], p.discovery_provider,
+                                                                        "prospect_discovery")
     return _jsonable(out)
 
 
@@ -150,7 +163,8 @@ async def confirm(command_id: UUID, body: ConfirmIn, request: Request, me: Princ
 
 
 async def _create_campaign(deps: Deps, me: Principal, p: cmd.CampaignParameters, *, command_id: UUID | None,
-                           budget_cap: Decimal | None, per_site: Decimal | None, import_rows: list[dict] | None = None) -> dict:
+                           budget_cap: Decimal | None, per_site: Decimal | None, import_rows: list[dict] | None = None,
+                           objective: dict | None = None) -> dict:
     defaults = json.loads((__import__("jarvis.core.budget", fromlist=["RES"]).RES / "default_limits.json").read_text())
     async with deps.db.transaction() as conn:
         if p.discovery_provider == "google_places":
@@ -160,18 +174,27 @@ async def _create_campaign(deps: Deps, me: Principal, p: cmd.CampaignParameters,
                     await conn.execute("update commands set status='rejected', error=$2 where id=$1", command_id,
                                        f"COMPLIANCE_BLOCKED: {st['reason']}")
                 raise ComplianceBlocked(st["reason"], details={"scope": st["scope"], "intended_use": st["intended_use"],
-                                                               "alternative": "Import a business list you have the right to use "
-                                                                              "(Campaigns > Import)."})
+                                                               "alternative": "Use SerpApi discovery, or import a business list "
+                                                                              "you have the right to use (Campaigns > Import)."})
+        elif p.discovery_provider != "manual_import":
+            pol = await provider_policy.evaluate(conn, deps, me.workspace_id, p.discovery_provider, "prospect_discovery")
+            if not pol["allowed"]:
+                if pol.get("not_configured"):
+                    raise ProviderError(p.discovery_provider, IntegrationState.NOT_CONFIGURED, pol["reason"])
+                if pol["reason"].endswith("disabled in Integrations."):
+                    raise ProviderError(p.discovery_provider, IntegrationState.DISABLED, pol["reason"])
+                raise ComplianceBlocked(pol["reason"], details={"provider": p.discovery_provider})
         name = f"{p.niche.title()} · {p.location.label()}"
         cid = await conn.fetchval(
             """insert into campaigns(workspace_id, command_id, name, niche, location, target_count, discovery_provider,
                    minimum_google_rating, missing_rating_policy, website_filter, stages, sites_to_build, state,
-                   budget_cap_micros, per_site_cap_micros, authorized_at, authorized_by, current_stage)
-               values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'authorized',$13,$14,now(),$15,'queued') returning id""",
+                   budget_cap_micros, per_site_cap_micros, authorized_at, authorized_by, current_stage, objective)
+               values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'authorized',$13,$14,now(),$15,'queued',$16) returning id""",
             me.workspace_id, command_id, name, p.niche, p.location.model_dump(), p.target_count, p.discovery_provider,
             p.minimum_google_rating, p.missing_rating_policy, p.website_filter, p.stages, p.sites_to_build,
             int(budget_cap * 1_000_000) if budget_cap is not None else defaults["campaign_default_cap_micros"],
-            int(per_site * 1_000_000) if per_site is not None else defaults["site_default_cap_micros"], me.user_id)
+            int(per_site * 1_000_000) if per_site is not None else defaults["site_default_cap_micros"], me.user_id,
+            _jsonable(objective or {}))
         if command_id:
             await conn.execute("update commands set status='confirmed', campaign_id=$2 where id=$1", command_id, cid)
         for i, r in enumerate(import_rows or []):

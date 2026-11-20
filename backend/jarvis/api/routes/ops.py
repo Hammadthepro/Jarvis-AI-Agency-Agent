@@ -630,8 +630,10 @@ async def system_readiness(request: Request, me: Principal = CurrentPrincipal):
         ("worker_alive", workers > 0, f"{workers} live worker(s)"),
         ("auth_production", s.jarvis_env != "production" or bool(s.supabase_jwks_url or s.supabase_jwt_secret), "Supabase JWT verification configured"),
         ("claude_api", deps.claude.configured, "ANTHROPIC_API_KEY"),
-        ("discovery_provider", gate["open"] and deps.places.configured,
-         "Google Places API (New) approved + configured" if gate["open"] else f"BLOCKED_PENDING_APPROVAL: {gate['reason']}"),
+        ("discovery_provider", deps.serp.configured or (gate["open"] and deps.places.configured),
+         ("SerpApi configured" if deps.serp.configured else "SerpApi not configured (SERPAPI_API_KEY)") + "; Google Places API (New): "
+         + ("approved + configured" if gate["open"] and deps.places.configured else
+            f"BLOCKED_PENDING_APPROVAL: {gate['reason']}" if not gate["open"] else "approved, not configured")),
         ("search_provider", deps.serp.configured, "SERPAPI_API_KEY"),
         ("extraction_provider", deps.firecrawl.configured, "FIRECRAWL_API_KEY"),
         ("preview_deployment", deps.cloudflare.configured, "CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID"),

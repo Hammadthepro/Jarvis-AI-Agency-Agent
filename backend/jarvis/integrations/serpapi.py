@@ -1,4 +1,5 @@
-"""SerpApi Google Search engine adapter (search research + independent website verification)."""
+"""SerpApi adapter: Google Search engine (research, independent website verification) and Google Maps engine
+(prospect discovery: public listings with rating, review count, phone, address and website)."""
 
 from __future__ import annotations
 
@@ -29,6 +30,34 @@ class SerpResponse:
     search_id: str | None
     results: tuple[SerpResult, ...]
     local_website: str | None  # knowledge-graph website, when present (independent evidence, not fact)
+
+
+@dataclass(frozen=True, repr=False)
+class MapsListing:
+    listing_id: str              # SerpApi place_id (or data_id): used only to de-duplicate within a campaign
+    title: str
+    address: str | None
+    phone: str | None
+    website: str | None
+    rating: float | None
+    reviews: int | None
+    type: str | None
+    open_state: str | None
+
+    @property
+    def closed(self) -> bool:
+        s = (self.open_state or "").lower()
+        return "permanently closed" in s or "temporarily closed" in s
+
+    def __repr__(self) -> str:
+        return f"MapsListing({self.listing_id})"
+
+
+@dataclass(frozen=True)
+class MapsPage:
+    search_id: str | None
+    listings: tuple[MapsListing, ...]
+    has_more: bool
 
 
 class SerpApiClient:
@@ -70,6 +99,41 @@ class SerpApiClient:
                                http_status=resp.status_code)
 
         return await gateway_call(ctx, provider=PROVIDER, operation="search", unit="search", units=1,
+                                  estimated_micros=budget.unit_price(PROVIDER, "search"), fn=do)
+
+    async def maps_search(self, ctx: CallContext, query: str, *, location: str, zoom: int = 11, start: int = 0) -> MapsPage:
+        """One page (up to 20) of Google Maps listings for `query` around `location`. SerpApi google_maps engine:
+        `location` must be combined with `z`; pages are `start` offsets in steps of 20."""
+        params = {"engine": "google_maps", "type": "search", "q": query, "location": location, "z": zoom,
+                  "hl": "en", "gl": "us", "start": start, "api_key": self._key()}
+
+        async def do() -> CallOutcome:
+            resp = await http_request(PROVIDER, self.http, "GET", f"{BASE}/search.json", params=params)
+            data = resp.json()
+            meta = data.get("search_metadata", {})
+            if "error" in data and not data.get("local_results"):
+                err = str(data["error"])
+                if "hasn't returned any results" in err:
+                    return CallOutcome(MapsPage(meta.get("id"), (), False), 1, budget.unit_price(PROVIDER, "search"),
+                                       http_status=resp.status_code)
+                state = IntegrationState.QUOTA_EXCEEDED if "run out" in err.lower() else IntegrationState.PROVIDER_ERROR
+                raise ProviderError(PROVIDER, state, err)
+            out = []
+            for r in data.get("local_results") or []:
+                lid = r.get("place_id") or r.get("data_id")
+                if not lid or not r.get("title"):
+                    continue
+                rating = r.get("rating")
+                out.append(MapsListing(str(lid), str(r["title"])[:200], r.get("address"), r.get("phone"), r.get("website"),
+                                       float(rating) if isinstance(rating, (int, float)) else None,
+                                       int(r["reviews"]) if isinstance(r.get("reviews"), int) else None,
+                                       r.get("type"), r.get("open_state")))
+            cached = meta.get("status") == "Cached"
+            more = bool((data.get("serpapi_pagination") or {}).get("next")) or len(out) >= 20
+            return CallOutcome(MapsPage(meta.get("id"), tuple(out), more), 0 if cached else 1,
+                               0 if cached else budget.unit_price(PROVIDER, "search"), http_status=resp.status_code)
+
+        return await gateway_call(ctx, provider=PROVIDER, operation="maps_search", unit="search", units=1,
                                   estimated_micros=budget.unit_price(PROVIDER, "search"), fn=do)
 
     async def account(self) -> dict:

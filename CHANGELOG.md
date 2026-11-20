@@ -1,5 +1,44 @@
 # JARVIS Changelog
 
+## Revision 13: JARVIS V2: objectives, provider-specific discovery, complete workflows, natural streaming voice (2026-11-20)
+- **Root causes found:**
+  - **Rigid questions and forgotten objective:** Claude handed the owner's raw words to `start_prospect_search`, which ran the old regex parser. The parser asked its own canned questions ("Which type of business and which city or area should I search?") and knew nothing of earlier turns.
+  - **Places blocking everything:** every search defaulted to Google Places, so its restriction blocked all discovery.
+  - **"I couldn't finish that in one go":** the tool loop ran out after 5 steps.
+- **Structured objective** shared by voice and text, stored in `conversation_state.objective` and on the campaign (migration 0011).
+  - Claude records details with `set_objective`. The server applies defaults and returns at most one essential question.
+  - A changed objective withdraws the old proposal.
+  - `propose_objective` produces the plan. After the owner's yes, `confirm_pending_action` creates the campaign, confirms its first task is queued, and returns the real campaign and task ids.
+  - The whole objective survives, including "build their websites and show me".
+  - The identity question is answered truthfully: JARVIS, powered by the configured Claude model.
+- **Provider-specific policy** (`jarvis/core/provider_policy.py`).
+  - Google Places API (New) stays blocked until approval is recorded, and is used only when asked for explicitly.
+  - SerpApi is the default discovery source (Google Maps engine). Its status and basis are its own, as are Firecrawl's and imported lists'.
+  - A blocked source is explained with that source's own reason. The Commands console and system readiness show each source separately.
+- **SerpApi discovery stage** (`discovery.serp`):
+  - city, state or nationwide (40 metros, one page each)
+  - closed listings skipped
+  - minimum rating applied, with unrated businesses kept for review and not built
+  - owner exclusions enforced
+  - each listing stored as evidence with verified facts (name, phone, city/state, rating, review count)
+  - then the existing verification, research, qualification, build, browser QA with repair, and private Cloudflare deploy
+- **Real progress, proactively.** The worker posts a conversation message from database counts whenever the stage or state changes, a preview passes QA, or a preview is deployed. It never posts duplicates. Preview links appear with the business name and are clickable.
+- **Streaming replies.**
+  - Claude's text is streamed (Messages API streaming, budget-gated) to `/internal/voice/command/stream`, and the voice agent hands it to TTS as it arrives.
+  - The turn runs as a server task, so barge-in stops speech but the turn is still completed and stored.
+  - The dashboard shows JARVIS's words as they are spoken.
+- **Voice quality.** The audit found `cartesia/sonic-2`, which is retired in LiveKit Inference, with no voice selected. JARVIS now uses `cartesia/sonic-3` through LiveKit Inference with a pinned voice; voice, speed, emotion and language are configurable. Links are not read aloud. ElevenLabs was evaluated (plugin-only, separate paid account) and not enabled.
+- **Tests (simulated providers):**
+  - the owner's exact veterinary conversation
+  - a nationwide veterinary campaign through the real worker to verified previews, with the progress messages
+  - provider-specific restrictions
+  - streaming through the real Anthropic SDK (SSE) and through a real LiveKit AgentSession
+  - barge-in during a streamed reply
+  - TTS configuration
+- **Live checks** in `scripts/verify-live.sh`:
+  - the browser voice test now speaks the veterinary conversation and fails if JARVIS re-asks
+  - `--vet-workflow` runs the whole objective for real
+
 ## Revision 12: natural, real-time voice conversation (2026-11-20)
 - **Root cause of "JARVIS hears me but never answers":** the voice `AgentSession` had STT, TTS and VAD but no LLM object. In LiveKit Agents 1.8.12, `AgentActivity` returns early after every completed user turn when `session.llm is None` (`agent_activity.py`: "skip response if no llm is set"), so the JARVIS bridge in `llm_node` never ran. Reproduced with a real `AgentSession`: without an LLM it refuses to generate (`trying to generate reply without an LLM model`) and makes 0 calls to JARVIS. With `JarvisBridgeLLM` it makes 1 call, and the reply is the assistant message. This is now a regression test. `JarvisBridgeLLM` never calls a model; replies still come only from the shared JARVIS conversation (the same Claude agent, history, tools, approvals and budget as text).
 - **Repeated partial bubbles:** LiveKit publishes every interim transcript as a new text stream with the same `lk.segment_id`. The dashboard keyed bubbles by stream id, so each interim update became its own bubble. Now one live caption is built from segments (`lk.segment_id`, `lk.transcription_final`) and committed once, when the agent commits the turn. Late updates cannot create a second message.

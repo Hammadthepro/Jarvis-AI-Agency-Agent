@@ -36,6 +36,7 @@ from jarvis.db import queue
 from jarvis.db.pool import Database
 from jarvis.observability.logging import configure_logging
 from jarvis.workflow import engine
+from jarvis.workflow.progress import post_progress
 
 log = structlog.get_logger(__name__)
 VERSION = os.environ.get("JARVIS_VERSION", "dev")
@@ -125,6 +126,10 @@ class Worker:
                 await engine.advance(self.deps, task.campaign_id)
             except Exception:
                 log.exception("advance.failed", campaign_id=str(task.campaign_id))
+            try:
+                await post_progress(self.db, task.campaign_id)
+            except Exception:
+                log.exception("progress.post_failed", campaign_id=str(task.campaign_id))
 
     async def _exec_record(self, task: queue.Task, status: str, output: dict | None = None, error: str | None = None) -> None:
         try:

@@ -93,6 +93,7 @@ export function useVoiceSession() {
   const [lines, setLines] = useState<TranscriptLine[]>([]);
   const [caption, setCaption] = useState<Caption>(emptyCaption);
   const [audioBlocked, setAudioBlocked] = useState(false);
+  const [reply, setReply] = useState("");             // JARVIS's words as they are spoken (synchronised with the audio)
   const [levels, setLevels] = useState<{ mic: number; agent: number }>({ mic: 0, agent: 0 });
   const roomRef = useRef<Room | null>(null);
   const roomName = useRef<string | null>(null);
@@ -156,7 +157,7 @@ export function useVoiceSession() {
   useEffect(() => () => { void end("user"); }, [end]);
 
   const start = useCallback(async () => {
-    setDetail(""); setLines([]); setMuted(false); setCaption(emptyCaption()); setAudioBlocked(false);
+    setDetail(""); setLines([]); setMuted(false); setCaption(emptyCaption()); setAudioBlocked(false); setReply("");
     const status = await api<VoiceStatus>("/voice/status").catch((e) => { setPhase("error"); setDetail(e instanceof Error ? e.message : String(e)); return null; });
     if (!status) return;
     if (status.state !== "OPERATIONAL") { setPhase("not_ready"); setDetail(status.missing.join(" ")); return; }
@@ -192,6 +193,7 @@ export function useVoiceSession() {
         if (!isAgent(p)) return;
         const ph = phaseFromAgentState(p.attributes["lk.agent.state"]);
         if (ph) setPhase(ph);
+        if (ph === "listening") setReply("");
       });
       // Joining is not ready: stay in "waiting_agent" until the agent publishes listening/thinking/speaking.
       room.on(RoomEvent.ParticipantConnected, (p: Participant) => {
@@ -220,7 +222,13 @@ export function useVoiceSession() {
         }
       });
       room.registerTextStreamHandler("lk.transcription", async (reader: TextStreamReader, from: { identity: string }) => {
-        if (from.identity !== room.localParticipant.identity) return;   // JARVIS replies arrive as 'status' messages
+        if (from.identity !== room.localParticipant.identity) {
+          // JARVIS's own speech: LiveKit streams the words in step with the audio. Shown live; the stored reply
+          // ('status' message, then the conversation feed) is the record.
+          let said = "";
+          for await (const chunk of reader) { said += chunk; setReply(said); }
+          return;
+        }
         const attrs = reader.info.attributes ?? {};
         const seg = attrs["lk.segment_id"] ?? reader.info.id;
         const final = attrs["lk.transcription_final"] === "true";
@@ -277,6 +285,6 @@ export function useVoiceSession() {
   }, []);
 
   const active = ["connecting", "waiting_agent", "listening", "thinking", "speaking", "reconnecting"].includes(phase);
-  return { phase, detail, muted, lines, caption: captionText(caption), audioBlocked, enableAudio, levels, active, start,
+  return { phase, detail, muted, lines, caption: captionText(caption), reply, audioBlocked, enableAudio, levels, active, start,
     end: () => end("user"), toggleMute, interrupt, audioEl };
 }
