@@ -177,6 +177,34 @@ describe("Voice", () => {
     expect(parseJarvisMessage(new TextEncoder().encode("garbage"))).toBeNull();
   });
 
+  it("builds ONE live caption per spoken turn from LiveKit segments, and commits it exactly once", async () => {
+    const { emptyCaption, applySegment, captionText, commitCaption } = await import("../lib/voice");
+    let c = emptyCaption();
+    // LiveKit sends a new stream per interim update with the same segment id; a turn can have several segments
+    c = applySegment(c, "SG_1", "Find me the", false);
+    c = applySegment(c, "SG_1", "Find me the potential", false);
+    c = applySegment(c, "SG_1", "Find me the potential customers for", true);
+    expect(captionText(c)).toBe("Find me the potential customers for");
+    c = applySegment(c, "SG_2", "web development.", false);
+    expect(captionText(c)).toBe("Find me the potential customers for web development.");
+    expect(c.order).toEqual(["SG_1", "SG_2"]);                          // two segments, still one caption
+    c = commitCaption(c);                                               // the agent committed the turn
+    expect(captionText(c)).toBe("");
+    c = applySegment(c, "SG_2", "web development. That's all.", true);  // a late update for a committed segment
+    expect(captionText(c)).toBe("");                                    // never resurrects a second message
+    c = applySegment(c, "SG_3", "Focus on roofing", false);             // the next turn
+    expect(captionText(c)).toBe("Focus on roofing");
+  });
+
+  it("parses turn ids and failing stages from agent messages", async () => {
+    const { parseJarvisMessage, stageName } = await import("../lib/voice");
+    const m = parseJarvisMessage(new TextEncoder().encode(JSON.stringify({ type: "error", text: "websocket closed", turn: "R:t2", stage: "stt" })));
+    expect(m).toEqual({ type: "error", text: "websocket closed", turn: "R:t2", stage: "stt" });
+    expect(stageName("stt")).toBe("Speech recognition");
+    expect(stageName("tts")).toBe("Speech synthesis");
+    expect(stageName("claude")).toBe("Claude");
+  });
+
   it("shows exactly what is missing, links to Integrations, and never requests a token when not ready", async () => {
     const calls: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {

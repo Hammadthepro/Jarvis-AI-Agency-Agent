@@ -20,7 +20,35 @@ export function agentReady(state: string | undefined): boolean {
   return state === "listening" || state === "thinking" || state === "speaking";
 }
 
-export type TranscriptLine = { id: string; who: "you" | "jarvis" | "system"; text: string; final: boolean; at: number };
+export type TranscriptLine = { id: string; who: "you" | "jarvis" | "system"; text: string; final: boolean; at: number; stage?: string };
+
+/** Live caption of the turn the owner is speaking right now.
+ *
+ *  LiveKit publishes the owner's speech as `lk.transcription` text streams. For each recognised segment it opens a NEW
+ *  stream on every interim update (each carrying the whole segment text so far), all with the same `lk.segment_id`;
+ *  the last one has `lk.transcription_final: "true"`. One spoken turn can contain several segments. So: key by segment
+ *  id (never by stream id), replace the text on each update, and show all segments of the open turn as ONE caption.
+ *  When the agent commits the turn (its "transcript" message), the caption is cleared and those segments are closed:
+ *  a late update for a committed segment is ignored and never creates a second message. */
+export type Caption = { order: string[]; text: Record<string, string>; final: Record<string, boolean>; closed: Record<string, true> };
+export const emptyCaption = (): Caption => ({ order: [], text: {}, final: {}, closed: {} });
+
+export function applySegment(c: Caption, segmentId: string, text: string, final: boolean): Caption {
+  if (c.closed[segmentId]) return c;
+  const order = c.order.includes(segmentId) ? c.order : [...c.order, segmentId];
+  return { order, text: { ...c.text, [segmentId]: text }, final: { ...c.final, [segmentId]: final }, closed: c.closed };
+}
+
+export function captionText(c: Caption): string {
+  return c.order.map((id) => c.text[id]?.trim()).filter(Boolean).join(" ");
+}
+
+/** The agent committed the owner's turn: clear the caption and close its segments. */
+export function commitCaption(c: Caption): Caption {
+  const closed = { ...c.closed };
+  for (const id of c.order) closed[id] = true;
+  return { order: [], text: {}, final: {}, closed };
+}
 
 /** Maps the LiveKit agent's published state (participant attribute `lk.agent.state`) to the UI phase. */
 export function phaseFromAgentState(s: string | undefined): VoicePhase | null {
@@ -34,12 +62,16 @@ export function phaseFromAgentState(s: string | undefined): VoicePhase | null {
 }
 
 /** Parses a JARVIS data message (topic "jarvis") from the voice agent. */
-export function parseJarvisMessage(payload: Uint8Array): { type: string; text: string } | null {
+export function parseJarvisMessage(payload: Uint8Array): { type: string; text: string; turn?: string; stage?: string } | null {
   try {
     const m = JSON.parse(new TextDecoder().decode(payload));
-    return typeof m?.type === "string" && typeof m?.text === "string" ? { type: m.type, text: m.text } : null;
+    if (typeof m?.type !== "string" || typeof m?.text !== "string") return null;
+    return { type: m.type, text: m.text, ...(typeof m.turn === "string" ? { turn: m.turn } : {}), ...(typeof m.stage === "string" ? { stage: m.stage } : {}) };
   } catch { return null; }
 }
+
+const STAGE_NAME: Record<string, string> = { stt: "Speech recognition", tts: "Speech synthesis", claude: "Claude", jarvis_api: "JARVIS service", voice: "Voice" };
+export const stageName = (s?: string) => STAGE_NAME[s ?? ""] ?? "Voice";
 
 /** Requests microphone permission explicitly so a denial is reported clearly instead of as a generic failure. */
 export async function requestMicrophone(): Promise<"granted" | "denied" | "unavailable"> {
@@ -59,6 +91,8 @@ export function useVoiceSession() {
   const [detail, setDetail] = useState<string>("");
   const [muted, setMuted] = useState(false);
   const [lines, setLines] = useState<TranscriptLine[]>([]);
+  const [caption, setCaption] = useState<Caption>(emptyCaption);
+  const [audioBlocked, setAudioBlocked] = useState(false);
   const [levels, setLevels] = useState<{ mic: number; agent: number }>({ mic: 0, agent: 0 });
   const roomRef = useRef<Room | null>(null);
   const roomName = useRef<string | null>(null);
@@ -122,7 +156,7 @@ export function useVoiceSession() {
   useEffect(() => () => { void end("user"); }, [end]);
 
   const start = useCallback(async () => {
-    setDetail(""); setLines([]); setMuted(false);
+    setDetail(""); setLines([]); setMuted(false); setCaption(emptyCaption()); setAudioBlocked(false);
     const status = await api<VoiceStatus>("/voice/status").catch((e) => { setPhase("error"); setDetail(e instanceof Error ? e.message : String(e)); return null; });
     if (!status) return;
     if (status.state !== "OPERATIONAL") { setPhase("not_ready"); setDetail(status.missing.join(" ")); return; }
@@ -142,11 +176,15 @@ export function useVoiceSession() {
       const room = new Room({ adaptiveStream: true, dynacast: true, disconnectOnPageLeave: true });
       roomRef.current = room;
       const isAgent = (p?: Participant) => Boolean(p && p.identity !== room.localParticipant.identity);
+      const client = (event: "mic_published" | "audio_playing" | "audio_blocked") => {
+        void room.localParticipant.publishData(new TextEncoder().encode(JSON.stringify({ type: "client", event })), { reliable: true, topic: "jarvis-control" }).catch(() => undefined);
+      };
       const agentState = () => [...room.remoteParticipants.values()].find((p) => isAgent(p))?.attributes["lk.agent.state"];
 
       room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
         if (track.kind === Track.Kind.Audio) {
           const el = track.attach(); el.setAttribute("data-jarvis-audio", "1"); audioEl.current?.appendChild(el);
+          el.addEventListener("playing", () => client("audio_playing"), { once: true });
           attachAnalyser("agent", track.mediaStreamTrack);
         }
       });
@@ -162,19 +200,33 @@ export function useVoiceSession() {
       room.on(RoomEvent.ParticipantDisconnected, (p: Participant) => {
         if (isAgent(p) && roomRef.current === room) { setPhase("error"); setDetail("The JARVIS voice agent left the room. Start a new session."); void end("error"); }
       });
+      // Browsers may block autoplay until the page gets a gesture; the Start click is one, so unlock audio now and
+      // report when playback really is blocked instead of leaving JARVIS silently muted.
+      room.on(RoomEvent.AudioPlaybackStatusChanged, () => {
+        const blocked = !room.canPlaybackAudio; setAudioBlocked(blocked); if (blocked) client("audio_blocked");
+      });
       room.on(RoomEvent.DataReceived, (payload: Uint8Array, _p?: Participant, _k?: unknown, topic?: string) => {
         if (topic !== "jarvis") return;
         const m = parseJarvisMessage(payload);
         if (!m) return;
-        if (m.type === "status" || m.type === "progress") upsert({ id: `j-${Date.now()}-${Math.random()}`, who: "jarvis", text: m.text, final: true, at: Date.now() });
+        const at = Date.now();
+        if (m.type === "transcript") {                 // the committed turn: exactly one message per turn
+          setCaption(commitCaption);
+          upsert({ id: `you-${m.turn ?? at}`, who: "you", text: m.text, final: true, at });
+        } else if (m.type === "status" || m.type === "progress") {
+          upsert({ id: m.type === "status" && m.turn ? `jarvis-${m.turn}` : `j-${at}-${Math.random()}`, who: "jarvis", text: m.text, final: true, at });
+        } else if (m.type === "error") {
+          upsert({ id: `err-${m.turn ?? at}-${m.stage ?? "voice"}`, who: "system", text: `${stageName(m.stage)}: ${m.text}`, final: true, at, stage: m.stage });
+        }
       });
       room.registerTextStreamHandler("lk.transcription", async (reader: TextStreamReader, from: { identity: string }) => {
-        const id = reader.info.id;
-        const who = from.identity === room.localParticipant.identity ? "you" : "jarvis";
-        if (who === "jarvis") return;   // JARVIS replies arrive as 'status' messages (the exact text spoken)
+        if (from.identity !== room.localParticipant.identity) return;   // JARVIS replies arrive as 'status' messages
+        const attrs = reader.info.attributes ?? {};
+        const seg = attrs["lk.segment_id"] ?? reader.info.id;
+        const final = attrs["lk.transcription_final"] === "true";
         let text = "";
-        for await (const chunk of reader) { text += chunk; upsert({ id, who, text, final: false, at: Date.now() }); }
-        upsert({ id, who, text, final: true, at: Date.now() });
+        for await (const chunk of reader) text += chunk;        // each stream carries the whole segment text so far
+        setCaption((c) => applySegment(c, seg, text, final));
       });
       room.on(RoomEvent.Reconnecting, () => setPhase("reconnecting"));
       room.on(RoomEvent.Reconnected, () => setPhase(phaseFromAgentState(agentState()) ?? "waiting_agent"));
@@ -183,7 +235,10 @@ export function useVoiceSession() {
       });
 
       await room.connect(t.url, t.token);
-      await room.localParticipant.setMicrophoneEnabled(true);
+      await room.startAudio().catch(() => undefined);
+      // Echo cancellation keeps JARVIS's own voice (from speakers) out of the microphone; the agent also drops echoes.
+      await room.localParticipant.setMicrophoneEnabled(true, { echoCancellation: true, noiseSuppression: true, autoGainControl: true });
+      client("mic_published");
       const pub = room.localParticipant.getTrackPublication(Track.Source.Microphone);
       if (pub?.track?.mediaStreamTrack) attachAnalyser("mic", pub.track.mediaStreamTrack);
       setPhase(agentReady(agentState()) ? phaseFromAgentState(agentState())! : "waiting_agent");
@@ -215,6 +270,13 @@ export function useVoiceSession() {
     await room.localParticipant.publishData(new TextEncoder().encode(JSON.stringify({ type: "interrupt" })), { reliable: true, topic: "jarvis-control" });
   }, []);
 
+  const enableAudio = useCallback(async () => {
+    const room = roomRef.current; if (!room) return;
+    await room.startAudio().catch(() => undefined);
+    setAudioBlocked(!room.canPlaybackAudio);
+  }, []);
+
   const active = ["connecting", "waiting_agent", "listening", "thinking", "speaking", "reconnecting"].includes(phase);
-  return { phase, detail, muted, lines, levels, active, start, end: () => end("user"), toggleMute, interrupt, audioEl };
+  return { phase, detail, muted, lines, caption: captionText(caption), audioBlocked, enableAudio, levels, active, start,
+    end: () => end("user"), toggleMute, interrupt, audioEl };
 }

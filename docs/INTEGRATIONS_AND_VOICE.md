@@ -60,9 +60,34 @@ value and falls back to the environment (if set). Every API instance and worker 
 
 ### Architecture
 Browser (microphone) ⇄ LiveKit room ⇄ JARVIS voice agent (`apps/voice/agent.py`) → JARVIS API conversation router →
-the same command, approval, budget and workflow system as text. The agent does not use a general chatbot: each final
-utterance is routed to the existing handlers (answer a clarification, confirm, cancel, status, or new command), and the
-exact reply is spoken. After a campaign is authorized, the agent speaks real stage changes read from the database.
+the same Claude agent, history, tools, approvals and budget as text. After a campaign is authorized, the agent speaks
+real stage changes read from the database.
+
+**Pipeline, one continuous session (no button per sentence):**
+
+| Stage | How | Streaming? |
+|---|---|---|
+| Speech to text | LiveKit Inference `deepgram/nova-3` | Yes: interim and final transcripts |
+| End of turn | LiveKit turn detector model (`inference.TurnDetector`, v1 with local fallback) + Silero VAD; endpointing 0.6 s min / 4.0 s max | Decides from the audio whether you finished; a pause mid-sentence doesn't end the turn |
+| Reply | `POST /internal/voice/command` → the shared Claude conversation | **No.** The reply arrives whole once Claude's tool loop finishes (it may call tools before answering) |
+| Text to speech | LiveKit Inference `cartesia/sonic-2` | Yes: playback starts as audio is synthesized |
+
+- **Exactly one message per spoken turn.** Interim transcripts only update the live caption. Preemptive generation is off,
+  so Claude never runs on words you haven't finished.
+- **Interrupting:** talk over JARVIS (or press Stop speaking) and it stops. Your new words are the next turn, and Claude
+  is told what you heard of the interrupted reply.
+- **Echo:** the browser captures with echo cancellation, and the agent ignores a "user" transcript that repeats its own
+  recent speech. Headphones still give the best results.
+- Settings: `VOICE_TURN_DETECTION` (`model` or `vad`), `VOICE_ENDPOINT_MIN_DELAY`, `VOICE_ENDPOINT_MAX_DELAY`,
+  `VOICE_LOG_TRANSCRIPTS=1` (include transcript text in logs; off by default).
+
+**Diagnosing a session:** every stage is logged in `.jarvis/logs/voice.log` as
+`voice.pipeline turn=<room>:t<n> stage=<stage> t_ms=<ms since session start>`. The stages, in order:
+`agent_joined`, `mic_audio_subscribed`, `browser_mic_published`, `speech_start`, `interim_transcript`, `final_transcript`,
+`turn_commit`, `reply_generation_start`, `claude_request_start`, `claude_response` (with latency), `tts_requested`,
+`agent_speaking`/`tts_playout_start`, `browser_audio_playing`, `reply_played`. Errors appear as `stt_error`, `tts_error`,
+`claude_error` or `jarvis_api_error`. The API logs `conversation.turn_received` / `conversation.reply` with the same turn id,
+and stores it in both messages' `meta.turn_id`. If a session stops at a stage, the last logged stage is where.
 
 ### Requirements
 1. LiveKit configured and **validated** (Integrations > LiveKit > Test connection).
@@ -113,8 +138,10 @@ The browser shows "JARVIS is joining" until the agent has joined and published a
 if the agent doesn't start in that time, it ends the room and explains what to check.
 
 ### Using it
-Open **Voice Agent** (or "Talk to JARVIS" in the Command Center), allow the microphone, and speak. You can interrupt
-JARVIS by talking, or press **Stop speaking**. Examples: "Find 10 independent roofing companies in Houston with outdated
+Open **Voice Agent** (or "Talk to JARVIS" in the Command Center), allow the microphone, and speak naturally; JARVIS
+answers after each turn and keeps the conversation (follow-ups such as "focus on roofing companies" or "do the same for
+Austin" refine the current request). You can interrupt JARVIS by talking, or press **Stop speaking**. Errors name the
+failing stage (speech recognition, speech synthesis, Claude, JARVIS service). Examples: "Find 10 independent roofing companies in Houston with outdated
 websites and prepare two redesign previews." → JARVIS explains the plan and any blocker; "confirm", "cancel",
 "what's the status?".
 
@@ -134,7 +161,10 @@ websites and prepare two redesign previews." → JARVIS explains the plan and an
 - Backend: `cd backend && .venv/bin/pytest -q` (provider HTTP is simulated in these tests; they are not live checks).
 - Dashboard: `cd dashboard && npm run typecheck && npm test && npx vite build`.
 - Voice agent: `cd apps/voice && pytest -q tests` (live test needs `LIVEKIT_*`, `JARVIS_API_URL`, `VOICE_AGENT_SHARED_SECRET`,
-  `JARVIS_LIVE_USER_ID`, `JARVIS_LIVE_WORKSPACE_ID`).
+  `JARVIS_LIVE_USER_ID`, `JARVIS_LIVE_WORKSPACE_ID`). The offline suite includes a real `AgentSession` turn.
+- Live voice, room and browser: `scripts/verify-live.sh` runs the real-room conversation test (paused long request,
+  follow-up, barge-in, reconnect) and `dashboard/e2e/voice.e2e.mjs` (Chromium whose microphone is real synthesized
+  speech; checks one message per turn, Claude replies and audio playback).
 - Real-stack E2E: start the API, worker and built dashboard, then `node dashboard/e2e/stack.e2e.mjs <url> <dir>`.
   With `E2E_ADMIN_EMAIL` set (and listed in `JARVIS_ADMIN_EMAILS`), it also saves deliberately invalid keys and confirms
   the real providers reject them (requires network access to the providers).

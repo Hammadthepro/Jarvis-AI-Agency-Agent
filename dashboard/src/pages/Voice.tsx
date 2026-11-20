@@ -27,7 +27,7 @@ export default function VoicePage() {
   useEffect(() => {
     if (!started.current && params.get("start") === "1" && status.data?.state === "OPERATIONAL") { started.current = true; void v.start(); }
   }, [params, status.data, v]);
-  useEffect(() => { scroller.current?.scrollTo?.({ top: scroller.current.scrollHeight, behavior: "smooth" }); }, [v.lines]);
+  useEffect(() => { scroller.current?.scrollTo?.({ top: scroller.current.scrollHeight, behavior: "smooth" }); }, [v.lines, v.caption]);
 
   const ready = status.data?.state === "OPERATIONAL";
   return (
@@ -48,6 +48,11 @@ export default function VoicePage() {
           </Pill>
           {v.muted && <Pill tone="warn">Muted</Pill>}
         </div>
+        {v.audioBlocked && (
+          <button type="button" onClick={() => void v.enableAudio()} className="mt-2 rounded-full bg-warn-500/15 px-3 py-1 text-xs text-ink-100">
+            Your browser blocked JARVIS's audio. Tap to enable sound.
+          </button>
+        )}
         {v.detail && <p role={["error", "mic_denied", "not_ready"].includes(v.phase) ? "alert" : undefined} className="mt-2 max-w-lg text-center text-xs text-ink-300">{v.detail}</p>}
         {(v.phase === "not_ready" || (status.data && !ready && !v.active)) && (
           <Link to="/integrations" className="mt-3 text-sm text-signal-300 underline">Open Integrations to finish voice setup</Link>
@@ -89,13 +94,19 @@ export default function VoicePage() {
         </Card>
         <Card title="Conversation" className="flex min-h-[280px] flex-col">
           <div ref={scroller} className="max-h-[50vh] space-y-2 overflow-y-auto scroll-thin" aria-live="polite">
-            {v.lines.length === 0 && <p className="text-sm text-ink-500">The transcript appears here as you talk.</p>}
+            {v.lines.length === 0 && !v.caption && <p className="text-sm text-ink-500">The transcript appears here as you talk.</p>}
             {v.lines.map((l) => (
-              <div key={l.id} className={`rounded-xl px-3 py-2 text-sm ${l.who === "you" ? "ml-6 bg-signal-500/10 text-ink-100" : "mr-6 bg-ink-850 text-ink-200"}`}>
-                <div className="mb-0.5 text-[10px] uppercase tracking-wider text-ink-500">{l.who === "you" ? "You" : "JARVIS"}{!l.final && " · …"}</div>
+              <div key={l.id} role={l.who === "system" ? "alert" : undefined}
+                className={`rounded-xl px-3 py-2 text-sm ${l.who === "you" ? "ml-6 bg-signal-500/10 text-ink-100" : l.who === "system" ? "bg-bad-500/10 text-bad-500" : "mr-6 bg-ink-850 text-ink-200"}`}>
+                <div className="mb-0.5 text-[10px] uppercase tracking-wider text-ink-500">{l.who === "you" ? "You" : l.who === "system" ? "Error" : "JARVIS"}</div>
                 {l.text}
               </div>
             ))}
+            {v.caption && (
+              <div data-testid="live-caption" className="ml-6 rounded-xl bg-signal-500/5 px-3 py-2 text-sm italic text-ink-300">
+                <div className="mb-0.5 text-[10px] uppercase tracking-wider text-ink-500">You · listening</div>{v.caption}…
+              </div>
+            )}
           </div>
         </Card>
         <Card title="Try saying">

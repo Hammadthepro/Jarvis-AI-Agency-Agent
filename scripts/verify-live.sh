@@ -2,8 +2,10 @@
 # LIVE verification against the real providers, using the credentials saved in the Integrations Center.
 # Run it in the environment where JARVIS is running (scripts/dev-up.sh). Secrets are never printed.
 #
-#   scripts/verify-live.sh                     providers + Claude conversation + voice status + LiveKit voice round trip
-#   scripts/verify-live.sh --skip-voice        everything except the spoken round trip
+#   scripts/verify-live.sh                     providers + Claude conversation + voice status + live voice conversation
+#                                              (real LiveKit room: long request, follow-up, barge-in, reconnect) +
+#                                              browser voice test (Chromium mic = real speech, plays JARVIS's reply)
+#   scripts/verify-live.sh --skip-voice        everything except the spoken tests
 #   scripts/verify-live.sh --website "Business Name" "https://their-site.com" "City" "ST" [business type]
 #                                              ALSO run the full workflow for that ONE business: verify, research,
 #                                              qualify, build a preview, browser-QA it, deploy it to Cloudflare Pages,
@@ -82,11 +84,26 @@ else
     last="$(curl -s "$API/conversation/messages?limit=1")"
     if [ "$(printf '%s' "$last" | jq_ "d[-1]['channel'] + ':' + str(d[-1]['meta'].get('agent')) + ':' + str(d[-1]['meta'].get('kind'))")" = "voice:claude:reply" ] ||
        printf '%s' "$last" | jq_ "d[-1]['channel']=='voice' and d[-1]['meta'].get('agent')=='claude' and d[-1]['meta'].get('kind')!='provider_error'" | grep -q True; then
-      pass "real spoken round trip: agent joined, speech transcribed, CLAUDE generated the reply, reply audio received, reconnect ($(grep -o 'agent joined after [0-9.]* s' "$LOG_DIR/voice-live-test.log" | head -1))"
+      pass "live voice conversation in a real room: one turn per utterance (pause not cut off), Claude replies spoken, follow-up, barge-in, reconnect ($(grep -o 'agent joined after [0-9.]* s' "$LOG_DIR/voice-live-test.log" | head -1))"
     else
       flunk "voice round trip ran but the reply was not a Claude answer: $(printf '%s' "$last" | jq_ "d[-1]['content'][:200]")"
     fi
-  else flunk "spoken round trip failed (see .jarvis/logs/voice-live-test.log): $(tail -n 3 "$LOG_DIR/voice-live-test.log" | tr '\n' ' ')"; fi
+  else flunk "live voice conversation failed (see .jarvis/logs/voice-live-test.log): $(tail -n 3 "$LOG_DIR/voice-live-test.log" | tr '\n' ' ')"; fi
+
+  # Browser: the real dashboard in Chromium, whose microphone is a WAV of real synthesized speech.
+  wav="$LOG_DIR/voice-e2e-speech.wav"
+  if ! (cd dashboard && node -e "require.resolve('playwright')" >/dev/null 2>&1); then
+    skip "browser voice test skipped: Playwright is not installed in dashboard/ (npm ci)"
+  elif ! (export LIVEKIT_URL="$(printf '%s' "$cfg" | jq_ "d['url']")" LIVEKIT_API_KEY="$(printf '%s' "$cfg" | jq_ "d['api_key']")" \
+                 LIVEKIT_API_SECRET="$(printf '%s' "$cfg" | jq_ "d['api_secret']")";
+          apps/voice/.venv/bin/python apps/voice/tests/make_speech_wav.py "$wav" @15 "Find potential customers for" @0.7 \
+            "web development in Denver." @35 "Focus on roofing companies, and prioritize businesses with outdated websites." @20) \
+          >"$LOG_DIR/voice-e2e.log" 2>&1; then
+    flunk "browser voice test: could not synthesize the test speech (see .jarvis/logs/voice-e2e.log)"
+  elif (cd dashboard && (npx playwright install chromium >/dev/null 2>&1 || true) &&
+        timeout 300 node e2e/voice.e2e.mjs "http://127.0.0.1:$WEB_PORT" "$LOG_DIR" "$wav") >>"$LOG_DIR/voice-e2e.log" 2>&1; then
+    pass "browser voice test: live caption, ONE message per spoken turn, Claude replies, follow-up, audio played in Chromium ($LOG_DIR/e2e-voice.png)"
+  else flunk "browser voice test failed (see .jarvis/logs/voice-e2e.log): $(tail -n 3 "$LOG_DIR/voice-e2e.log" | tr '\n' ' ')"; fi
   unset secret cfg
 fi
 

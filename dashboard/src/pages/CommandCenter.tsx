@@ -49,10 +49,13 @@ export default function CommandCenterPage() {
   const ready = voice.data?.state === "OPERATIONAL";
   const mode = orbMode(v.phase, voice.data ? ready : undefined, send.isPending, working);
   const list = Array.isArray(messages.data) ? messages.data : [];
-  const interim = v.lines.filter((l) => l.who === "you" && !l.final).slice(-1)[0];
+  const interim = v.caption;                                 // ONE live caption for the turn being spoken
+  const voiceError = v.lines.filter((l) => l.who === "system").slice(-1)[0];
+  const voiceTurns = v.lines.length;
+  useEffect(() => { if (voiceTurns) void qc.invalidateQueries({ queryKey: ["conversation"] }); }, [voiceTurns, qc]);
   const last = list[list.length - 1];
   const awaitingYes = last?.role === "assistant" && (last.meta?.kind === "proposal" || last.meta?.kind === "confirm_needed");
-  useEffect(() => { feed.current?.scrollTo?.({ top: feed.current.scrollHeight, behavior: "smooth" }); }, [list.length, interim?.text]);
+  useEffect(() => { feed.current?.scrollTo?.({ top: feed.current.scrollHeight, behavior: "smooth" }); }, [list.length, interim]);
 
   const orbClick = () => { if (v.active) void v.end(); else if (ready) void v.start(); else void v.start(); };
   const orbLabel = v.active ? "End voice session" : ready ? "Talk to JARVIS" : "Check voice availability";
@@ -77,6 +80,14 @@ export default function CommandCenterPage() {
               </motion.div>
             )}
           </AnimatePresence>
+          {v.audioBlocked && (
+            <button type="button" onClick={() => void v.enableAudio()} className="mt-3 rounded-full bg-warn-500/15 px-3 py-1 text-xs text-ink-100">
+              Your browser blocked JARVIS's audio. Tap to enable sound.
+            </button>
+          )}
+          {v.active && voiceError && (
+            <p role="alert" className="mt-3 max-w-xl text-center text-xs text-bad-500">{voiceError.text}</p>
+          )}
           {status && (
             <p role="status" className="mt-3 max-w-xl text-center text-xs text-ink-300">
               {status} {voice.data && !ready && <Link to="/integrations" className="text-arc-300 underline">Set up</Link>}
@@ -90,8 +101,8 @@ export default function CommandCenterPage() {
             <p className="pt-6 text-center text-sm text-ink-500">Say “find businesses in Miami that need a new website”, or name a business you want me to look at.</p>
           )}
           {list.map((m) => <Bubble key={m.id} m={m} />)}
-          {interim && <div className="ml-auto max-w-[85%] rounded-2xl bg-arc-500/10 px-4 py-2 text-sm italic text-ink-300">{interim.text}…</div>}
-          {send.isPending && <div className="mr-auto rounded-2xl bg-ink-850 px-4 py-2 text-sm text-ink-400">JARVIS is thinking…</div>}
+          {interim && <div data-testid="live-caption" className="ml-auto max-w-[85%] rounded-2xl bg-arc-500/10 px-4 py-2 text-sm italic text-ink-300">{interim}…</div>}
+          {(send.isPending || v.phase === "thinking") && <div className="mr-auto rounded-2xl bg-ink-850 px-4 py-2 text-sm text-ink-400">JARVIS is thinking…</div>}
           {send.error && <ErrorState error={send.error} />}
         </div>
 

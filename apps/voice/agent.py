@@ -1,10 +1,22 @@
 """JARVIS LiveKit voice agent.
 
-Speech-to-text and text-to-speech run through LiveKit Inference (STT: deepgram/nova-3, TTS: cartesia/sonic-2;
-configurable). Recognised speech is NOT answered by a general LLM: every final user turn is sent to the same
-JARVIS conversation router as typed text (POST /internal/voice/command), which creates, clarifies, confirms or
-cancels commands and reports real campaign status. JARVIS's reply is spoken back. After a campaign is
-authorized, the agent polls its real progress and speaks stage changes (it never invents progress).
+Pipeline (one continuous session; nothing to press per sentence):
+  browser mic -> LiveKit room -> streaming STT (LiveKit Inference, deepgram/nova-3: interim + final transcripts)
+  -> end-of-turn decision (LiveKit turn detector model + VAD + endpointing delays) -> ONE committed user turn
+  -> POST /internal/voice/command (the same JARVIS conversation as typed text: same Claude agent, history, tools,
+     approvals and budget) -> reply text -> streaming TTS (LiveKit Inference, cartesia/sonic-2) -> room audio -> browser.
+
+The JARVIS reply arrives whole: the shared conversation runs Claude with tools, so its answer is only known once the
+tool loop finishes. TTS starts the moment it arrives. Preemptive generation is OFF on purpose: a JARVIS turn is stored
+and can propose or start work, so it must never run on words the owner has not finished saying.
+
+The session needs an LLM object for LiveKit to generate replies at all (AgentActivity skips the reply when
+`session.llm is None`). `JarvisBridgeLLM` is that object; `JarvisVoice.llm_node` sends the turn to JARVIS instead of
+calling any model directly, so there is exactly one brain for voice and text.
+
+After a campaign is authorized, the agent polls its real progress and speaks stage changes (it never invents progress).
+Every stage is logged as `voice.pipeline turn=<room>:t<n> stage=<stage> t_ms=<ms since session start>`; the turn id
+is sent to the API, which logs the Claude request/response under the same id.
 
 Identity: the browser joins with a token minted by the JARVIS API (POST /voice/token): identity `user-<uuid>`,
 metadata {"workspace_id": ...}. Only the API can mint such tokens (it holds the LiveKit secret). The session is
@@ -13,6 +25,11 @@ bound to that one participant and closes when they disconnect.
 Controls (data messages on topic "jarvis-control" from that participant only):
   {"type": "interrupt"}  stop speaking now (barge-in also works by simply talking)
   {"type": "end"}        end the session
+  {"type": "client", "event": "mic_published" | "audio_playing" | "audio_blocked"}  browser-side pipeline stages (logged)
+
+Messages to the browser (topic "jarvis"): {"type": "transcript" | "status" | "progress" | "reply" | "error", "text",
+"turn", "stage"?}. "transcript" is the committed user turn (exactly one per turn), "status" is the reply that is
+spoken, "error" names the failing stage (stt, tts, claude, jarvis_api).
 
 Credentials: LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET from the environment, or, when they were saved
 in the Integrations Center, fetched once at startup from the API's internal endpoint (internal network +
@@ -33,7 +50,9 @@ import os
 import re
 import socket
 import threading
+import time
 import uuid
+from collections import deque
 
 import httpx
 
@@ -46,8 +65,14 @@ TTS = os.environ.get("VOICE_TTS_MODEL", "cartesia/sonic-2")
 # exactly one agent as soon as the browser joins. Automatic dispatch is not used.
 AGENT_NAME = os.environ.get("VOICE_AGENT_NAME", "jarvis")
 GREETING = "JARVIS here. What should I work on?"
-TURN_HANDLING = {"interruption": {"enabled": True}}   # barge-in: the operator can interrupt JARVIS mid-sentence
-VERSION = "2"
+VERSION = "3"
+# End of turn: "model" = LiveKit's turn detector (LiveKit Inference; falls back to the local v1-mini model), which
+# judges from the audio whether the owner has finished, so a mid-sentence pause doesn't end the turn. "vad" = silence only.
+TURN_DETECTION = os.environ.get("VOICE_TURN_DETECTION", "model")
+# Silence before a turn may end (min) and the longest JARVIS waits when the detector thinks the owner isn't finished (max).
+ENDPOINT_MIN_S = float(os.environ.get("VOICE_ENDPOINT_MIN_DELAY", "0.6"))
+ENDPOINT_MAX_S = float(os.environ.get("VOICE_ENDPOINT_MAX_DELAY", "4.0"))
+LOG_TRANSCRIPTS = os.environ.get("VOICE_LOG_TRANSCRIPTS") == "1"     # transcript text in logs only when asked
 # Shared by the worker and its job processes (they inherit the environment), so job processes report under it.
 AGENT_ID = os.environ.get("JARVIS_VOICE_AGENT_ID") or f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
 os.environ["JARVIS_VOICE_AGENT_ID"] = AGENT_ID
@@ -72,6 +97,105 @@ def last_user_text(items) -> str:
     return ""
 
 
+def pending_user_turn(items, sent: set[str]) -> tuple[str, list[str], str | None]:
+    """The user's words to send now: every user message after JARVIS's last reply that has not been sent yet (a turn
+    whose request was cut short by an interruption is merged with the new one instead of being lost).
+    Returns (text, item ids, what the owner heard of an interrupted previous reply or None)."""
+    items = list(items)
+    texts, ids, heard = [], [], None
+    for item in reversed(items):
+        role = getattr(item, "role", None)
+        if role == "assistant":
+            if getattr(item, "interrupted", False):
+                heard = (getattr(item, "text_content", None) or "").strip()
+            break
+        if role == "user" and getattr(item, "id", None) not in sent:
+            t = (getattr(item, "text_content", None) or "").strip()
+            if t:
+                texts.append(t)
+                ids.append(getattr(item, "id", ""))
+    return " ".join(reversed(texts)).strip(), ids[::-1], heard
+
+
+_WORD = re.compile(r"[a-z0-9']+")
+
+
+def looks_like_echo(heard: str, recent_agent: list[str]) -> bool:
+    """True when a 'user' transcript is JARVIS's own recent speech picked up by the microphone (speakers, no headset):
+    at least four words, all found in order inside something JARVIS just said."""
+    words = _WORD.findall(heard.lower())
+    if len(words) < 4:
+        return False
+    needle = " " + " ".join(words) + " "
+    return any(needle in " " + " ".join(_WORD.findall(a.lower())) + " " for a in recent_agent)
+
+
+def turn_handling(detector=None) -> dict:
+    """LiveKit turn handling for JARVIS. Barge-in is on; preemptive generation is off (see module docstring)."""
+    return {
+        "turn_detection": detector if detector is not None else "vad",
+        "endpointing": {"mode": "fixed", "min_delay": ENDPOINT_MIN_S, "max_delay": ENDPOINT_MAX_S},
+        "interruption": {"enabled": True, "min_duration": 0.5, "resume_false_interruption": True,
+                         "false_interruption_timeout": 2.0},
+        "preemptive_generation": {"enabled": False},
+    }
+
+
+def make_turn_detector():
+    """LiveKit's end-of-turn model, or None for silence-based (VAD) turns."""
+    if TURN_DETECTION != "model":
+        return None
+    from livekit.agents import inference
+    return inference.TurnDetector(version="v1")
+
+
+class PipelineTrace:
+    """Correlation ids and timestamps for every stage of one voice session (mic -> transcript -> turn -> JARVIS/Claude ->
+    TTS -> browser playback). Logs `voice.pipeline` lines and keeps the last events for tests and diagnostics."""
+
+    def __init__(self, ref: str, clock=time.monotonic) -> None:
+        self.ref = re.sub(r"[^A-Za-z0-9._-]", "-", ref or "room")[:60]
+        self.clock, self.t0 = clock, clock()
+        self.n, self.turn, self.open = 0, None, False
+        self.interims = 0
+        self.events: deque = deque(maxlen=500)
+
+    def begin_turn(self) -> str:
+        """Called when the owner starts speaking; a new id unless a turn is already open."""
+        if not self.open:
+            self.n += 1
+            self.turn, self.open, self.interims = f"{self.ref}:t{self.n}", True, 0
+        return self.turn
+
+    def commit(self) -> str:
+        """The turn is complete and goes to JARVIS; later speech starts a new turn."""
+        turn = self.begin_turn()
+        self.open = False
+        return turn
+
+    def mark(self, stage: str, turn: str | None = None, **kv) -> None:
+        ms = int((self.clock() - self.t0) * 1000)
+        turn = turn or self.turn or f"{self.ref}:t0"
+        self.events.append({"turn": turn, "stage": stage, "t_ms": ms, **kv})
+        extra = " ".join(f"{k}={v}" for k, v in kv.items() if v is not None)
+        log.info("voice.pipeline turn=%s stage=%s t_ms=%d %s", turn, stage, ms, extra)
+
+    def stages(self, turn: str | None = None) -> list[str]:
+        return [e["stage"] for e in self.events if turn is None or e["turn"] == turn]
+
+
+ERROR_STAGE = {"stt_error": "stt", "tts_error": "tts", "llm_error": "claude"}
+STAGE_LABEL = {"stt": "Speech recognition", "tts": "Speech synthesis", "claude": "Claude", "jarvis_api": "The JARVIS service"}
+
+
+def describe_error(err) -> tuple[str, str]:
+    """(stage, sentence) for a LiveKit session error event's `error` (STTError / TTSError / LLMError / other)."""
+    stage = ERROR_STAGE.get(getattr(err, "type", ""), "voice")
+    inner = getattr(err, "error", err)
+    retry = " Retrying." if getattr(err, "recoverable", False) else ""
+    return stage, _sanitize(f"{STAGE_LABEL.get(stage, 'Voice')} error: {type(inner).__name__}: {inner}.{retry}")
+
+
 def parse_control(payload: bytes, topic: str | None, sender: str | None, owner: str) -> str | None:
     """Accepts control messages only from the session owner on the control topic."""
     if topic != "jarvis-control" or sender != owner:
@@ -80,6 +204,12 @@ def parse_control(payload: bytes, topic: str | None, sender: str | None, owner: 
         kind = json.loads(payload.decode()).get("type")
     except (ValueError, AttributeError):
         return None
+    if kind == "client":
+        try:
+            event = json.loads(payload.decode()).get("event")
+        except (ValueError, AttributeError):
+            return None
+        return f"client:{event}" if event in ("mic_published", "audio_playing", "audio_blocked") else None
     return kind if kind in ("interrupt", "end") else None
 
 
@@ -87,36 +217,84 @@ class TurnHandler:
     """Transport-independent logic for one voice session (unit-tested without LiveKit)."""
 
     def __init__(self, user_id: str, workspace_id: str, publish, http: httpx.AsyncClient | None = None,
-                 api: str = API, secret: str = SECRET, speak=None, poll_s: float = 20.0) -> None:
+                 api: str = API, secret: str = SECRET, speak=None, poll_s: float = 20.0,
+                 trace: PipelineTrace | None = None) -> None:
         self.user_id, self.workspace_id, self.publish = user_id, workspace_id, publish
-        self.http = http or httpx.AsyncClient(timeout=60)
+        self.http = http or httpx.AsyncClient(timeout=httpx.Timeout(90, connect=5))
         self.api, self.secret = api, secret
         self.speak, self.poll_s = speak, poll_s
+        self.trace = trace or PipelineTrace("local")
         self.watchers: dict[str, asyncio.Task] = {}
+        self.sent: set[str] = set()                 # chat item ids already sent to JARVIS
+        self.recent_agent: deque = deque(maxlen=6)  # what JARVIS said lately (echo detection)
 
     def _h(self) -> dict:
         return {"X-Voice-Agent-Key": self.secret}
 
-    async def handle(self, text: str) -> str:
+    def agent_said(self, text: str) -> None:
+        if text:
+            self.recent_agent.append(text)
+
+    async def respond(self, items) -> str | None:
+        """One committed user turn from the LiveKit chat context -> JARVIS -> the sentence to speak (None: say nothing)."""
+        text, ids, heard = pending_user_turn(items, self.sent)
+        turn = self.trace.commit()
+        self.trace.mark("turn_commit", turn, chars=len(text), merged=len(ids), interrupted_prev=heard is not None,
+                        text=text if LOG_TRANSCRIPTS else None)
         if not text:
-            return "I didn't catch that."
-        await self.publish("transcript", text)
+            self.trace.mark("turn_empty", turn)
+            return None
+        if looks_like_echo(text, list(self.recent_agent)):
+            self.sent.update(ids)
+            self.trace.mark("turn_ignored_echo", turn)
+            return None
+        self.sent.update(ids)
+        return await self.handle(text, turn_id=turn, interrupted_heard=heard)
+
+    async def handle(self, text: str, turn_id: str | None = None, interrupted_heard: str | None = None) -> str | None:
+        if not text:
+            return None
+        turn = turn_id or self.trace.commit()
+        await self.publish("transcript", text, turn=turn)
+        self.trace.mark("reply_generation_start", turn)
+        body = {"user_id": self.user_id, "workspace_id": self.workspace_id, "text": text[:2000], "turn_id": turn}
+        if interrupted_heard is not None:
+            body["interrupted_heard"] = interrupted_heard[:2000]
+        t0 = time.monotonic()
+        self.trace.mark("claude_request_start", turn)
         try:
-            r = await self.http.post(f"{self.api}/internal/voice/command", headers=self._h(),
-                                     json={"user_id": self.user_id, "workspace_id": self.workspace_id, "text": text})
-            body = r.json()
+            # Shielded: if the owner talks over the "thinking" phase, LiveKit cancels this reply, but the turn still
+            # completes on the server (it is stored in the conversation), so JARVIS's memory never loses it.
+            r = await asyncio.shield(self.http.post(f"{self.api}/internal/voice/command", headers=self._h(), json=body))
+            data = r.json()
         except (httpx.HTTPError, ValueError) as exc:
-            log.warning("voice.api_error %s", exc)
-            say = "I couldn't reach the JARVIS service. Nothing was started. Please try again or use the text console."
-            await self.publish("status", say)
-            return say
-        say = body.get("say") or (body.get("error") or {}).get("message") or "I didn't get a reply from JARVIS."
-        await self.publish("status", say)
-        if body.get("kind"):
-            await self.publish("reply", json.dumps({"kind": body["kind"], "command_id": body.get("command_id"),
-                                                    "campaign_id": body.get("campaign_id")}))
-        if body.get("campaign_id") and self.speak is not None:
-            self.watch(body["campaign_id"])
+            reason = _sanitize(f"{type(exc).__name__}: {exc}")
+            return await self._api_failure(turn, reason, "I couldn't reach the JARVIS service, so nothing was started. "
+                                                         "Please try again in a moment.")
+        if r.status_code != 200:
+            err = data.get("error") if isinstance(data, dict) else None
+            reason = _sanitize(f"HTTP {r.status_code}: {(err or {}).get('message') or data}")
+            return await self._api_failure(turn, reason, f"The JARVIS service refused that, so nothing was started. {reason}")
+        say = data.get("say") or "I didn't get a reply from JARVIS."
+        self.trace.mark("claude_response", turn, kind=data.get("kind"), agent=data.get("agent"),
+                        ms=int((time.monotonic() - t0) * 1000), replayed=data.get("replayed"))
+        if data.get("kind") == "provider_error":
+            await self.publish("error", say, turn=turn, stage="claude")
+        await self.publish("status", say, turn=turn)
+        if data.get("kind"):
+            await self.publish("reply", json.dumps({"kind": data["kind"], "command_id": data.get("command_id"),
+                                                    "campaign_id": data.get("campaign_id")}), turn=turn)
+        if data.get("campaign_id") and self.speak is not None:
+            self.watch(data["campaign_id"])
+        self.agent_said(say)
+        self.trace.mark("tts_requested", turn, chars=len(say))
+        return say
+
+    async def _api_failure(self, turn: str, reason: str, say: str) -> str:
+        self.trace.mark("jarvis_api_error", turn, error=reason)
+        await self.publish("error", f"The JARVIS service failed: {reason}", turn=turn, stage="jarvis_api")
+        await self.publish("status", say, turn=turn)
+        self.agent_said(say)
         return say
 
     def watch(self, campaign_id: str) -> None:
@@ -140,7 +318,8 @@ class TurnHandler:
             key = (p.get("state"), p.get("stage"), (p.get("counts") or {}).get("deployed"))
             if key != last:
                 if last is not None:
-                    await self.publish("progress", p["say"])
+                    await self.publish("progress", p["say"], turn=None)
+                    self.agent_said(p["say"])
                     await self.speak(p["say"])
                 last = key
             if p.get("state") in TERMINAL:
@@ -239,6 +418,32 @@ def prewarm(proc) -> None:
 
 
 _AGENT_CLASS = None
+_BRIDGE_CLASS = None
+
+
+def jarvis_bridge_llm_class():
+    """The session's LLM object. LiveKit only generates replies when the session has an LLM (agent_activity skips the
+    reply when it is None, which is why JARVIS used to hear the owner and never answer). Replies never come from
+    here: `JarvisVoice.llm_node` sends each turn to the shared JARVIS conversation. Calling `chat` directly is a bug."""
+    global _BRIDGE_CLASS
+    if _BRIDGE_CLASS is None:
+        from livekit.agents import llm
+
+        class JarvisBridgeLLM(llm.LLM):
+            @property
+            def model(self) -> str:
+                return "jarvis-conversation"
+
+            @property
+            def provider(self) -> str:
+                return "jarvis"
+
+            def chat(self, **_kw):
+                raise RuntimeError("JarvisBridgeLLM.chat called: JARVIS replies come from JarvisVoice.llm_node "
+                                   "(the shared JARVIS conversation API), never from a direct model call")
+
+        _BRIDGE_CLASS = JarvisBridgeLLM
+    return _BRIDGE_CLASS
 
 
 def jarvis_agent_class():
@@ -253,8 +458,9 @@ def jarvis_agent_class():
                 self.turns = turns
 
             async def llm_node(self, chat_ctx, tools, model_settings):
-                # Every turn goes to the shared JARVIS conversation (the same Claude agent and memory as text).
-                return await self.turns.handle(last_user_text(chat_ctx.items))
+                # Called once per committed user turn (never on interim transcripts: preemptive generation is off).
+                # The turn goes to the shared JARVIS conversation: the same Claude agent, memory, tools and approvals.
+                return await self.turns.respond(chat_ctx.items)
 
             async def on_exit(self) -> None:
                 await self.turns.aclose()
@@ -263,42 +469,119 @@ def jarvis_agent_class():
     return _AGENT_CLASS
 
 
+def wire_session(session, trace: PipelineTrace, turns: TurnHandler, publish) -> None:
+    """Logs every pipeline stage under the turn's correlation id and surfaces STT/TTS/Claude errors to the browser."""
+
+    def on_user_state(ev) -> None:
+        if ev.new_state == "speaking":
+            trace.mark("speech_start", trace.begin_turn())
+        elif ev.old_state == "speaking":
+            trace.mark("speech_end")
+
+    def on_transcribed(ev) -> None:
+        turn = trace.begin_turn()
+        if ev.is_final:
+            trace.mark("final_transcript", turn, chars=len(ev.transcript), text=ev.transcript if LOG_TRANSCRIPTS else None)
+        else:
+            trace.interims += 1
+            if trace.interims == 1:
+                trace.mark("interim_transcript", turn, chars=len(ev.transcript))
+
+    def on_agent_state(ev) -> None:
+        trace.mark(f"agent_{ev.new_state}")
+        if ev.new_state == "speaking":
+            trace.mark("tts_playout_start")
+
+    def on_item(ev) -> None:
+        item = ev.item
+        if getattr(item, "role", None) == "assistant":
+            trace.mark("reply_played", interrupted=getattr(item, "interrupted", False))
+
+    def on_error(ev) -> None:
+        stage, text = describe_error(ev.error)
+        trace.mark(f"{stage}_error", error=text)
+        asyncio.ensure_future(publish("error", text, turn=trace.turn, stage=stage))
+
+    def on_no_transcript(_ev) -> None:
+        trace.mark("stt_timeout")
+        asyncio.ensure_future(publish("error", "I heard you speak but speech recognition returned no words. Please say it "
+                                      "again.", turn=trace.turn, stage="stt"))
+
+    def on_close(ev) -> None:
+        if ev.error is not None:
+            stage, text = describe_error(ev.error)
+            trace.mark("session_closed_error", stage=stage, error=text)
+        else:
+            trace.mark("session_closed", reason=getattr(ev, "reason", None))
+
+    session.on("user_state_changed", on_user_state)
+    session.on("user_input_transcribed", on_transcribed)
+    session.on("agent_state_changed", on_agent_state)
+    session.on("conversation_item_added", on_item)
+    session.on("error", on_error)
+    session.on("user_transcription_timeout", on_no_transcript)
+    session.on("close", on_close)
+
+
 async def entrypoint(ctx) -> None:
     """One JARVIS voice session in a dispatched room (runs inside a job process)."""
+    from livekit import rtc
     from livekit.agents import AgentSession, RoomInputOptions
     await ctx.connect()
+    trace = PipelineTrace(ctx.room.name)
+    trace.mark("agent_joined")
     participant = await ctx.wait_for_participant()
     ident = parse_identity(participant.identity, participant.metadata)
     if ident is None:
         log.warning("voice.rejected_participant %s", participant.identity)
         return
 
-    async def publish(kind: str, text: str) -> None:
-        await ctx.room.local_participant.publish_data(json.dumps({"type": kind, "text": text, "final": True}).encode(),
-                                                      reliable=True, topic="jarvis")
+    async def publish(kind: str, text: str, turn: str | None = None, stage: str | None = None) -> None:
+        msg = {"type": kind, "text": text, "final": True, "turn": turn}
+        if stage:
+            msg["stage"] = stage
+        try:
+            await ctx.room.local_participant.publish_data(json.dumps(msg).encode(), reliable=True, topic="jarvis")
+        except Exception as exc:                               # never let a UI message break the audio loop
+            log.warning("voice.publish_failed %s", exc)
+
+    def on_track(track, _pub, p) -> None:
+        if p.identity == participant.identity and track.kind == rtc.TrackKind.KIND_AUDIO:
+            trace.mark("mic_audio_subscribed")
+    ctx.room.on("track_subscribed", on_track)
+    ctx.room.on("local_track_published", lambda pub, _t: trace.mark("agent_audio_track_published", kind=str(pub.kind)))
 
     vad = ctx.proc.userdata.get("vad")
     if vad is None:                                   # prewarm did not run (e.g. a custom launcher): load now
         from livekit.plugins import silero
         vad = silero.VAD.load()
-    session = AgentSession(stt=STT, tts=TTS, vad=vad, turn_handling=TURN_HANDLING)
+    detector = make_turn_detector()
+    session = AgentSession(stt=STT, tts=TTS, vad=vad, llm=jarvis_bridge_llm_class()(),
+                           turn_handling=turn_handling(detector))
+    trace.mark("session_configured", stt=STT, tts=TTS, turn_detection=TURN_DETECTION,
+               endpointing=f"{ENDPOINT_MIN_S}-{ENDPOINT_MAX_S}s", preemptive=False)
 
     async def speak(text: str) -> None:
         session.say(text, allow_interruptions=True)
 
-    turns = TurnHandler(*ident, publish, speak=speak)
+    turns = TurnHandler(*ident, publish, speak=speak, trace=trace)
+    wire_session(session, trace, turns, publish)
 
     def on_data(packet) -> None:
         sender = getattr(getattr(packet, "participant", None), "identity", None)
         kind = parse_control(packet.data, getattr(packet, "topic", None), sender, participant.identity)
         if kind == "interrupt":
+            trace.mark("interrupt_requested")
             session.interrupt()
         elif kind == "end":
             ctx.shutdown(reason="ended by user")
+        elif kind and kind.startswith("client:"):
+            trace.mark("browser_" + kind.removeprefix("client:"))
     ctx.room.on("data_received", on_data)
 
     await session.start(room=ctx.room, agent=jarvis_agent_class()(turns),
                         room_input_options=RoomInputOptions(participant_identity=participant.identity, close_on_disconnect=True))
+    turns.agent_said(GREETING)
     await session.say(GREETING, allow_interruptions=True)
 
 

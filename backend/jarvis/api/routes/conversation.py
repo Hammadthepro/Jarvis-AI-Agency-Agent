@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
+import logging
 import re
+import time
 from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
@@ -27,6 +29,8 @@ from jarvis.api.routes.campaigns import AnswersIn, CommandIn, ConfirmIn, answer,
 from jarvis.core.errors import ComplianceBlocked, JarvisError
 
 router = APIRouter()
+log = logging.getLogger("jarvis.conversation")
+TURN_ID = r"^[A-Za-z0-9._:-]{1,80}$"
 
 CONFIRM = re.compile(r"^(yes,? )?(confirm(ed)?|go ahead|do it|authori[sz]e( it)?|start( it)?|proceed|yes)( please)?$")
 CANCEL = re.compile(r"^(cancel( that| it)?|never ?mind|forget (it|that)|stop that|no,? cancel( it)?)( please)?$")
@@ -197,7 +201,8 @@ async def _store(db, me: Principal, role: str, channel: str, content: str, meta:
                         values ($1,$2,$3,$4,$5,$6)""", me.workspace_id, me.user_id, role, channel, content[:8000], meta or {})
 
 
-async def handle_turn(request: Request, me: Principal, text: str, channel: str) -> dict:
+async def handle_turn(request: Request, me: Principal, text: str, channel: str, turn_id: str | None = None,
+                      voice: dict | None = None) -> dict:
     """One turn of the single JARVIS conversation (voice and text alike).
 
     Mode "auto"/"claude": Claude with tools. If Claude is not configured or the call fails, the reply says so plainly
@@ -208,7 +213,20 @@ async def handle_turn(request: Request, me: Principal, text: str, channel: str) 
     from jarvis.core.integrations import DISABLED
     db = request.app.state.db
     s = request.app.state.deps.settings
-    await _store(db, me, "user", channel, text)
+    t0 = time.perf_counter()
+    if turn_id:
+        # A voice turn is identified by the agent's correlation id: a retried request returns the stored reply instead of
+        # running the turn (and any tool) a second time.
+        prev = await db.fetchrow("""select content, meta from conversation_messages where workspace_id=$1 and user_id=$2
+                                   and role='assistant' and meta->>'turn_id'=$3 order by id desc limit 1""",
+                                 me.workspace_id, me.user_id, turn_id)
+        if prev is not None:
+            log.info("conversation.turn_replayed turn=%s", turn_id)
+            m = dict(prev["meta"] or {})
+            return {**{k: m.get(k) for k in ("kind", "command_id", "campaign_id", "agent", "provider_error") if m.get(k)},
+                    "say": prev["content"], "turn_id": turn_id, "replayed": True}
+    await _store(db, me, "user", channel, text, {"turn_id": turn_id} if turn_id else None)
+    log.info("conversation.turn_received turn=%s channel=%s chars=%d", turn_id, channel, len(text))
     if s.jarvis_conversation_agent == "deterministic":
         out = await deterministic_turn(request, me, text, channel)
         out["agent"] = "basic_parser"
@@ -217,8 +235,9 @@ async def handle_turn(request: Request, me: Principal, text: str, channel: str) 
             "Anthropic is not configured (Integrations > Anthropic)"
         out = _provider_failure(f"Claude unavailable: {why}.", {"state": "DISABLED" if "anthropic" in DISABLED else "NOT_CONFIGURED"})
     else:
+        log.info("conversation.claude_request_start turn=%s", turn_id)
         try:
-            out = await claude_turn(request, me, text, channel)
+            out = await claude_turn(request, me, text, channel, voice)
         except BudgetBlocked as exc:
             out = _provider_failure(f"Claude unavailable: the Anthropic budget limit was reached ({exc.message}).",
                                     {"state": "BUDGET_BLOCKED"})
@@ -228,8 +247,14 @@ async def handle_turn(request: Request, me: Principal, text: str, channel: str) 
                                                                   if k in ("exception", "http_status", "error_type", "request_id")}})
     meta = {k: out.get(k) for k in ("kind", "command_id", "campaign_id", "agent", "provider_error") if out.get(k)}
     meta.update({k: v for k, v in (out.get("meta") or {}).items() if k in ("tools", "agent")})
+    if turn_id:
+        meta["turn_id"] = turn_id
     await _store(db, me, "assistant", channel, out.get("say") or "", meta)
     out.pop("meta", None)
+    log.info("conversation.reply turn=%s kind=%s agent=%s ms=%d", turn_id, out.get("kind"), out.get("agent"),
+             int((time.perf_counter() - t0) * 1000))
+    if turn_id:
+        out["turn_id"] = turn_id
     return out
 
 
@@ -275,6 +300,9 @@ class VoiceIn(BaseModel):
     user_id: UUID
     workspace_id: UUID
     text: str = Field(min_length=1, max_length=2000)
+    turn_id: str | None = Field(default=None, pattern=TURN_ID)   # the agent's correlation id for this spoken turn
+    # When the owner talked over JARVIS's previous reply: the part of it they actually heard (from the agent's playout).
+    interrupted_heard: str | None = Field(default=None, max_length=2000)
 
 
 def _check_agent(request: Request, key: str | None) -> None:
@@ -298,7 +326,9 @@ async def voice_command(body: VoiceIn, request: Request, x_voice_agent_key: str 
     if me.role == "viewer":
         return {"kind": "error", "say": "Your role is viewer, so I can report status but not start work."} \
             if not STATUS.search(body.text.lower()) else await _status(request.app.state.db, me)
-    return await handle_turn(request, me, body.text.strip(), "voice")
+    voice = {"previous_reply_interrupted": True, "owner_heard_only": body.interrupted_heard} \
+        if body.interrupted_heard is not None else None
+    return await handle_turn(request, me, body.text.strip(), "voice", body.turn_id, voice)
 
 
 @router.get("/internal/voice/progress")

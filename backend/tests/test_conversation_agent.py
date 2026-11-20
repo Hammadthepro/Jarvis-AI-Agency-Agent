@@ -232,3 +232,50 @@ async def test_success_through_the_real_sdk_and_multi_turn_context(client, agent
     rows = await db.fetch("select meta from conversation_messages where workspace_id=$1 and role='assistant' order by id",
                           a["me"]["workspace_id"])
     assert all(r["meta"].get("agent") == "claude" for r in rows)
+
+
+async def test_voice_turn_id_is_recorded_and_a_retry_is_not_run_twice(client, agent, db):
+    """The voice agent's correlation id is stored with both messages; a retried turn returns the stored reply and
+    neither calls Claude nor stores the turn again (no repeated responses)."""
+    a = await login(client, "turnid@agent.dev")
+    agent.queue = [msg("Got it: web development prospects in Denver. Which industry should I focus on?")]
+    body = {"user_id": a["me"]["user_id"], "workspace_id": a["me"]["workspace_id"],
+            "text": "Find potential customers for web development in Denver", "turn_id": "RM_abc:t1"}
+    r1 = (await client.post("/internal/voice/command", headers={"X-Voice-Agent-Key": SECRET}, json=body)).json()
+    assert r1["turn_id"] == "RM_abc:t1" and r1["kind"] == "reply" and "Denver" in r1["say"]
+    r2 = (await client.post("/internal/voice/command", headers={"X-Voice-Agent-Key": SECRET}, json=body)).json()
+    assert r2["replayed"] is True and r2["say"] == r1["say"] and len(agent.seen) == 1
+    rows = await db.fetch("select role, meta from conversation_messages where workspace_id=$1 order by id", a["me"]["workspace_id"])
+    assert [r["role"] for r in rows] == ["user", "assistant"]
+    assert all(r["meta"]["turn_id"] == "RM_abc:t1" for r in rows)
+
+
+async def test_voice_follow_up_carries_the_previous_turn(client, agent, db):
+    """A spoken follow-up reaches Claude with the earlier turn in its history (one conversation)."""
+    a = await login(client, "followup@agent.dev")
+    agent.queue = [msg("Denver web development prospects: which industry first?"), msg("Roofing, outdated sites first. Shall I start?")]
+    await turn(client, a, "Find potential customers for web development in Denver", channel="voice")
+    r = await turn(client, a, "Focus on roofing companies, and prioritize businesses with outdated websites", channel="voice")
+    assert "Roofing" in r["say"]
+    sent = agent.seen[1]["messages"]
+    assert sent[0]["content"].startswith("Find potential customers for web development in Denver")
+    assert sent[-1]["content"].startswith("Focus on roofing companies")
+
+
+async def test_voice_turn_id_is_validated(client, agent):
+    a = await login(client, "badturn@agent.dev")
+    r = await client.post("/internal/voice/command", headers={"X-Voice-Agent-Key": SECRET},
+                          json={"user_id": a["me"]["user_id"], "workspace_id": a["me"]["workspace_id"], "text": "hi",
+                                "turn_id": "x' or 1=1 --"})
+    assert r.status_code == 422
+
+
+async def test_interrupted_reply_context_reaches_claude(client, agent):
+    a = await login(client, "interrupt@agent.dev")
+    agent.queue = [msg("Understood, Austin instead.")]
+    r = await client.post("/internal/voice/command", headers={"X-Voice-Agent-Key": SECRET},
+                          json={"user_id": a["me"]["user_id"], "workspace_id": a["me"]["workspace_id"],
+                                "text": "No wait, make it Austin", "turn_id": "RM_x:t2", "interrupted_heard": "I'll look for roofers in"})
+    assert r.status_code == 200 and r.json()["say"] == "Understood, Austin instead."
+    system = agent.seen[0]["system"]
+    assert '"previous_reply_interrupted": true' in system and "I'll look for roofers in" in system

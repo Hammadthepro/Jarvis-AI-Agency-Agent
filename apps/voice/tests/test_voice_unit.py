@@ -26,36 +26,127 @@ def test_last_user_text():
     assert agent.last_user_text([]) == ""
 
 
+class Pub:
+    def __init__(self):
+        self.msgs = []
+
+    async def __call__(self, kind, text, turn=None, stage=None):
+        self.msgs.append((kind, text, turn, stage))
+
+    def kinds(self):
+        return [m[0] for m in self.msgs]
+
+
+def item(role, text, id=None, interrupted=False):
+    return SimpleNamespace(role=role, text_content=text, id=id or f"{role}-{text[:8]}", interrupted=interrupted)
+
+
 @pytest.mark.asyncio
 async def test_turn_executes_command_and_returns_spoken_reply():
-    seen, published = [], []
+    seen, pub = [], Pub()
 
     def handler(req):
         seen.append((req.headers["X-Voice-Agent-Key"], json.loads(req.content)))
-        return httpx.Response(200, json={"say": "I'll look for 10 roofing businesses in Denver, CO. Say confirm to authorize."})
-
-    async def publish(kind, text):
-        published.append((kind, text))
-    t = agent.TurnHandler("u1", "w1", publish, http=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-                          api="http://api", secret="s3cret")
-    say = await t.handle("Find 10 roofers in Denver")
-    assert "roofing" in say and seen == [("s3cret", {"user_id": "u1", "workspace_id": "w1", "text": "Find 10 roofers in Denver"})]
-    assert published == [("transcript", "Find 10 roofers in Denver"), ("status", say)]
+        return httpx.Response(200, json={"say": "I'll look for 10 roofing businesses in Denver, CO. Say confirm to authorize.",
+                                         "kind": "proposal", "agent": "claude"})
+    trace = agent.PipelineTrace("RM_room")
+    t = agent.TurnHandler("u1", "w1", pub, http=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                          api="http://api", secret="s3cret", trace=trace)
+    say = await t.respond([item("user", "Find 10 roofers in Denver", "i1")])
+    assert "roofing" in say
+    assert seen == [("s3cret", {"user_id": "u1", "workspace_id": "w1", "text": "Find 10 roofers in Denver", "turn_id": "RM_room:t1"})]
+    assert pub.msgs[0] == ("transcript", "Find 10 roofers in Denver", "RM_room:t1", None)
+    assert ("status", say, "RM_room:t1", None) in pub.msgs
+    assert trace.stages("RM_room:t1") == ["turn_commit", "reply_generation_start", "claude_request_start",
+                                         "claude_response", "tts_requested"]
 
 
 @pytest.mark.asyncio
 async def test_turn_reports_api_errors_and_outage_honestly():
-    async def publish(kind, text):
-        pass
-    t = agent.TurnHandler("u1", "w1", publish, http=httpx.AsyncClient(transport=httpx.MockTransport(
+    pub = Pub()
+    t = agent.TurnHandler("u1", "w1", pub, http=httpx.AsyncClient(transport=httpx.MockTransport(
         lambda r: httpx.Response(401, json={"error": {"message": "voice agent key invalid or voice NOT_CONFIGURED"}}))))
     assert "NOT_CONFIGURED" in await t.handle("hello")
+    assert ("error", "jarvis_api") in [(m[0], m[3]) for m in pub.msgs]
 
     def down(req):
         raise httpx.ConnectError("refused", request=req)
-    t2 = agent.TurnHandler("u1", "w1", publish, http=httpx.AsyncClient(transport=httpx.MockTransport(down)))
+    t2 = agent.TurnHandler("u1", "w1", pub, http=httpx.AsyncClient(transport=httpx.MockTransport(down)))
     assert "couldn't reach" in await t2.handle("hello")
-    assert await t2.handle("") == "I didn't catch that."
+    assert await t2.handle("") is None                     # nothing heard: nothing sent, nothing said
+
+
+@pytest.mark.asyncio
+async def test_claude_failure_is_surfaced_as_a_claude_error():
+    pub = Pub()
+    t = agent.TurnHandler("u1", "w1", pub, http=httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={"kind": "provider_error", "agent": "claude",
+                                            "say": "Claude unavailable: PaymentRequiredError HTTP 402 billing_error."}))))
+    say = await t.handle("Find roofers in Denver")
+    assert say.startswith("Claude unavailable") and ("error", say, "local:t1", "claude") in pub.msgs
+
+
+def test_one_turn_per_commit_and_interims_do_not_create_turns():
+    tr = agent.PipelineTrace("R")
+    assert tr.begin_turn() == "R:t1" and tr.begin_turn() == "R:t1"     # speech start + interim updates: same turn
+    assert tr.commit() == "R:t1"
+    assert tr.begin_turn() == "R:t2"                                    # next utterance
+    assert tr.commit() == "R:t2" and tr.commit() == "R:t3"
+
+
+def test_pending_turn_merges_unsent_fragments_and_reports_interrupted_reply():
+    items = [item("user", "hello", "a"), item("assistant", "Hi, what should I work on?", "b"),
+             item("user", "Find me the potential customers for", "c"), item("user", "web development in Denver.", "d")]
+    text, ids, heard = agent.pending_user_turn(items, sent=set())
+    assert text == "Find me the potential customers for web development in Denver." and ids == ["c", "d"] and heard is None
+    text, ids, _ = agent.pending_user_turn(items, sent={"c"})
+    assert text == "web development in Denver." and ids == ["d"]
+    items2 = [item("assistant", "I'll look for roofers in", "e", interrupted=True), item("user", "No, make it Austin", "f")]
+    assert agent.pending_user_turn(items2, set()) == ("No, make it Austin", ["f"], "I'll look for roofers in")
+
+
+@pytest.mark.asyncio
+async def test_a_turn_is_sent_once_even_if_generation_runs_again():
+    calls, pub = [], Pub()
+    t = agent.TurnHandler("u1", "w1", pub, http=httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: calls.append(1) or httpx.Response(200, json={"say": "OK.", "kind": "reply"}))))
+    items = [item("user", "Find potential customers for web development in Denver", "u1")]
+    assert await t.respond(items) == "OK."
+    assert await t.respond(items) is None and len(calls) == 1     # already sent: no second request, no repeated reply
+
+
+@pytest.mark.asyncio
+async def test_echo_of_jarvis_own_speech_is_ignored():
+    calls, pub = [], Pub()
+    t = agent.TurnHandler("u1", "w1", pub, http=httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: calls.append(1) or httpx.Response(200, json={"say": "x"}))))
+    t.agent_said("JARVIS here. What should I work on?")
+    assert await t.respond([item("user", "what should I work on", "e1")]) is None and calls == []
+    assert agent.looks_like_echo("what should I work on", ["JARVIS here. What should I work on?"])
+    assert not agent.looks_like_echo("work on roofing companies in Denver", ["JARVIS here. What should I work on?"])
+    assert not agent.looks_like_echo("yes", ["Shall I start? Say yes."])          # short answers are never echo-dropped
+
+
+def test_turn_handling_uses_turn_detector_endpointing_and_no_preemptive_generation():
+    th = agent.turn_handling("DETECTOR")
+    assert th["turn_detection"] == "DETECTOR" and th["preemptive_generation"] == {"enabled": False}
+    assert th["interruption"]["enabled"] is True
+    assert th["endpointing"]["min_delay"] >= 0.5 and th["endpointing"]["max_delay"] >= 3.0
+    assert agent.turn_handling(None)["turn_detection"] == "vad"
+
+
+def test_session_errors_name_the_failing_stage():
+    err = SimpleNamespace(type="stt_error", error=RuntimeError("websocket closed"), recoverable=True)
+    assert agent.describe_error(err) == ("stt", "Speech recognition error: RuntimeError: websocket closed. Retrying.")
+    assert agent.describe_error(SimpleNamespace(type="tts_error", error=TimeoutError("t"), recoverable=False))[0] == "tts"
+    assert agent.describe_error(SimpleNamespace(type="llm_error", error=ValueError("x"), recoverable=False))[0] == "claude"
+
+
+def test_browser_pipeline_events_are_accepted_only_from_an_allowlist():
+    ok = json.dumps({"type": "client", "event": "audio_playing"}).encode()
+    assert agent.parse_control(ok, "jarvis-control", "user-1", "user-1") == "client:audio_playing"
+    bad = json.dumps({"type": "client", "event": "rm -rf"}).encode()
+    assert agent.parse_control(bad, "jarvis-control", "user-1", "user-1") is None
 
 
 @pytest.mark.asyncio
@@ -67,7 +158,13 @@ async def test_worker_and_session_objects_construct_with_real_sdk(monkeypatch):
     opts = agent.build_worker()
     assert callable(opts.entrypoint_fnc)
     from livekit.agents import AgentSession, RoomInputOptions
-    AgentSession(stt=agent.STT, tts=agent.TTS, turn_handling=agent.TURN_HANDLING)
+    detector = agent.make_turn_detector()
+    session = AgentSession(stt=agent.STT, tts=agent.TTS, llm=agent.jarvis_bridge_llm_class()(),
+                           turn_handling=agent.turn_handling(detector))
+    # The root cause of "JARVIS hears but never answers": with no LLM, AgentActivity skips every reply.
+    assert session.llm is not None and session.llm.model == "jarvis-conversation"
+    from livekit.agents import inference
+    assert isinstance(detector, inference.TurnDetector)
     RoomInputOptions(participant_identity="user-1", close_on_disconnect=True)
 
 
@@ -94,7 +191,7 @@ async def test_progress_is_spoken_only_on_real_changes_and_stops_at_terminal_sta
     async def speak(t):
         spoken.append(t)
 
-    async def publish(k, t):
+    async def publish(k, t, turn=None, stage=None):
         published.append((k, t))
     t = agent.TurnHandler("u1", "w1", publish, http=httpx.AsyncClient(transport=httpx.MockTransport(
         lambda r: httpx.Response(200, json=next(states)))), api="http://api", secret="s", speak=speak, poll_s=0)
@@ -104,7 +201,7 @@ async def test_progress_is_spoken_only_on_real_changes_and_stops_at_terminal_sta
 
 @pytest.mark.asyncio
 async def test_authorized_campaign_starts_progress_watch():
-    async def publish(k, t):
+    async def publish(k, t, turn=None, stage=None):
         pass
 
     async def speak(t):
@@ -230,3 +327,30 @@ def test_server_marks_registration_when_livekit_registers_the_worker(monkeypatch
     server = agent.build_server()
     server.emit("worker_registered", "AW_42", None)
     assert agent.WORKER_STATE["registered"] is True and agent.WORKER_STATE["worker_id"] == "AW_42"
+
+
+@pytest.mark.asyncio
+async def test_real_agent_session_routes_a_committed_turn_to_jarvis_and_replies():
+    """Regression for "JARVIS hears but never answers": a real LiveKit AgentSession (text mode, no network) must send the
+    committed user turn to the JARVIS API once and turn its reply into the assistant message. Without an LLM object on
+    the session, LiveKit refuses to generate any reply, which is what the voice session silently did before."""
+    pytest.importorskip("livekit.agents")
+    from livekit.agents import AgentSession
+    calls = []
+
+    def handler(req):
+        calls.append(json.loads(req.content))
+        return httpx.Response(200, json={"say": "Denver web development prospects. Which industry first?", "kind": "reply"})
+    turns = agent.TurnHandler("u1", "w1", Pub(), http=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                              trace=agent.PipelineTrace("R"))
+    async with AgentSession(llm=agent.jarvis_bridge_llm_class()()) as s:
+        await s.start(agent.jarvis_agent_class()(turns))
+        res = await s.run(user_input="Find potential customers for web development in Denver")
+    replies = [e.item.text_content for e in res.events if getattr(e.item, "role", None) == "assistant"]
+    assert replies == ["Denver web development prospects. Which industry first?"]
+    assert len(calls) == 1 and calls[0]["text"] == "Find potential customers for web development in Denver"
+
+    async with AgentSession() as s:                         # the old configuration: no LLM -> no reply at all
+        await s.start(agent.jarvis_agent_class()(turns))
+        with pytest.raises(RuntimeError, match="without an LLM"):
+            await s.run(user_input="hello")

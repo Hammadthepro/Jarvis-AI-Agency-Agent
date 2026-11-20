@@ -1,6 +1,6 @@
 # JARVIS — Implementation Status
 
-As of 2026-11-19 (revision 7: Integrations Center, voice agent and unified conversation router). Branch `main`.
+As of 2026-11-20 (revision 12: natural real-time voice conversation; see CHANGELOG.md). Branch `main`.
 
 **Overall: NOT production-ready and NOT deployed.** The platform is implemented and passes its automated tests
 against real local infrastructure (PostgreSQL, Chromium, Docker) with **test doubles for every third-party provider**.
@@ -20,10 +20,10 @@ Four separate levels are tracked below. A higher level is never implied by a low
 
 | Suite | Where | Result | What it exercises |
 |---|---|---|---|
-| Backend `pytest` | this environment | **151 passed, 4 skipped** | Real PostgreSQL 16 (migrations 0001–0008, RLS); real Chromium (Playwright/axe); real Docker sandbox and sandbox runner; S3-protocol server (moto) for backups; provider HTTP via test doubles or httpx MockTransport |
+| Backend `pytest` | this environment | **191 passed, 4 skipped** | Real PostgreSQL 16 (migrations 0001–0008, RLS); real Chromium (Playwright/axe); real Docker sandbox and sandbox runner; S3-protocol server (moto) for backups; provider HTTP via test doubles or httpx MockTransport |
 | Backend live tests (`tests/live`) | this environment | **4 skipped**: no credentials | Claude, SerpApi, Firecrawl, Cloudflare. One capped call each |
-| Voice agent (`apps/voice/tests`) | this environment | **10 passed, 2 skipped** | Turn handling, progress narration, control-message ownership, credential sourcing, heartbeat. Live LiveKit test skipped: no credentials |
-| Dashboard Vitest / typecheck / build | this environment | **14 passed / clean / pass** | Integrations Center, voice states, usage labels, command flow |
+| Voice agent (`apps/voice/tests`) | this environment | **28 passed, 2 skipped** | Real `AgentSession` turn → JARVIS → reply; turn ids, merging, echo guard, turn handling, stage errors; job-process spawn. Live LiveKit test skipped: no credentials |
+| Dashboard Vitest / typecheck / build | this environment | **21 passed / clean / pass** | Integrations Center, voice states and live-caption segments, usage labels, command flow |
 | Real-stack E2E | this environment | **pass** | Real API, worker, Postgres and built dashboard in Chromium, including the Integrations Center, Voice page and the live invalid-key checks below |
 | Lint | this environment | `ruff` clean | |
 | GitHub Actions CI | GitHub, `main` at 9d768a7 | **all jobs passed** | backend, dashboard, voice, images, secrets-scan. Revision 7 commits not yet observed in CI when this was written |
@@ -95,6 +95,7 @@ Revision 6 tests (architecture consistency, evidence integrity, usage labels, ba
 | 37 | One conversation for voice and text (Claude with tools, memory, explicit-yes gate) | ✅ | ✅ | ❌ | — | Tested with a scripted Claude double. Not yet run against real Claude from this environment (credentials live in your Codespace): run `scripts/verify-live.sh` |
 | 38 | Managed, supervised voice agent; health = registered + job process started | ✅ | ✅ | ❌ | — | A real job process is spawned in tests (forkserver, SDK preloads). Registration with a real LiveKit server and a real session still need your LiveKit project: `scripts/verify-live.sh` |
 | 39 | Voice-first JARVIS screen | ✅ | ✅ | — | — | Unit and real-stack E2E (text path); the live voice path needs LiveKit |
+| 40 | Natural voice turns: reply after every turn, one message per turn, turn detector, barge-in, echo guard, stage-named errors, pipeline correlation logs | ✅ | ✅ | ❌ | — | Root cause of "no reply" fixed (the session had no LLM object, so LiveKit skipped every reply); proven with a real `AgentSession` turn in the offline suite. Real-room conversation test and Chromium voice test are written and wired into `scripts/verify-live.sh`, but have **not run yet**: the LiveKit credentials are only in your Codespace |
 | — | Production deployment | ⚠️ | ⚠️ | — | ❌ | Compose, deploy script and hardening are implemented and checked statically; images build in CI. **No VPS: nothing deployed** |
 
 ## 3. What you must provide
