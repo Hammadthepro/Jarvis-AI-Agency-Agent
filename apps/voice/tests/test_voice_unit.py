@@ -164,3 +164,69 @@ async def test_plugins_outside_a_job_need_the_sdk_http_context():
         http_context.http_session()
     async with http_context.open():
         assert http_context.http_session() is not None
+
+
+# ---------------------------------------------------------------- job process start (regression: "Can't pickle local object")
+def test_entrypoint_and_prewarm_are_module_level_and_picklable():
+    import pickle
+    for fn in (agent.entrypoint, agent.prewarm):
+        assert "<locals>" not in fn.__qualname__
+        assert pickle.loads(pickle.dumps(fn)) is fn                       # pickled by reference, as forkserver does
+    opts = agent.build_worker()
+    assert opts.entrypoint_fnc is agent.entrypoint and opts.prewarm_fnc is agent.prewarm
+
+
+def test_a_real_job_process_starts_and_runs_prewarm():
+    """Spawns a real LiveKit job process exactly as AgentServer does on Linux (forkserver + SDK preloads)."""
+    import subprocess
+    here = Path(__file__).resolve().parent
+    r = subprocess.run([sys.executable, str(here / "spawn_job_process.py"), str(here.parent)], capture_output=True, text=True,
+                       timeout=180, env={**os.environ, "VOICE_AGENT_SHARED_SECRET": ""})
+    out = r.stdout + r.stderr
+    assert "Can't pickle" not in out, out[-2000:]
+    assert "RESULT: job process started and prewarm completed" in out, out[-2000:]
+    assert "Traceback" not in out, out[-2000:]
+
+
+def test_prewarm_reports_a_ready_job_process(monkeypatch):
+    sent = []
+    monkeypatch.setattr(agent, "SECRET", "s")
+    monkeypatch.setattr(agent, "heartbeat_once", lambda c, **kw: sent.append(kw.get("event")) or True)
+    proc = SimpleNamespace(userdata={})
+    agent.prewarm(proc)
+    assert proc.userdata["vad"] is not None and sent == ["process_ready"]
+
+
+def test_worker_errors_are_captured_and_sanitized(monkeypatch):
+    import logging
+    monkeypatch.setitem(agent.WORKER_STATE, "last_error", None)
+    h = agent.LiveKitErrorCapture()
+    try:
+        raise AttributeError("Can't pickle local object 'build_worker.<locals>.entrypoint' api_secret=abc123SECRET")
+    except AttributeError:
+        rec = logging.LogRecord("livekit.agents", logging.ERROR, __file__, 1, "error spawning process", None, sys.exc_info())
+    h.emit(rec)
+    err = agent.WORKER_STATE["last_error"]
+    assert "Can't pickle" in err and "abc123SECRET" not in err
+    h.emit(logging.LogRecord("livekit.agents", logging.INFO, __file__, 1, "fine", None, None))   # handler level filters info
+
+
+def test_heartbeat_carries_registration_and_last_error(monkeypatch):
+    seen = []
+    monkeypatch.setitem(agent.WORKER_STATE, "registered", True)
+    monkeypatch.setitem(agent.WORKER_STATE, "worker_id", "AW_1")
+    monkeypatch.setitem(agent.WORKER_STATE, "last_error", "boom")
+    c = httpx.Client(transport=httpx.MockTransport(lambda r: seen.append(json.loads(r.content)) or httpx.Response(200, json={})))
+    assert agent.heartbeat_once(c, "http://api", "s")
+    assert seen[0]["registered"] is True and seen[0]["worker_id"] == "AW_1" and seen[0]["last_error"] == "boom"
+    assert seen[0]["event"] == "heartbeat" and seen[0]["agent_id"] == agent.AGENT_ID
+
+
+def test_server_marks_registration_when_livekit_registers_the_worker(monkeypatch):
+    monkeypatch.setenv("LIVEKIT_URL", "wss://example.livekit.cloud")
+    monkeypatch.setenv("LIVEKIT_API_KEY", "k")
+    monkeypatch.setenv("LIVEKIT_API_SECRET", "s")
+    monkeypatch.setitem(agent.WORKER_STATE, "registered", False)
+    server = agent.build_server()
+    server.emit("worker_registered", "AW_42", None)
+    assert agent.WORKER_STATE["registered"] is True and agent.WORKER_STATE["worker_id"] == "AW_42"

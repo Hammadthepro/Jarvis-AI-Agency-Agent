@@ -14,12 +14,19 @@ await page.goto(base);
 await page.getByLabel("Message JARVIS").waitFor();                       // voice-first JARVIS screen
 // A real text turn through the SAME conversation the voice agent uses. This environment has no Anthropic key, so the
 // honest result is an explicit provider failure: no silent basic-parser answer, nothing started.
-const unavailable = page.getByText(/Claude unavailable: Anthropic is not configured/);
-const before = await unavailable.count();
+const lastId = async () => ((await (await page.request.get(`${base}/api/conversation/messages?limit=1`)).json()).at(-1) ?? { id: 0 }).id;
+const before = await lastId();
 await page.getByLabel("Message JARVIS").fill("Find 10 roofers in Denver, CO");
 await page.getByRole("button", { name: "Send" }).click();
-for (let i = 0; i < 60 && (await unavailable.count()) <= before; i++) await page.waitForTimeout(500);
-assert((await unavailable.count()) === before + 1, "the new reply must be an explicit 'Claude unavailable' failure");
+let reply = null;
+for (let i = 0; i < 60 && !reply; i++) {
+  const msgs = await (await page.request.get(`${base}/api/conversation/messages?after=${before}`)).json();
+  reply = msgs.find((m) => m.role === "assistant") ?? null;
+  if (!reply) await page.waitForTimeout(500);
+}
+assert(reply && reply.meta.kind === "provider_error" && /^Claude unavailable: Anthropic is not configured/.test(reply.content),
+  "the new reply must be an explicit 'Claude unavailable' failure, got: " + JSON.stringify(reply));
+await page.getByText(reply.content).first().waitFor();                                   // and it is shown in the feed
 await page.screenshot({ path: `${out}/e2e-jarvis.png` });
 await page.goto(`${base}/commands`);
 await page.getByText("What should JARVIS work on?").waitFor();

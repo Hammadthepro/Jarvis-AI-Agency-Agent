@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import socket
 import threading
 import uuid
@@ -47,7 +48,9 @@ AGENT_NAME = os.environ.get("VOICE_AGENT_NAME", "jarvis")
 GREETING = "JARVIS here. What should I work on?"
 TURN_HANDLING = {"interruption": {"enabled": True}}   # barge-in: the operator can interrupt JARVIS mid-sentence
 VERSION = "2"
-AGENT_ID = f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
+# Shared by the worker and its job processes (they inherit the environment), so job processes report under it.
+AGENT_ID = os.environ.get("JARVIS_VOICE_AGENT_ID") or f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
+os.environ["JARVIS_VOICE_AGENT_ID"] = AGENT_ID
 TERMINAL = {"completed", "failed", "cancelled", "blocked", "requires_human_review"}
 
 
@@ -172,10 +175,36 @@ def ensure_livekit_env(api: str = API, secret: str = SECRET, http: httpx.Client 
     return "integrations_center"
 
 
-def heartbeat_once(http: httpx.Client, api: str = API, secret: str = SECRET, detail: str | None = None) -> bool:
+# Worker (parent process) health, reported with every heartbeat. A running supervisor or parent is NOT enough: the API
+# reports voice as operational only when the worker is registered with LiveKit and a job process has started.
+WORKER_STATE: dict = {"registered": False, "worker_id": None, "last_error": None}
+
+
+def _sanitize(text: str) -> str:
+    return re.sub(r"(api[_-]?(key|secret)|token|secret)\S*\s*[:=]\s*\S+", r"\1=***", text, flags=re.IGNORECASE)[:300]
+
+
+class LiveKitErrorCapture(logging.Handler):
+    """Keeps the most recent error the LiveKit SDK logged in the worker (e.g. a job process that cannot start)."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = record.getMessage()
+        if record.exc_info and record.exc_info[1] is not None:
+            exc = record.exc_info[1]
+            msg = f"{msg}: {type(exc).__name__}: {exc}"
+        WORKER_STATE["last_error"] = _sanitize(msg)
+
+
+def heartbeat_once(http: httpx.Client, api: str = API, secret: str = SECRET, detail: str | None = None,
+                   event: str = "heartbeat") -> bool:
     try:
         r = http.post(f"{api}/internal/voice/heartbeat", headers={"X-Voice-Agent-Key": secret},
-                      json={"agent_id": AGENT_ID, "version": VERSION, "detail": detail})
+                      json={"agent_id": AGENT_ID, "version": VERSION, "detail": detail, "event": event,
+                            "registered": WORKER_STATE["registered"], "worker_id": WORKER_STATE["worker_id"],
+                            "last_error": WORKER_STATE["last_error"]})
         return r.status_code == 200
     except httpx.HTTPError:
         return False
@@ -194,64 +223,102 @@ def start_heartbeat(interval_s: float = 30.0) -> threading.Event:
     return stop
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# LiveKit worker. Everything LiveKit hands to a job process (prewarm, entrypoint) is MODULE-LEVEL: on Linux the SDK starts
+# job processes with multiprocessing "forkserver", which pickles these callables by reference. A function defined inside
+# another function cannot be pickled ("Can't pickle local object ..."), so no job process could start.
+# ---------------------------------------------------------------------------------------------------------------------
 def prewarm(proc) -> None:
-    """Runs once per job process before any job: load the VAD model here, not while the user waits."""
+    """Runs once in each job process before it takes a job: load the VAD model, then report that a job process really
+    started (this is the signal that the worker can serve rooms)."""
     from livekit.plugins import silero
     proc.userdata["vad"] = silero.VAD.load()
+    if SECRET:
+        with httpx.Client(timeout=5) as c:
+            heartbeat_once(c, event="process_ready")
+
+
+_AGENT_CLASS = None
+
+
+def jarvis_agent_class():
+    """The LiveKit Agent subclass (created on first use so this module imports without LiveKit for unit tests)."""
+    global _AGENT_CLASS
+    if _AGENT_CLASS is None:
+        from livekit.agents import Agent
+
+        class JarvisVoice(Agent):
+            def __init__(self, turns: TurnHandler) -> None:
+                super().__init__(instructions="Relay the operator's spoken requests to JARVIS and speak JARVIS's replies.")
+                self.turns = turns
+
+            async def llm_node(self, chat_ctx, tools, model_settings):
+                # Every turn goes to the shared JARVIS conversation (the same Claude agent and memory as text).
+                return await self.turns.handle(last_user_text(chat_ctx.items))
+
+            async def on_exit(self) -> None:
+                await self.turns.aclose()
+
+        _AGENT_CLASS = JarvisVoice
+    return _AGENT_CLASS
+
+
+async def entrypoint(ctx) -> None:
+    """One JARVIS voice session in a dispatched room (runs inside a job process)."""
+    from livekit.agents import AgentSession, RoomInputOptions
+    await ctx.connect()
+    participant = await ctx.wait_for_participant()
+    ident = parse_identity(participant.identity, participant.metadata)
+    if ident is None:
+        log.warning("voice.rejected_participant %s", participant.identity)
+        return
+
+    async def publish(kind: str, text: str) -> None:
+        await ctx.room.local_participant.publish_data(json.dumps({"type": kind, "text": text, "final": True}).encode(),
+                                                      reliable=True, topic="jarvis")
+
+    vad = ctx.proc.userdata.get("vad")
+    if vad is None:                                   # prewarm did not run (e.g. a custom launcher): load now
+        from livekit.plugins import silero
+        vad = silero.VAD.load()
+    session = AgentSession(stt=STT, tts=TTS, vad=vad, turn_handling=TURN_HANDLING)
+
+    async def speak(text: str) -> None:
+        session.say(text, allow_interruptions=True)
+
+    turns = TurnHandler(*ident, publish, speak=speak)
+
+    def on_data(packet) -> None:
+        sender = getattr(getattr(packet, "participant", None), "identity", None)
+        kind = parse_control(packet.data, getattr(packet, "topic", None), sender, participant.identity)
+        if kind == "interrupt":
+            session.interrupt()
+        elif kind == "end":
+            ctx.shutdown(reason="ended by user")
+    ctx.room.on("data_received", on_data)
+
+    await session.start(room=ctx.room, agent=jarvis_agent_class()(turns),
+                        room_input_options=RoomInputOptions(participant_identity=participant.identity, close_on_disconnect=True))
+    await session.say(GREETING, allow_interruptions=True)
 
 
 def build_worker():
-    """Imports LiveKit only when running the agent (keeps TurnHandler testable without it)."""
-    from livekit.agents import Agent, AgentSession, JobContext, RoomInputOptions, WorkerOptions
-
-    class JarvisVoice(Agent):
-        def __init__(self, turns: TurnHandler) -> None:
-            super().__init__(instructions="Relay the operator's spoken commands to JARVIS and speak JARVIS's replies.")
-            self.turns = turns
-
-        async def llm_node(self, chat_ctx, tools, model_settings):  # noqa: ARG002 - signature defined by livekit-agents
-            return await self.turns.handle(last_user_text(chat_ctx.items))
-
-        async def on_exit(self) -> None:
-            await self.turns.aclose()
-
-    async def entrypoint(ctx: JobContext) -> None:
-        await ctx.connect()
-        participant = await ctx.wait_for_participant()
-        ident = parse_identity(participant.identity, participant.metadata)
-        if ident is None:
-            log.warning("voice.rejected_participant %s", participant.identity)
-            return
-
-        async def publish(kind: str, text: str) -> None:
-            await ctx.room.local_participant.publish_data(json.dumps({"type": kind, "text": text, "final": True}).encode(),
-                                                          reliable=True, topic="jarvis")
-
-        vad = ctx.proc.userdata.get("vad")
-        if vad is None:                                   # prewarm did not run (e.g. a custom launcher): load now
-            from livekit.plugins import silero
-            vad = silero.VAD.load()
-        session = AgentSession(stt=STT, tts=TTS, vad=vad, turn_handling=TURN_HANDLING)
-
-        async def speak(text: str) -> None:
-            session.say(text, allow_interruptions=True)
-
-        turns = TurnHandler(*ident, publish, speak=speak)
-
-        def on_data(packet) -> None:
-            sender = getattr(getattr(packet, "participant", None), "identity", None)
-            kind = parse_control(packet.data, getattr(packet, "topic", None), sender, participant.identity)
-            if kind == "interrupt":
-                session.interrupt()
-            elif kind == "end":
-                ctx.shutdown(reason="ended by user")
-        ctx.room.on("data_received", on_data)
-
-        await session.start(room=ctx.room, agent=JarvisVoice(turns),
-                            room_input_options=RoomInputOptions(participant_identity=participant.identity, close_on_disconnect=True))
-        await session.say(GREETING, allow_interruptions=True)
-
+    """Worker options: module-level (picklable) entrypoint and prewarm, explicit dispatch by name."""
+    from livekit.agents import WorkerOptions
     return WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm, agent_name=AGENT_NAME)
+
+
+def build_server():
+    """The LiveKit AgentServer with health tracking: registration with LiveKit and SDK errors feed the heartbeat."""
+    from livekit.agents import AgentServer
+    server = AgentServer.from_server_options(build_worker())
+
+    def on_registered(worker_id, _info) -> None:
+        WORKER_STATE.update(registered=True, worker_id=worker_id)
+        log.info("voice.worker_registered id=%s", worker_id)
+    server.on("worker_registered", on_registered)
+    logging.getLogger("livekit").addHandler(LiveKitErrorCapture())
+    return server
 
 
 if __name__ == "__main__":
@@ -265,4 +332,4 @@ if __name__ == "__main__":
     log.info("voice.livekit_credentials source=%s", source)
     start_heartbeat()
     from livekit.agents import cli
-    cli.run_app(build_worker())
+    cli.run_app(build_server())

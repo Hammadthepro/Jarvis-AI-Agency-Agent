@@ -43,7 +43,21 @@ async def test_voice_status_is_never_ready_on_configuration_alone(voice, db):
     assert any("Test connection" in m for m in s["missing"]) and any("voice agent" in m for m in s["missing"])
     await db.execute("insert into integration_status(provider, state, last_success_at) values ('livekit','CONNECTED',now())")
     assert (await voice.post("/internal/voice/heartbeat", json={"agent_id": "a1", "version": "2"})).status_code == 401
+    # Parent alive but NOT registered with LiveKit: not operational.
     assert (await voice.post("/internal/voice/heartbeat", json={"agent_id": "a1", "version": "2"}, headers=agent_h())).status_code == 200
+    s = (await voice.get("/voice/status", headers=a["headers"])).json()
+    assert s["state"] == "NOT_READY" and s["checks"]["agent_online"] and not s["checks"]["agent_registered"]
+    # Registered, but every job process fails to start (the real pickling bug): still NOT operational, reason shown.
+    err = "error spawning process: AttributeError: Can't pickle local object 'build_worker.<locals>.entrypoint'"
+    await voice.post("/internal/voice/heartbeat", headers=agent_h(),
+                     json={"agent_id": "a1", "version": "2", "registered": True, "worker_id": "AW_1", "last_error": err})
+    s = (await voice.get("/voice/status", headers=a["headers"])).json()
+    assert s["state"] == "NOT_READY" and s["checks"]["agent_registered"] and not s["checks"]["agent_job_process_ready"]
+    assert any("no job process has started" in m and "Can't pickle" in m for m in s["missing"])
+    # A job process really started (reported from inside it after prewarm): operational.
+    await voice.post("/internal/voice/heartbeat", headers=agent_h(), json={"agent_id": "a1", "event": "process_ready"})
+    await voice.post("/internal/voice/heartbeat", headers=agent_h(),
+                     json={"agent_id": "a1", "version": "2", "registered": True, "worker_id": "AW_1"})
     s = (await voice.get("/voice/status", headers=a["headers"])).json()
     assert s["state"] == "OPERATIONAL" and all(s["checks"].values()) and not s["missing"]
     await db.execute("update voice_agent_heartbeats set last_seen_at = now() - interval '5 minutes'")

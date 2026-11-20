@@ -172,13 +172,14 @@ else
       start_proc voice "$ROOT" bash "$ROOT/scripts/lib/voice-supervisor.sh"
     online=False
     for _ in $(seq 1 60); do
-      online="$(curl -s --max-time 5 "http://127.0.0.1:$API_PORT/voice/status" | "$PY" -c "import json,sys; print(json.load(sys.stdin)['checks']['agent_online'])" 2>/dev/null || echo False)"
+      # ready = registered with LiveKit AND a job process actually started (not just a live parent process)
+      online="$(curl -s --max-time 5 "http://127.0.0.1:$API_PORT/voice/status" | "$PY" -c "import json,sys; c=json.load(sys.stdin)['checks']; print(c.get('agent_registered') and c.get('agent_job_process_ready'))" 2>/dev/null || echo False)"
       [ "$online" = "True" ] && break
       [ -n "$(managed_pid voice)" ] || break
       sleep 1
     done
-    if [ "$online" = "True" ]; then ok "voice agent running and heartbeating (supervised; restarts with backoff)"
-    else tail -n 25 "$LOG_DIR/voice.log" >&2; warn "voice agent did not report a heartbeat (see .jarvis/logs/voice.log)"; fi
+    if [ "$online" = "True" ]; then ok "voice agent registered with LiveKit and a job process is ready (supervised)"
+    else tail -n 25 "$LOG_DIR/voice.log" >&2; warn "voice agent is NOT ready to join rooms (see the reason below and .jarvis/logs/voice.log)"; fi
     vready="$(curl -s --max-time 5 "http://127.0.0.1:$API_PORT/voice/status" | "$PY" -c "import json,sys; d=json.load(sys.stdin); print(d['state'], '|', ' '.join(d['missing']))" 2>/dev/null || true)"
     ok "voice status: ${vready}"
   fi

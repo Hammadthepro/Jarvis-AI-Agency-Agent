@@ -315,10 +315,19 @@ async def voice_heartbeat(body: dict, request: Request, x_voice_agent_key: str |
     agent_id = str(body.get("agent_id") or "")[:100]
     if not agent_id:
         raise Unauthorized("agent_id required")
-    await request.app.state.db.execute(
-        """insert into voice_agent_heartbeats(agent_id, version, last_seen_at, detail) values ($1,$2,now(),$3)
-           on conflict (agent_id) do update set last_seen_at=now(), version=excluded.version, detail=excluded.detail""",
-        agent_id, str(body.get("version") or "")[:40], str(body.get("detail") or "")[:300] or None)
+    db = request.app.state.db
+    if body.get("event") == "process_ready":            # sent from inside a job process after prewarm
+        await db.execute("""insert into voice_agent_heartbeats(agent_id, last_seen_at, process_ready_at) values ($1, now(), now())
+                            on conflict (agent_id) do update set process_ready_at=now()""", agent_id)
+        return {"ok": True}
+    await db.execute(
+        """insert into voice_agent_heartbeats(agent_id, version, last_seen_at, detail, registered, worker_id, last_error)
+           values ($1,$2,now(),$3,$4,$5,$6)
+           on conflict (agent_id) do update set last_seen_at=now(), version=excluded.version, detail=excluded.detail,
+             registered=excluded.registered, worker_id=excluded.worker_id, last_error=excluded.last_error""",
+        agent_id, str(body.get("version") or "")[:40], str(body.get("detail") or "")[:300] or None,
+        bool(body.get("registered")), (str(body.get("worker_id"))[:100] if body.get("worker_id") else None),
+        (str(body.get("last_error"))[:300] if body.get("last_error") else None))
     return {"ok": True}
 
 

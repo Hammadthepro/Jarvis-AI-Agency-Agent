@@ -391,13 +391,18 @@ async def voice_status(request: Request, me: Principal = CurrentPrincipal):
     st, db = request.app.state, request.app.state.db
     lk = st.livekit
     status = await db.fetchrow("select state, last_success_at, detail from integration_status where provider='livekit'")
-    agent = await db.fetchrow(f"""select agent_id, last_seen_at, version from voice_agent_heartbeats
+    agent = await db.fetchrow(f"""select agent_id, last_seen_at, version, registered, worker_id, process_ready_at, last_error,
+                                         started_at from voice_agent_heartbeats
                                   where last_seen_at > now() - interval '{AGENT_FRESH_S} seconds' order by last_seen_at desc limit 1""")
     checks = {
         "livekit_configured": lk.configured and "livekit" not in DISABLED,
         "livekit_validated": bool(status and status["state"] == "CONNECTED"),
         "agent_secret_configured": bool(st.settings.voice_agent_shared_secret),
         "agent_online": agent is not None,
+        # A live parent process is not enough: the worker must be registered with LiveKit and a job process must have
+        # actually started (prewarm ran in it). Otherwise rooms are dispatched to a worker that cannot serve them.
+        "agent_registered": bool(agent and agent["registered"]),
+        "agent_job_process_ready": bool(agent and agent["process_ready_at"]),
     }
     missing = []
     if "livekit" in DISABLED:
@@ -409,9 +414,15 @@ async def voice_status(request: Request, me: Principal = CurrentPrincipal):
                        + (f": last result {status['state']} ({status['detail']})" if status else "."))
     if not checks["agent_secret_configured"]:
         missing.append("VOICE_AGENT_SHARED_SECRET in the API environment (the same value in the voice agent).")
+    err = f" Last worker error: {agent['last_error']}" if agent and agent["last_error"] else ""
     if not checks["agent_online"]:
         missing.append("A running JARVIS voice agent (apps/voice: python agent.py start). No heartbeat in the last "
                        f"{AGENT_FRESH_S} seconds.")
+    elif not checks["agent_registered"]:
+        missing.append("The voice agent is running but not registered with LiveKit." + err)
+    elif not checks["agent_job_process_ready"]:
+        missing.append("The voice agent is registered but no job process has started, so it cannot join rooms." + err
+                       + " See .jarvis/logs/voice.log.")
     state = "OPERATIONAL" if all(checks.values()) else ("DISABLED" if "livekit" in DISABLED else
                                                          "NOT_CONFIGURED" if not lk.configured else "NOT_READY")
     return J({"state": state, "checks": checks, "missing": missing,

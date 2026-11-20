@@ -1,5 +1,11 @@
 # JARVIS Changelog
 
+## Revision 11: the voice agent can actually start sessions (2026-11-20)
+- **Root cause of "agent did not join":** `build_worker()` defined the LiveKit entrypoint inside itself. On Linux, LiveKit Agents (1.8.12) starts job processes with `forkserver`, which pickles the entrypoint by reference, so every job process failed with `Can't pickle local object 'build_worker.<locals>.entrypoint'`. No room could be served while the parent kept heart-beating. The entrypoint, prewarm and the agent class are now module-level.
+- **Honest voice health:** OPERATIONAL now requires the worker to be registered with LiveKit (`worker_registered`) and a job process to have actually started (reported from inside it after prewarm). Otherwise the status lists the gap with the worker's last SDK error, sanitized. Migration 0010.
+- `dev-up.sh` waits for a ready job process, not a heartbeat.
+- Regression test: a real LiveKit job process is started exactly as the SDK does on Linux (forkserver with the SDK's preloads). The pre-fix agent fails it with the pickling error; the fixed agent passes.
+
 ## Revision 10: Claude failures reported honestly, reliable voice dispatch (2026-11-20)
 - **Anthropic errors keep their meaning.** Authentication, billing (402 and spend-limit classes, "credit balance"), permission, model access, invalid request, rate limit, overload and timeout each carry the class, HTTP status, Anthropic error type, sanitized message and request id. They are logged without secrets.
 - **Test connection sends one tiny real message**, so CONNECTED is no longer based on a model lookup alone.
