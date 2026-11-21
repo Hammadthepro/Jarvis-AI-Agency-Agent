@@ -105,6 +105,7 @@ Get it from serpapi.com → Dashboard → API Key.
 |---|---|---|---|---|---|
 | `SERPAPI_API_KEY` | search | Optional | worker | **SECRET** | 64 hex chars. Redacted in logs |
 | `SERPAPI_CAP_MONTHLY` / `SERPAPI_CAP_HOURLY` | app hard caps | Optional (`240` / `45`) | worker | CONFIG | below plan limits |
+| `GEOAPIFY_API_KEY` | discovery (Geoapify Places, OpenStreetMap data) | Optional | worker | **SECRET** | Redacted in logs. Also configurable in Integrations. App cap 2,500 requests/day |
 | `SERPAPI_USAGE_SYNC_MINUTES` | provider-reported usage sync | Optional (`60`) | worker | CONFIG | |
 
 ## 6. Firecrawl

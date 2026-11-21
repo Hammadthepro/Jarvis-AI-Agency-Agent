@@ -1,5 +1,29 @@
 # JARVIS Changelog
 
+## Revision 15: discovery providers, honest website checks, readiness, one workspace, task control (2026-11-21)
+- **Discovery provider abstraction** (`jarvis/discovery/providers.py`): SerpApi (Google Maps results) and the new **Geoapify Places** adapter share one `discovery.listings` stage.
+  - A campaign has a primary and an optional secondary provider; the secondary is used only when the primary runs out of results.
+  - Each request goes through the gateway: budget caps, rate limits, timeouts, provider-specific errors and cost records (`usage_events`).
+  - Cross-provider duplicates are merged by phone, website domain, or name + postcode (`prospect_keys`, migration 0013). A duplicate adds corroborating evidence instead of a new prospect.
+  - Every fact carries its provider, source reference, time and an independence key, so two listings from the same provider never count as two independent sources.
+  - Geoapify has no rating data: a request with a minimum rating asks the owner instead of silently dropping the rating. Geoapify has no plumber/roofer category: such requests are refused with the reason.
+  - Google Places remains behind its compliance gate; its content is never stored (a database trigger refuses Places-derived dedup keys).
+- **Controlled provider evaluation** (`POST /discovery/evaluations`, Settings > Discovery providers): same cities, categories and limit for each provider; at most 3 x 3 x 20; owner-only; explicit cost confirmation; aggregates only (no business records kept). Google Places runs only under the `google_places_technical_testing` approval, else BLOCKED; a provider without a key is NOT_CONFIGURED. Nothing is estimated for a provider that did not run.
+- **Website verification statuses:** `NO_WEBSITE_LISTED`, `WEBSITE_FOUND`, `WEBSITE_WORKING`, `WEBSITE_BROKEN_CONFIRMED`, `WEBSITE_BLOCKED`, `WEBSITE_RATE_LIMITED`, `WEBSITE_AUTH_REQUIRED`, `WEBSITE_REDIRECTED`, `WEBSITE_UNKNOWN` (plus the existing independent `NO_WEBSITE_FOUND`).
+  - A missing website field is never proof of no website.
+  - 401/403/429/anti-bot pages mean the site exists but could not be checked; "broken" needs two probes that both show DNS failure, connection/TLS failure, 5xx, a 404 on the homepage, a parked domain or a redirect loop. Two generic 4xx results are not enough.
+  - robots.txt is respected (cached 6 h); `Retry-After` up to 15 s is honoured once; every hop is SSRF-checked. HTTP evidence is stored per check.
+- **Qualification v2:** separate scores for website opportunity, business identity, commercial potential, relevance, contactability and evidence confidence, gated individually (a high opportunity score cannot compensate for weak identity or evidence). No rating or review inputs. Each prospect shows its readiness (`qualified`, `needs_research`, `not_a_fit`), what is missing and why.
+- **Task lifecycle and control** (`/work`): QUEUED, RUNNING, PAUSED, WAITING, COMPLETED, FAILED, CANCEL_REQUESTED, CANCELLED.
+  - Stop, pause, resume and retry by text, voice or button. A running step notices a stop within about 2 seconds (worker cancel poll); the campaign then ends CANCELLED.
+  - "Stop searching and start building a website" cancels the search and starts a separate website-build task from the verified results (falls back to the last search with results). Busy sites are skipped, so a build never runs twice.
+  - Measured timings per stage (wall, busy, queue wait, retries) and per provider (calls, latency, failures, tokens, estimated cost). No invented percentages.
+- **One JARVIS workspace:** conversation (text and voice), the active task with live steps and controls, results (prospects with readiness and evidence; websites with screenshots, QA, deployment status, preview link, Rebuild and Run QA again), task history.
+  - Voice setup moved to **Settings > Voice** (readiness checks, Cartesia model and voice, Deepgram STT, LiveKit, microphone permission and devices, voice test). `/voice` redirects there.
+  - The separate command page is no longer in the navigation: the structured command form is in Campaigns (`/commands` redirects there).
+- **Performance:** website verification of listings now runs 4 businesses at a time, and each business's search, candidate probes, profiles and DNS run in parallel. Simulated-latency benchmark (`JARVIS_BENCH=1 pytest tests/test_pipeline_benchmark.py -s`, 150 ms per provider call, 100 ms per fetch, 8 businesses): **total 4.84 s -> 2.30 s; discovery stage 3.71 s -> 0.96 s**. Real provider timings are recorded per task and shown in the workspace.
+- Migration **0013** (non-destructive: new columns, tables and enum value only).
+
 ## Revision 14: website preview pipeline repair, Cartesia voice (2026-11-21)
 - **QA runner install failure (root cause):**
   - The Codespaces image is Ubuntu 20.04, where Playwright 1.63 cannot install Chromium (`ERROR: Playwright does not support chromium on ubuntu20.04-x64`, reproduced). QA ran Chromium on the host (`QA_RUNNER_MODE=subprocess`), which was also not isolated.

@@ -1,6 +1,6 @@
 # JARVIS — Implementation Status
 
-As of 2026-11-21 (revision 14: preview pipeline repair, Cartesia voice; see CHANGELOG.md). Branch `main`.
+As of 2026-11-21 (revision 15: discovery providers incl. Geoapify, honest website checks, qualification v2, one workspace, task control; see CHANGELOG.md). Branch `main`.
 
 **Overall: NOT production-ready and NOT deployed.** The platform is implemented and passes its automated tests
 against real local infrastructure (PostgreSQL, Chromium, Docker) with **test doubles for every third-party provider**.
@@ -16,7 +16,24 @@ Four separate levels are tracked below. A higher level is never implied by a low
   only invalid-credential detection has been live-verified (section 1a).
 - **Deployed:** running on production infrastructure. **None so far.**
 
-## 1. Test results (latest run, 2026-11-19)
+## 0. Revision 15 test results (2026-11-21)
+
+| Suite | Result |
+|---|---|
+| Backend `pytest` (real PostgreSQL, migrations 0001–0013, RLS, real Chromium and Docker QA sandbox; providers via doubles) | **256 passed, 5 skipped** (skips: live-provider tests without credentials) |
+| Voice agent (`apps/voice/tests`) | **39 passed, 2 skipped** (live LiveKit test: no credentials) |
+| Dashboard Vitest / typecheck / production build | **27 passed / clean / pass** |
+| Development startup integration test (`scripts/tests/dev-startup-test.sh`) | **27 passed, 0 failed** (applies all 13 migrations to a throwaway DB) |
+| Real-stack E2E in Chromium (`dashboard/e2e/stack.e2e.mjs`) | **pass**, incl. Settings > Voice, Discovery providers, redirects, phone-width workspace |
+| Docker QA sandbox self-check | **ready** (docker-sandbox runner, 2 screenshots) |
+| Lint (`ruff`) | clean |
+| Pipeline benchmark (simulated latency) | total 4.84 s → **2.30 s**; discovery 3.71 s → **0.96 s** |
+
+Not live-verified in this environment (no credentials here): Geoapify, SerpApi, Google Places, Claude, Firecrawl,
+Cloudflare, Cartesia, LiveKit. The provider comparison (Settings > Discovery providers) has **not been run**:
+Google Places needs the `google_places_technical_testing` approval and a key; Geoapify needs `GEOAPIFY_API_KEY`.
+
+## 1. Test results (earlier run, 2026-11-19)
 
 | Suite | Where | Result | What it exercises |
 |---|---|---|---|

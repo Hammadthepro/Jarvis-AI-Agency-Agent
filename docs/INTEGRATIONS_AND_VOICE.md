@@ -59,6 +59,9 @@ value and falls back to the environment (if set). Every API instance and worker 
 
 ## 4. Voice agent
 
+Voice setup and status are in **Settings > Voice** (the old Voice Setup page redirects there).
+
+
 ### Architecture
 Browser (microphone) ⇄ LiveKit room ⇄ JARVIS voice agent (`apps/voice/agent.py`) → JARVIS API conversation router →
 the same Claude agent, history, tools, approvals and budget as text. After a campaign is authorized, the agent speaks
@@ -206,6 +209,45 @@ Austin" refine the current request). You can interrupt JARVIS by talking, or pre
 failing stage (speech recognition, speech synthesis, Claude, JARVIS service). Examples: "Find 10 independent roofing companies in Houston with outdated
 websites and prepare two redesign previews." → JARVIS explains the plan and any blocker; "confirm", "cancel",
 "what's the status?".
+
+## 5a. Discovery providers, website checks, readiness and tasks (revision 15)
+
+**Providers.** A campaign names a primary discovery provider and optionally a secondary one (used only when the
+primary has no more results):
+
+| Provider | Key | Notes |
+|---|---|---|
+| SerpApi (Google Maps results) | `SERPAPI_API_KEY` | Ratings available. Default for searches |
+| Geoapify Places (OpenStreetMap) | `GEOAPIFY_API_KEY` | Free plan 3,000 credits/day; app cap 2,500 requests/day; attribution "Powered by Geoapify, © OpenStreetMap contributors". No ratings; no plumber/roofer category; website and phone only when OSM has them |
+| Google Places API (New) | `GOOGLE_PLACES_API_KEY` | Blocked for prospect discovery until the compliance approval is recorded. Content is never stored |
+| Imported business list | none | Always available |
+
+Duplicates across providers are merged by phone, website domain, or name + postcode; the second listing becomes
+corroborating evidence with its own provider and independence key.
+
+**Comparing providers.** Settings > Discovery providers > Run comparison (owner only). Up to 3 cities × 3
+categories × 20 results per provider, one request per cell (plus one geocode per city for Geoapify). You must tick
+the cost confirmation. Only aggregates are kept: returned, unique, duplicates, website/phone listed, address
+completeness, category match, latency, failures, estimated cost and cost per useful listing, plus overlap between
+providers. A provider without a key shows NOT_CONFIGURED; Google Places without the technical-testing approval
+shows BLOCKED. Nothing is estimated for a provider that did not run.
+
+**Website check statuses.** `NO_WEBSITE_LISTED` (the listing has none: not conclusive), `NO_WEBSITE_FOUND`
+(independent checks found none), `WEBSITE_FOUND`, `WEBSITE_WORKING`, `WEBSITE_REDIRECTED`,
+`WEBSITE_BROKEN_CONFIRMED` (two probes confirm DNS/connection/TLS failure, 5xx, homepage 404, parked domain or redirect
+loop), `WEBSITE_BLOCKED` (403 or anti-bot page), `WEBSITE_RATE_LIMITED` (429), `WEBSITE_AUTH_REQUIRED` (401),
+`WEBSITE_UNKNOWN`. Blocked, rate-limited and login-protected sites are treated as existing websites. robots.txt
+is respected.
+
+**Readiness.** Each prospect has separate scores (website opportunity, identity, commercial potential, relevance,
+contactability, evidence confidence), each with its own minimum. The prospect list shows `qualified`,
+`needs_research` or `not_a_fit`, what is missing, and why. Ratings and reviews are not inputs.
+
+**Tasks.** `GET /work` lists tasks with their status (QUEUED, RUNNING, PAUSED, WAITING, COMPLETED, FAILED,
+CANCEL_REQUESTED, CANCELLED), current operation, steps and elapsed time; `GET /work/{id}` adds measured timings and
+activity; `POST /work/{id}/{pause|resume|cancel|retry}` controls it; `POST /work/website-build` starts a website
+build from a search's verified results. JARVIS understands the same requests by text or voice, e.g. "stop", "pause",
+"stop searching and start building a website".
 
 ## 5. Ports and services
 
