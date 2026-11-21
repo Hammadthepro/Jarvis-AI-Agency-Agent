@@ -6,7 +6,8 @@ import { z } from "zod";
 import { api } from "../lib/api";
 import { useVoiceSession, type VoicePhase, type VoiceStatus } from "../lib/voice";
 import { JarvisOrb, type OrbMode } from "../components/JarvisOrb";
-import { ActiveCampaigns, AttentionCard, IntegrationHealth, useCampaigns } from "../components/CommandCenter";
+import { AttentionCard } from "../components/CommandCenter";
+import { ACTIVE_STATUSES, ActiveTaskPanel, ResultsPanel, TaskHistory, useWork } from "../components/Workspace";
 import { ErrorState } from "../components/ui";
 import { IconMic, IconMicOff, IconPhoneOff, IconStop } from "../components/icons";
 
@@ -35,14 +36,18 @@ export default function CommandCenterPage() {
     queryFn: async () => { const s = await api<VoiceStatus>("/voice/status"); return s && typeof s === "object" && "state" in s ? { ...s, missing: s.missing ?? [] } : null; } });
   const messages = useQuery({ queryKey: ["conversation"], queryFn: () => api<ConversationMessage[]>("/conversation/messages?limit=60"),
     refetchInterval: v.active ? 1500 : 5000 });
-  const camps = useCampaigns();
-  const working = (camps.data ?? []).some((c) => c.state === "running" || c.state === "authorized");
+  const work = useWork();
+  const tasks = work.data ?? [];
+  const working = tasks.some((t) => t.status === "RUNNING" || t.status === "QUEUED");
+  const [picked, setPicked] = useState<string | undefined>();
+  // The panel follows the task JARVIS is working on, unless the owner picked one from the history.
+  const current = tasks.find((t) => t.id === picked) ?? tasks.find((t) => ACTIVE_STATUSES.has(t.status)) ?? tasks[0];
   const [text, setText] = useState("");
   const [hint, setHint] = useState<string | null>(null);
   const feed = useRef<HTMLDivElement>(null);
   const send = useMutation({
     mutationFn: (t: string) => api<{ say: string }>("/conversation/turn", { method: "POST", json: { text: t } }),
-    onSettled: () => { void qc.invalidateQueries({ queryKey: ["conversation"] }); void qc.invalidateQueries({ queryKey: ["campaigns"] }); },
+    onSettled: () => { void qc.invalidateQueries({ queryKey: ["conversation"] }); void qc.invalidateQueries({ queryKey: ["work"] }); setPicked(undefined); },
   });
   const say = (t: string) => { const r = turnSchema.safeParse(t); if (!r.success) { setHint(r.error.issues[0].message); return; } setHint(null); setText(""); send.mutate(r.data); };
 
@@ -66,7 +71,7 @@ export default function CommandCenterPage() {
   }, [v.detail, v.phase, voice.data, ready, v.active]);
 
   return (
-    <div className="mx-auto grid max-w-7xl gap-6 px-4 py-4 md:px-8 md:py-6 xl:grid-cols-[1fr_340px]">
+    <div className="mx-auto grid max-w-[1500px] gap-4 px-3 py-3 md:px-6 md:py-5 lg:grid-cols-[minmax(0,1fr)_400px] xl:grid-cols-[minmax(0,1fr)_460px]">
       <section className="relative flex h-[calc(100dvh-6.5rem)] min-h-[560px] flex-col overflow-hidden rounded-3xl md:h-[calc(100dvh-3rem)] border border-arc-700/40 bg-[radial-gradient(ellipse_at_top,_rgba(19,183,218,0.10),_var(--color-ink-950)_60%)]">
         <div ref={v.audioEl} className="hidden" />
         <div className="flex shrink-0 flex-col items-center px-4 pt-6">
@@ -90,7 +95,7 @@ export default function CommandCenterPage() {
           )}
           {status && (
             <p role="status" className="mt-3 max-w-xl text-center text-xs text-ink-300">
-              {status} {voice.data && !ready && <Link to="/integrations" className="text-arc-300 underline">Set up</Link>}
+              {status} {voice.data && !ready && <Link to="/settings#voice" className="text-arc-300 underline">Voice settings</Link>}
             </p>
           )}
         </div>
@@ -125,10 +130,12 @@ export default function CommandCenterPage() {
         </div>
       </section>
 
-      <aside className="flex flex-col gap-4 xl:h-[calc(100dvh-3rem)] xl:overflow-y-auto xl:pr-1 scroll-thin">
-        <ActiveCampaigns />
+      <aside className="flex flex-col gap-4 lg:h-[calc(100dvh-2.5rem)] lg:overflow-y-auto lg:pr-1 scroll-thin" aria-label="Work">
+        {work.error && <ErrorState error={work.error} />}
+        <ActiveTaskPanel task={current} />
+        <ResultsPanel task={current} />
+        <TaskHistory items={tasks} selected={current?.id} onSelect={setPicked} />
         <AttentionCard />
-        <IntegrationHealth />
       </aside>
     </div>
   );

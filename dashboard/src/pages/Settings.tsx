@@ -4,6 +4,7 @@ import { Link } from "react-router";
 import { api } from "../lib/api";
 import { Page } from "../components/Shell";
 import { Button, Card, ErrorState, Input, Loading, Pill, when } from "../components/ui";
+import { DiscoverySettings, VoiceSettings } from "../components/SettingsSections";
 
 type Gate = { scope: string; open: boolean; reason: string | null; intended_use: string | null; approver_name?: string; document_ref?: string; review_by?: string };
 
@@ -15,10 +16,12 @@ export default function SettingsPage() {
   const [agency, setAgency] = useState({ agency_name: "", terms_of_use_url: "", privacy_policy_url: "" });
   const s = settings.data?.settings;
   return (
-    <Page title="Settings" subtitle="Workspace details, safety switches and the Google Places compliance gate.">
+    <Page title="Settings" subtitle="Voice, discovery providers, workspace details, safety switches and the Google Places compliance gate.">
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card title="Integrations and voice" className="lg:col-span-2">
-          <p className="text-sm text-ink-300">Provider credentials, connection tests and voice setup live in the <Link className="text-signal-300 underline" to="/integrations">Integrations Center</Link>.
+        <VoiceSettings />
+        <DiscoverySettings />
+        <Card title="Integrations and costs" className="lg:col-span-2">
+          <p className="text-sm text-ink-300">Provider credentials and connection tests live in the <Link className="text-signal-300 underline" to="/integrations">Integrations Center</Link>.
             Spend, provider-reported usage and budget caps are under <Link className="text-signal-300 underline" to="/usage">Usage and costs</Link>.</p>
         </Card>
         <Card title="Google Places compliance gate">

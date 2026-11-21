@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router";
+import { Link, useParams, useSearchParams } from "react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { api } from "../lib/api";
 import { subscribeEvents, type JarvisEvent } from "../lib/events";
 import { Page } from "../components/Shell";
+import Console from "./Console";
 import { Button, Card, Empty, ErrorState, Input, Loading, Pill, usd, when } from "../components/ui";
 
 type Campaign = { id: string; name: string; state: string; current_stage: string | null; blocked_reason: string | null; discovery_provider: string;
@@ -14,9 +15,13 @@ type Campaign = { id: string; name: string; state: string; current_stage: string
 export default function CampaignsPage() {
   const q = useQuery({ queryKey: ["campaigns"], queryFn: () => api<Campaign[]>("/campaigns"), refetchInterval: 5000 });
   const [showImport, setShowImport] = useState(false);
+  const [sp] = useSearchParams();
+  const [structured, setStructured] = useState(sp.get("structured") === "1");
   return (
-    <Page title="Campaigns" subtitle="Create campaigns from the JARVIS console, or import a business list you have the right to use."
-      actions={<Button variant="ghost" onClick={() => setShowImport((s) => !s)}>{showImport ? "Close import" : "Import business list"}</Button>}>
+    <Page title="Campaigns" subtitle="Talk to JARVIS on the main page. Here: every campaign, a structured command with explicit parameters, or an import."
+      actions={<div className="flex gap-2"><Button variant="ghost" onClick={() => setStructured((s) => !s)}>{structured ? "Close structured command" : "Structured command"}</Button>
+        <Button variant="ghost" onClick={() => setShowImport((s) => !s)}>{showImport ? "Close import" : "Import business list"}</Button></div>}>
+      {structured && <div className="-mx-4 mb-4 md:-mx-8"><Console /></div>}
       {showImport && <ImportForm onDone={() => setShowImport(false)} />}
       {q.error ? <ErrorState error={q.error} /> : !q.data ? <Loading /> : q.data.length === 0 ? (
         <Empty title="No campaigns yet">Ask JARVIS, e.g. “Find 25 roofers in Denver with no website”.</Empty>

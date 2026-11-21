@@ -2,9 +2,9 @@ import { motion } from "framer-motion";
 import type { ReactNode } from "react";
 import { ApiError } from "../lib/api";
 
-export function Card({ title, actions, children, className = "" }: { title?: ReactNode; actions?: ReactNode; children: ReactNode; className?: string }) {
+export function Card({ title, actions, children, className = "", id }: { title?: ReactNode; actions?: ReactNode; children: ReactNode; className?: string; id?: string }) {
   return (
-    <section className={`rounded-xl border hairline bg-ink-900/80 ${className}`}>
+    <section id={id} aria-label={typeof title === "string" ? title : undefined} className={`scroll-mt-20 rounded-xl border hairline bg-ink-900/80 ${className}`}>
       {(title || actions) && (
         <header className="flex items-center justify-between gap-3 border-b hairline px-4 py-3">
           <h2 className="text-sm font-medium text-ink-200">{title}</h2>

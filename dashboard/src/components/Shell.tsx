@@ -4,10 +4,10 @@ import type { ReactNode } from "react";
 import { api } from "../lib/api";
 import { ApiError } from "../lib/api";
 import { apiBase } from "../lib/config";
-import { IconActivity, IconCog, IconCoins, IconCommand, IconFlag, IconGauge, IconGlobe, IconMail, IconMic, IconPlug, IconUsers } from "./icons";
+import { IconActivity, IconCog, IconCoins, IconFlag, IconGauge, IconGlobe, IconMail, IconMic, IconPlug, IconUsers } from "./icons";
 
 const NAV = [
-  ["/", "JARVIS", IconMic], ["/commands", "Commands", IconCommand], ["/voice", "Voice Setup", IconMic], ["/campaigns", "Campaigns", IconFlag],
+  ["/", "JARVIS", IconMic], ["/campaigns", "Campaigns", IconFlag],
   ["/prospects", "Prospects", IconUsers], ["/websites", "Websites & Previews", IconGlobe], ["/outreach", "Outreach", IconMail],
   ["/integrations", "Integrations", IconPlug], ["/activity", "Activity", IconActivity], ["/usage", "Usage & Costs", IconCoins],
   ["/overview", "Overview", IconGauge], ["/settings", "Settings", IconCog],

@@ -28,14 +28,14 @@ assert(reply && reply.meta.kind === "provider_error" && /^Claude unavailable: An
   "the new reply must be an explicit 'Claude unavailable' failure, got: " + JSON.stringify(reply));
 await page.getByText(reply.content).first().waitFor();                                   // and it is shown in the feed
 await page.screenshot({ path: `${out}/e2e-jarvis.png` });
-await page.goto(`${base}/commands`);
+await page.goto(`${base}/campaigns?structured=1`);
 await page.getByText("What should JARVIS work on?").waitFor();
 assert(await page.locator('input[type="email"], input[type="password"]').count() === 0, "no login form");
 assert(!(await page.getByRole("button", { name: /sign in/i }).count()), "no sign-in button");
 await page.getByText("Local development mode").waitFor();
 
 // 1a) A normal search uses SerpApi, which has its own status (here: not configured). The Places gate does not apply.
-await page.getByLabel("Command").fill("Find 20 plumbers in Houston with at least a 3.5 rating and no website.");
+await page.getByLabel("Command", { exact: true }).fill("Find 20 plumbers in Houston with at least a 3.5 rating and no website.");
 await page.getByRole("button", { name: "Send" }).click();
 await page.getByText(/Exclude them, or keep them/).waitFor();
 await page.getByRole("button", { name: "exclude" }).click();
@@ -45,8 +45,8 @@ await page.getByRole("button", { name: "Authorize campaign" }).click();
 await page.getByText("NOT_CONFIGURED").first().waitFor();
 
 // 1b) Explicitly asking for Google Places: parsed, plan shown, compliance gate blocks authorization
-await page.goto(`${base}/commands`);
-await page.getByLabel("Command").fill("Find 20 plumbers in Houston with at least a 3.5 Google rating and no website, using Google Places.");
+await page.goto(`${base}/campaigns?structured=1`);
+await page.getByLabel("Command", { exact: true }).fill("Find 20 plumbers in Houston with at least a 3.5 Google rating and no website, using Google Places.");
 await page.getByRole("button", { name: "Send" }).click();
 await page.getByText(/Exclude them, or keep them/).waitFor();
 await page.getByRole("button", { name: "exclude" }).click();
@@ -66,8 +66,9 @@ await page.getByText("I confirm I have the right").click();
 await page.getByRole("button", { name: "Create campaign" }).click();
 await page.getByRole("link", { name: /Plumbing · Houston, TX/ }).first().click();
 await page.getByText(/NOT_CONFIGURED/).first().waitFor({ timeout: 30000 });
+await page.getByText(/Campaign blocked \(discovery\)/).first().waitFor({ timeout: 30000 });
 const body = await page.textContent("body");
-assert(/blocked/.test(body), "campaign should be blocked");
+assert(/blocked/.test(body), "campaign should be blocked: " + page.url() + " " + body.slice(0, 400));
 assert(/SERPAPI_API_KEY/.test(body), "blocked reason should name the missing credential");
 await page.screenshot({ path: `${out}/e2e-campaign-blocked.png`, fullPage: true });
 
@@ -80,14 +81,30 @@ assert((integText.match(/NOT_CONFIGURED/g) || []).length >= 6, "unconfigured pro
 assert(/Restricted/.test(integText), "Google Places is shown as restricted");
 assert(/Administrator: can edit/.test(integText), "the local operator administers the local deployment");
 await page.screenshot({ path: `${out}/e2e-integrations.png`, fullPage: true });
-await page.getByRole("link", { name: "Voice Setup" }).first().click();
-await page.getByText(/LiveKit server URL, API key and API secret/).waitFor();
-await page.getByRole("link", { name: /Open Integrations/ }).waitFor();
-assert(await page.getByRole("button", { name: "Start voice session" }).isDisabled(), "voice start disabled when not ready");
-await page.screenshot({ path: `${out}/e2e-voice.png`, fullPage: true });
-await page.getByRole("link", { name: "Settings" }).first().click();
+assert(!(await page.getByRole("link", { name: "Voice Setup" }).count()), "voice setup is no longer a separate destination");
+assert(!(await page.getByRole("link", { name: "Commands" }).count()), "the separate command page is no longer in the navigation");
+await page.goto(`${base}/voice`);                                               // old link redirects to Settings > Voice
+await page.waitForURL(/\/settings#voice$/);
+const voiceCard = page.getByRole("region", { name: "Voice" });
+await voiceCard.getByText(/LiveKit server URL, API key and API secret/).waitFor();
+await voiceCard.getByText("Cartesia model").waitFor();
+await voiceCard.getByText("voice test available when voice is operational").waitFor();
+assert(!/sk_car_|[A-Za-z0-9]{40,}/.test(await voiceCard.textContent()), "no secret rendered in voice settings");
+const disc = page.getByRole("region", { name: "Discovery providers" });
+await disc.getByText("Geoapify", { exact: false }).first().waitFor();
+await disc.getByText(/Not evaluated yet/).waitFor();
+assert(await disc.getByRole("button", { name: "Run comparison" }).isDisabled(), "evaluation needs explicit cost confirmation");
 await page.getByText("google_places_prospect_selection", { exact: true }).waitFor();
 await page.screenshot({ path: `${out}/e2e-settings.png`, fullPage: true });
+// the unified workspace on a phone: message box, active task panel and results, no horizontal scroll
+const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1 });
+phone.on("pageerror", (e) => errors.push(String(e)));
+await phone.goto(base);
+await phone.getByLabel("Message JARVIS").waitFor();
+await phone.getByRole("region", { name: "Active task" }).first().waitFor();
+assert(await phone.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), "no horizontal scroll on a phone");
+await phone.screenshot({ path: `${out}/e2e-workspace-mobile.png`, fullPage: true });
+await phone.close();
 await page.getByRole("link", { name: "Overview" }).first().click();
 await page.getByText("System health").waitFor();
 await page.screenshot({ path: `${out}/e2e-overview.png` });
