@@ -263,6 +263,19 @@ describe("No login screen", () => {
   });
 });
 
+describe("Website Studio", () => {
+  it("explains each preview's real state, including failures and retries", async () => {
+    const { siteSummary } = await import("../pages/Websites");
+    const base = { qa_status: null, deploy_status: null, last_error: null, last_task: null };
+    expect(siteSummary({ ...base, state: "deployed", qa_status: "passed", deploy_status: "verified" })).toBe("Preview deployed and verified.");
+    expect(siteSummary({ ...base, state: "failed", last_error: "build/QA failed (attempt 3 of 3, final): QaRunnerError: x" }))
+      .toContain("attempt 3 of 3, final");
+    expect(siteSummary({ ...base, state: "passed", qa_status: "passed", last_error: "deployment failed (attempt 1 of 3, will retry): did not verify",
+      last_task: { task: "site.deploy", status: "retry_wait", attempts: 1, max_attempts: 3 } })).toMatch(/^Retrying deployment \(attempt 1 of 3\)/);
+    expect(siteSummary({ ...base, state: "passed", qa_status: "passed" })).toBe("QA passed. Waiting to deploy.");
+  });
+});
+
 describe("Voice-first JARVIS screen", () => {
   it("shows preview links in replies as links, and nothing else", async () => {
     const { linkify } = await import("../pages/CommandCenter");

@@ -403,6 +403,8 @@ async def voice_status(request: Request, me: Principal = CurrentPrincipal):
         # actually started (prewarm ran in it). Otherwise rooms are dispatched to a worker that cannot serve them.
         "agent_registered": bool(agent and agent["registered"]),
         "agent_job_process_ready": bool(agent and agent["process_ready_at"]),
+        # JARVIS speaks with Cartesia. Without it there is no voice; no other speech provider is substituted.
+        "cartesia_configured": bool(st.deps.settings.cartesia_api_key) and "cartesia" not in DISABLED,
     }
     missing = []
     if "livekit" in DISABLED:
@@ -412,6 +414,10 @@ async def voice_status(request: Request, me: Principal = CurrentPrincipal):
     elif not checks["livekit_validated"]:
         missing.append("A successful LiveKit connection test (Integrations > LiveKit > Test connection)"
                        + (f": last result {status['state']} ({status['detail']})" if status else "."))
+    if "cartesia" in DISABLED:
+        missing.append("Cartesia (JARVIS's voice) is disabled in the Integrations Center.")
+    elif not st.deps.settings.cartesia_api_key:
+        missing.append("A Cartesia API key for JARVIS's voice (Integrations > Cartesia, or CARTESIA_API_KEY). NOT_CONFIGURED.")
     if not checks["agent_secret_configured"]:
         missing.append("VOICE_AGENT_SHARED_SECRET in the API environment (the same value in the voice agent).")
     err = f" Last worker error: {agent['last_error']}" if agent and agent["last_error"] else ""

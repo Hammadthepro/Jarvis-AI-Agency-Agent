@@ -100,6 +100,10 @@ export function useVoiceSession() {
   const audioEl = useRef<HTMLDivElement | null>(null);
   const analysers = useRef<{ mic?: AnalyserNode; agent?: AnalyserNode; ctx?: AudioContext }>({});
   const raf = useRef<number | null>(null);
+  // Set when the owner's turn is committed; cleared the first time JARVIS's reply is actually audible in this browser,
+  // which is reported to the agent ("reply_audible") so it can log real time-to-audible latency per turn.
+  const awaitingAudible = useRef(false);
+  const reportAudible = useRef<(() => void) | null>(null);
 
   const upsert = useCallback((l: TranscriptLine) => {
     setLines((prev) => {
@@ -126,7 +130,9 @@ export function useVoiceSession() {
       for (const v of buf) sum += ((v - 128) / 128) ** 2;
       return Math.min(1, Math.sqrt(sum / buf.length) * 3);
     };
-    setLevels({ mic: read(analysers.current.mic), agent: read(analysers.current.agent) });
+    const agentLevel = read(analysers.current.agent);
+    if (awaitingAudible.current && agentLevel > 0.04) { awaitingAudible.current = false; reportAudible.current?.(); }
+    setLevels({ mic: read(analysers.current.mic), agent: agentLevel });
     raf.current = requestAnimationFrame(meter);
   }, []);
 
@@ -177,7 +183,7 @@ export function useVoiceSession() {
       const room = new Room({ adaptiveStream: true, dynacast: true, disconnectOnPageLeave: true });
       roomRef.current = room;
       const isAgent = (p?: Participant) => Boolean(p && p.identity !== room.localParticipant.identity);
-      const client = (event: "mic_published" | "audio_playing" | "audio_blocked") => {
+      const client = (event: "mic_published" | "audio_playing" | "audio_blocked" | "reply_audible") => {
         void room.localParticipant.publishData(new TextEncoder().encode(JSON.stringify({ type: "client", event })), { reliable: true, topic: "jarvis-control" }).catch(() => undefined);
       };
       const agentState = () => [...room.remoteParticipants.values()].find((p) => isAgent(p))?.attributes["lk.agent.state"];
@@ -214,6 +220,7 @@ export function useVoiceSession() {
         const at = Date.now();
         if (m.type === "transcript") {                 // the committed turn: exactly one message per turn
           setCaption(commitCaption);
+          awaitingAudible.current = true;
           upsert({ id: `you-${m.turn ?? at}`, who: "you", text: m.text, final: true, at });
         } else if (m.type === "status" || m.type === "progress") {
           upsert({ id: m.type === "status" && m.turn ? `jarvis-${m.turn}` : `j-${at}-${Math.random()}`, who: "jarvis", text: m.text, final: true, at });
@@ -242,6 +249,7 @@ export function useVoiceSession() {
         if (roomRef.current === room) { roomRef.current = null; teardownAudio(); setPhase("ended"); setDetail("The voice session ended."); }
       });
 
+      reportAudible.current = () => client("reply_audible");
       await room.connect(t.url, t.token);
       await room.startAudio().catch(() => undefined);
       // Echo cancellation keeps JARVIS's own voice (from speakers) out of the microphone; the agent also drops echoes.

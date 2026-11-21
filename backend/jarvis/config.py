@@ -97,6 +97,14 @@ class Settings(BaseSettings):
     resend_webhook_secret: SecretStr | None = None
     unsubscribe_signing_key: SecretStr | None = None
 
+    # JARVIS's voice: Cartesia through the official LiveKit plugin (billed to the Cartesia account of this key). No other
+    # speech provider is used when it is missing: voice reports NOT_CONFIGURED.
+    cartesia_api_key: SecretStr | None = None
+    cartesia_model: str = "sonic-3"
+    cartesia_voice_id: str = "f786b574-daa5-4673-aa0c-cbe3e8534c02"   # "Katie", the plugin's default English voice for agents
+    cartesia_speed: str = "1.0"                                       # sonic-3: 0.6-2.0, or slow / normal / fast
+    cartesia_emotion: str | None = None
+    cartesia_language: str = "en"
     livekit_url: str | None = None
     livekit_api_key: SecretStr | None = None
     livekit_api_secret: SecretStr | None = None

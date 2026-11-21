@@ -40,7 +40,7 @@ jq_() { "$PY" -c "import json,sys; d=json.load(sys.stdin); print(eval(sys.argv[1
 curl -sf "$API/ready" >/dev/null || die "JARVIS is not running or not ready: run scripts/dev-up.sh first"
 
 info "1. Provider connections (real authenticated requests, free endpoints)"
-for p in anthropic serp_api firecrawl cloudflare livekit resend supabase; do
+for p in anthropic serp_api firecrawl cloudflare livekit cartesia resend supabase; do
   r="$(curl -s --max-time 90 -X POST "$API/integrations/$p/test")"
   st="$(printf '%s' "$r" | jq_ "d.get('state')" 2>/dev/null || echo ERROR)"
   detail="$(printf '%s' "$r" | jq_ "(d.get('detail') or json.dumps(d.get('result') or d.get('quota') or {}))[:160]" 2>/dev/null || true)"
@@ -59,6 +59,11 @@ say="$(printf '%s' "$r" | jq_ "d.get('say','')[:300]" 2>/dev/null || echo "$r")"
 if [ "$kind" = "provider_error" ]; then flunk "Claude FAILED: $say"
 elif [ "$agent" = "claude" ] && [ -n "$say" ]; then pass "Claude answered (real message, tools available): \"$say\""
 else flunk "conversation did not use Claude (agent=$agent): $say"; fi
+
+info "2b. Website QA (the real browser QA runner, in the configured isolated mode)"
+if qa="$(QA_RUNNER_MODE="$(cat "$RUN_DIR/worker.qamode" 2>/dev/null || true)" timeout 240 "$PY" -m jarvis.agents.qa_selfcheck 2>/dev/null)"; then
+  pass "website QA executes: $qa"
+else flunk "website QA cannot execute: ${qa:-no output} (run scripts/dev-up.sh; see .jarvis/logs/qa-sandbox-build.log)"; fi
 
 info "3. Voice"
 vs="$(curl -s "$API/voice/status")"
@@ -82,7 +87,12 @@ else
   secret="$(setting voice_agent_shared_secret)"
   cfg="$(curl -s "$API/internal/voice/config" -H "X-Voice-Agent-Key: $secret")"
   me="$(curl -s "$API/me")"
-  if (export LIVEKIT_URL="$(printf '%s' "$cfg" | jq_ "d['url']")" LIVEKIT_API_KEY="$(printf '%s' "$cfg" | jq_ "d['api_key']")" \
+  cartesia_key="$(printf '%s' "$cfg" | jq_ "(d.get('cartesia') or {}).get('api_key') or ''")"
+  export CARTESIA_API_KEY="$cartesia_key"
+  voice_log_start="$(wc -l <"$LOG_DIR/voice.log" 2>/dev/null || echo 0)"
+  if [ -z "$cartesia_key" ]; then
+    skip "BLOCKED: live voice tests need JARVIS's voice: Cartesia is NOT_CONFIGURED (Integrations > Cartesia)"
+  elif (export LIVEKIT_URL="$(printf '%s' "$cfg" | jq_ "d['url']")" LIVEKIT_API_KEY="$(printf '%s' "$cfg" | jq_ "d['api_key']")" \
              LIVEKIT_API_SECRET="$(printf '%s' "$cfg" | jq_ "d['api_secret']")" VOICE_AGENT_SHARED_SECRET="$secret" JARVIS_API_URL="$API" \
              JARVIS_LIVE_USER_ID="$(printf '%s' "$me" | jq_ "d['user_id']")" JARVIS_LIVE_WORKSPACE_ID="$(printf '%s' "$me" | jq_ "d['workspace_id']")" \
              JARVIS_LIVE_USE_RUNNING_AGENT=1 VOICE_AGENT_NAME="$(setting voice_agent_name)";
@@ -95,10 +105,16 @@ else
       flunk "voice round trip ran but the reply was not a Claude answer: $(printf '%s' "$last" | jq_ "d[-1]['content'][:200]")"
     fi
   else flunk "live voice conversation failed (see .jarvis/logs/voice-live-test.log): $(tail -n 3 "$LOG_DIR/voice-live-test.log" | tr '\n' ' ')"; fi
+  # Measured latency (from the agent's own pipeline events during these tests; nothing is estimated)
+  lat="$(tail -n +"$((voice_log_start + 1))" "$LOG_DIR/voice.log" 2>/dev/null | grep -o 'voice.latency .*' | tail -n 12)"
+  if [ -n "$lat" ]; then info "Measured voice latency (per turn, ms)"; printf '%s\n' "$lat" | sed 's/^/  /'
+  else warn "no voice.latency lines were logged during the live tests"; fi
 
   # Browser: the real dashboard in Chromium, whose microphone is a WAV of real synthesized speech.
   wav="$LOG_DIR/voice-e2e-speech.wav"
-  if ! (cd dashboard && node -e "require.resolve('playwright')" >/dev/null 2>&1); then
+  if [ -z "$cartesia_key" ]; then
+    skip "BLOCKED: browser voice test needs Cartesia (NOT_CONFIGURED)"
+  elif ! (cd dashboard && node -e "require.resolve('playwright')" >/dev/null 2>&1); then
     skip "browser voice test skipped: Playwright is not installed in dashboard/ (npm ci)"
   elif ! (export LIVEKIT_URL="$(printf '%s' "$cfg" | jq_ "d['url']")" LIVEKIT_API_KEY="$(printf '%s' "$cfg" | jq_ "d['api_key']")" \
                  LIVEKIT_API_SECRET="$(printf '%s' "$cfg" | jq_ "d['api_secret']")";
@@ -111,7 +127,7 @@ else
         timeout 300 node e2e/voice.e2e.mjs "http://127.0.0.1:$WEB_PORT" "$LOG_DIR" "$wav") >>"$LOG_DIR/voice-e2e.log" 2>&1; then
     pass "browser voice test: the owner's veterinary conversation spoken in Chromium; ONE message per turn, Claude replies without re-asking, audio played ($LOG_DIR/e2e-voice.png)"
   else flunk "browser voice test failed (see .jarvis/logs/voice-e2e.log): $(tail -n 3 "$LOG_DIR/voice-e2e.log" | tr '\n' ' ')"; fi
-  unset secret cfg
+  unset secret cfg cartesia_key CARTESIA_API_KEY
 fi
 
 if [ ${#SITE[@]} -ge 4 ]; then
@@ -182,6 +198,6 @@ if [ "$VET" = 1 ]; then
 fi
 
 info "Summary"
-printf '  passed: %d   failed: %d   not run / not configured: %d\n' "${#passed[@]}" "${#failed[@]}" "${#skipped[@]}"
+printf '  passed: %d   failed: %d   BLOCKED / not run: %d\n' "${#passed[@]}" "${#failed[@]}" "${#skipped[@]}"
 for f in "${failed[@]}"; do printf '  ✗ %s\n' "$f"; done
 [ ${#failed[@]} -eq 0 ]

@@ -28,7 +28,9 @@ from pathlib import Path
 import pytest
 
 REQUIRED = ["LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET", "JARVIS_API_URL", "VOICE_AGENT_SHARED_SECRET",
-            "JARVIS_LIVE_USER_ID", "JARVIS_LIVE_WORKSPACE_ID"]
+            "JARVIS_LIVE_USER_ID", "JARVIS_LIVE_WORKSPACE_ID", "CARTESIA_API_KEY"]
+# The simulated owner speaks with a different Cartesia voice from JARVIS's ("Blake"), through the same plugin.
+OWNER_VOICE = os.environ.get("JARVIS_LIVE_OWNER_VOICE", "a167e0f3-df7e-4d52-a9c3-f949145efdab")
 MISSING = [k for k in REQUIRED if not os.environ.get(k)]
 pytestmark = pytest.mark.skipif(bool(MISSING), reason=f"voice NOT_CONFIGURED for live test; missing: {', '.join(MISSING)}")
 AGENT = Path(__file__).resolve().parents[1] / "agent.py"
@@ -48,15 +50,15 @@ async def speak_into(room, text: str | list[str], pause_s: float = 0.0, source=N
     between the parts (a natural mid-sentence pause). Runs in the TEST process, outside any agent job, so the plugin's
     HTTP session is opened explicitly with the SDK's supported context manager."""
     from livekit import rtc
-    from livekit.agents import inference
     from livekit.agents.utils import http_context
+    from livekit.plugins import cartesia
     if source is None:
         source = rtc.AudioSource(24000, 1)
         track = rtc.LocalAudioTrack.create_audio_track("mic", source)
         await room.local_participant.publish_track(track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE))
     silence = rtc.AudioFrame.create(24000, 1, 2400)                # 100 ms
     async with http_context.open():
-        tts = inference.TTS(model=os.environ.get("VOICE_TTS_MODEL", "cartesia/sonic-2"), sample_rate=24000)
+        tts = cartesia.TTS(api_key=os.environ["CARTESIA_API_KEY"], model="sonic-3", voice=OWNER_VOICE, sample_rate=24000)
         parts = [text] if isinstance(text, str) else text
         for i, part in enumerate(parts):
             if i:

@@ -337,3 +337,48 @@ async def test_anthropic_test_connection_reports_billing_not_connected(center, d
         headers={"request-id": "req_bill_1"}))
     r = (await center.post("/integrations/anthropic/test", headers=a["headers"])).json()
     assert r["state"] == "QUOTA_EXCEEDED" and "credit balance is too low" in r["detail"] and "req_bill_1" in r["detail"]
+
+
+
+@pytest.mark.parametrize("status,body,state", [
+    (200, {"id": "f786b574-daa5-4673-aa0c-cbe3e8534c02", "name": "Katie", "language": "en"}, "CONNECTED"),
+    (401, {"error": "Invalid API key"}, "INVALID_CREDENTIALS"),
+    (404, {"error": "Voice not found"}, "PROVIDER_ERROR"),
+    (429, {"error": "Too many requests"}, "RATE_LIMITED"),
+])
+async def test_cartesia_test_connection_is_a_free_voice_lookup(client, deps, status, body, state):
+    """Test connection never synthesizes speech: it looks up the configured voice (free) and maps the real outcome."""
+    import httpx
+    from pydantic import SecretStr
+
+    from jarvis.integrations.cartesia import CartesiaClient
+    seen = []
+
+    def handler(req):
+        seen.append((req.method, req.url.path, req.headers.get("x-api-key"), req.headers.get("cartesia-version")))
+        return httpx.Response(status, json=body)
+    s = deps.settings.model_copy(update={"cartesia_api_key": SecretStr("cartesia-test-key-0123456789")})
+    deps.settings = s
+    client.app.state.base_settings = s
+    deps.cartesia = CartesiaClient(s, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    import jarvis.integrations.base as b
+    orig = b.asyncio.sleep
+
+    async def nosleep(_s):
+        return None
+    b.asyncio.sleep = nosleep
+    try:
+        a = await login(client, f"cartesia{status}@t.dev")
+        r = (await client.post("/integrations/cartesia/test", headers=a["headers"])).json()
+    finally:
+        b.asyncio.sleep = orig
+    assert state in (r["state"], r.get("provider_state")), r
+    assert seen and all(m == "GET" and p == "/voices/f786b574-daa5-4673-aa0c-cbe3e8534c02" for m, p, _k, _v in seen)
+    assert seen[0][2] == "cartesia-test-key-0123456789" and seen[0][3] == "2025-04-16"
+    assert "cartesia-test-key" not in str(r)                                 # never echoed
+
+
+async def test_cartesia_not_configured_is_reported(client):
+    a = await login(client, "cartesia-none@t.dev")
+    items = {i["provider"]: i for i in (await client.get("/integrations", headers=a["headers"])).json()["integrations"]}
+    assert items["cartesia"]["state"] == "NOT_CONFIGURED" and items["cartesia"]["name"] == "Cartesia"

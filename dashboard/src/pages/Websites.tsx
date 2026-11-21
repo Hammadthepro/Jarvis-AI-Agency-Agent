@@ -6,7 +6,22 @@ import { Page } from "../components/Shell";
 import { Card, Empty, ErrorState, Loading, Pill, usd, when } from "../components/ui";
 
 type Site = { id: string; slug: string; state: string; business_name: string | null; headline: string | null; version: number | null; qa_status: string | null;
-  qa_runner: string | null; preview_url: string | null; repair_cycles: number; cost_micros: number; design: Record<string, string> | null; model: string | null };
+  qa_runner: string | null; preview_url: string | null; repair_cycles: number; cost_micros: number; design: Record<string, string> | null; model: string | null;
+  deploy_status: string | null; last_error: string | null; last_error_at: string | null;
+  last_task: { task: string; status: string; attempts: number; max_attempts: number } | null };
+
+const tone = (st: string | null | undefined) =>
+  st === "deployed" || st === "verified" || st === "passed" ? "ok" : st === "failed" || st === "error" || st === "requires_human_review" ? "bad" : "muted";
+
+/** What the owner needs to know about one preview: where it is in the pipeline, and why it stopped if it did. */
+export function siteSummary(s: Pick<Site, "state" | "qa_status" | "deploy_status" | "last_error" | "last_task">): string {
+  const t = s.last_task;
+  if (s.state === "deployed") return "Preview deployed and verified.";
+  if (s.state === "failed" || s.state === "requires_human_review") return s.last_error ?? "Needs review.";
+  if (t && t.status === "retry_wait") return `Retrying ${t.task === "site.deploy" ? "deployment" : "build/QA"} (attempt ${t.attempts} of ${t.max_attempts})${s.last_error ? `: ${s.last_error}` : ""}`;
+  if (s.state === "passed") return s.deploy_status ? `QA passed. Deployment: ${s.deploy_status}.` : "QA passed. Waiting to deploy.";
+  return `In progress: ${s.state}.`;
+}
 
 export default function WebsitesPage() {
   const [sp] = useSearchParams();
@@ -18,9 +33,14 @@ export default function WebsitesPage() {
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{q.data.map((s) => (
           <Link key={s.id} to={`/websites/${s.id}`} className="group rounded-xl border hairline bg-ink-900/80 p-4 transition hover:border-signal-500/40">
             <Thumb site={s} />
-            <div className="mt-3 flex items-center justify-between"><div className="truncate font-medium text-ink-100">{s.business_name ?? s.slug}</div><Pill>{s.state}</Pill></div>
+            <div className="mt-3 flex items-center justify-between"><div className="truncate font-medium text-ink-100">{s.business_name ?? s.slug}</div><Pill tone={tone(s.state)}>{s.state}</Pill></div>
             <div className="mt-1 truncate text-sm text-ink-400">{s.headline}</div>
-            <div className="mt-2 flex flex-wrap gap-2 text-xs text-ink-500"><span>v{s.version ?? "–"}</span><span>QA: {s.qa_status ?? "—"}</span><span>repairs: {s.repair_cycles}</span>
+            <div className="mt-2 flex flex-wrap gap-2 text-xs"><Pill tone={tone(s.qa_status)}>QA: {s.qa_status ?? "not run"}</Pill>
+              <Pill tone={tone(s.deploy_status)}>deploy: {s.deploy_status ?? "not yet"}</Pill></div>
+            <p className={`mt-2 text-xs ${s.state === "failed" || s.state === "requires_human_review" ? "text-bad-500" : "text-ink-400"}`}>{siteSummary(s)}</p>
+            {s.preview_url && <a href={s.preview_url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}
+              className="mt-2 block break-all text-xs text-signal-300 underline">{s.preview_url}</a>}
+            <div className="mt-2 flex flex-wrap gap-2 text-xs text-ink-500"><span>v{s.version ?? "–"}</span><span>repairs: {s.repair_cycles}</span>
               <span>{usd(s.cost_micros)}</span>{s.design && <span>{s.design.archetype} · {s.design.palette}</span>}</div>
           </Link>))}</div>
       )}
@@ -60,8 +80,11 @@ export function SiteDetailPage() {
   const d = q.data;
   const dep = d.deployments.find((x) => x.status === "verified");
   return (
-    <Page title={d.site.slug} subtitle={`state: ${d.site.state} · ${d.versions.length} versions · ${d.qa_runs.length} QA runs`}
+    <Page title={d.site.business_name ?? d.site.slug} subtitle={`state: ${d.site.state} · ${d.versions.length} versions · ${d.qa_runs.length} QA runs`}
       actions={dep?.url ? <a className="rounded-lg bg-signal-500 px-3 py-1.5 text-sm font-medium text-white" href={dep.url} target="_blank" rel="noreferrer">Open preview</a> : <Pill tone="muted">no verified preview</Pill>}>
+      {d.site.last_error && (
+        <div role="alert" className="mb-4 rounded-lg border border-bad-500/40 bg-bad-500/10 p-3 text-sm text-ink-100">{d.site.last_error}</div>
+      )}
       <div className="grid gap-4 lg:grid-cols-[2fr_1fr]">
         <Card title="Screenshots (from QA run)">
           <div className="grid gap-3 md:grid-cols-[2fr_1fr]">

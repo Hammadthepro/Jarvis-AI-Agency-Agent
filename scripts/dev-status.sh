@@ -31,6 +31,10 @@ info "Worker"
 if [ -n "$(managed_pid worker)" ]; then ok "process running (pid $(managed_pid worker))"; else fail "process not running"; bad=1; fi
 if [ "$(j "d['worker'].get('ok')")" = "True" ]; then ok "heartbeat: $(j "d['worker']['detail']")"; else fail "heartbeat: $(j "d['worker'].get('detail', 'unknown')")"; bad=1; fi
 
+info "Website QA"
+qs="$(cat "$RUN_DIR/qa.status" 2>/dev/null || echo 'not checked (run scripts/dev-up.sh)')"
+case "$qs" in ready:*) ok "$qs" ;; *) fail "$qs"; bad=1 ;; esac
+
 info "Dashboard"
 if [ -n "$(managed_pid dashboard)" ]; then ok "process running (pid $(managed_pid dashboard))"; else fail "process not running"; bad=1; fi
 if curl -sf -o /dev/null --max-time 5 "http://127.0.0.1:$WEB_PORT/"; then ok "serving on port $WEB_PORT"; else fail "not serving on port $WEB_PORT"; bad=1; fi

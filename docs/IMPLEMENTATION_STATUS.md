@@ -1,6 +1,6 @@
 # JARVIS — Implementation Status
 
-As of 2026-11-20 (revision 13: objectives, provider-specific discovery, streaming voice; see CHANGELOG.md). Branch `main`.
+As of 2026-11-21 (revision 14: preview pipeline repair, Cartesia voice; see CHANGELOG.md). Branch `main`.
 
 **Overall: NOT production-ready and NOT deployed.** The platform is implemented and passes its automated tests
 against real local infrastructure (PostgreSQL, Chromium, Docker) with **test doubles for every third-party provider**.
@@ -99,7 +99,10 @@ Revision 6 tests (architecture consistency, evidence integrity, usage labels, ba
 | 41 | Structured objectives (voice + text), defaults instead of questions, one yes for the whole preview workflow | ✅ | ✅ | ❌ | — | Scripted-Claude tests of the owner's veterinary conversation. Real Claude: `scripts/verify-live.sh --vet-workflow` (not yet run: credentials are in your Codespace) |
 | 42 | Provider-specific discovery policy; SerpApi discovery (city / state / nationwide) | ✅ | ✅ | ❌ | — | Google Places restriction unchanged. Full worker run with SerpApi doubles to verified previews. No real SerpApi call made from this environment |
 | 43 | Real progress posted to the conversation; preview links per business | ✅ | ✅ | ❌ | — | |
-| 44 | Streaming Claude replies to streaming TTS; Cartesia Sonic 3 with a pinned voice | ✅ | ✅ | ❌ | — | Streaming proven through the real Anthropic SDK (SSE over a mock transport) and a real LiveKit AgentSession; live audio quality still needs your listen |
+| 44 | Streaming Claude replies to streaming TTS; Cartesia Sonic 3 (official plugin, your Cartesia key) | ✅ | ✅ | ❌ | — | Streaming proven through the real Anthropic SDK (SSE over a mock transport) and a real LiveKit AgentSession; live audio quality still needs your listen |
+| 45 | Website QA in the isolated Docker sandbox, self-checked at startup | ✅ | ✅ | — | — | Real QA of a generated site in the sandbox runs in the test suite. Live: `dev-up.sh` in your Codespace builds and checks it |
+| 46 | Honest preview failures (site failed + reason + retries; campaign not "completed" without previews) | ✅ | ✅ | — | — | |
+| 47 | Cartesia voice, NOT_CONFIGURED without a key, local turn/interruption models, measured latency | ✅ | ✅ | ❌ | — | **BLOCKED (live):** needs your Cartesia key and LiveKit project; run `scripts/verify-live.sh` |
 | — | Production deployment | ⚠️ | ⚠️ | — | ❌ | Compose, deploy script and hardening are implemented and checked statically; images build in CI. **No VPS: nothing deployed** |
 
 ## 3. What you must provide

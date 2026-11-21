@@ -11,6 +11,7 @@ const CHECK_LABEL: Record<string, string> = {
   livekit_configured: "LiveKit credentials configured", livekit_validated: "LiveKit connection validated",
   agent_secret_configured: "Voice agent secret set on the server", agent_online: "JARVIS voice agent process running",
   agent_registered: "Voice agent registered with LiveKit", agent_job_process_ready: "Voice agent can start sessions (job process ready)",
+  cartesia_configured: "Cartesia voice configured (JARVIS's speech)",
 };
 const EXAMPLES = [
   "Find 10 independent roofing companies in Houston with outdated websites and prepare two redesign previews.",

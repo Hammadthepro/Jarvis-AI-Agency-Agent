@@ -9,6 +9,5 @@ info "Preparing the JARVIS development environment"
 [ -x "$PY" ] || python3 -m venv backend/.venv
 pip_install -e "backend[dev]" && touch backend/.venv/.jarvis-installed && ok "backend dependencies"
 (cd dashboard && npm ci --no-audit --no-fund >/dev/null) && touch dashboard/node_modules/.jarvis-installed && ok "dashboard dependencies"
-if (cd qa-runner && npm ci --no-audit --no-fund >/dev/null && npx playwright install --with-deps chromium >/dev/null 2>&1); then
-  touch qa-runner/node_modules/.jarvis-installed; ok "QA runner (Playwright + Chromium)"
-else warn "QA runner install failed; dev-up will retry"; fi
+# Website QA runs in the isolated Docker sandbox (built and self-checked by dev-up; see scripts/lib/dev-common.sh).
+if ensure_qa_sandbox; then ok "website QA $QA_STATUS"; else warn "website QA not ready yet: $QA_STATUS (dev-up retries)"; fi

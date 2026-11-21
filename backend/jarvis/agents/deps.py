@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 
 from jarvis.config import Settings
 from jarvis.db.pool import Database
+from jarvis.integrations.cartesia import CartesiaClient
 from jarvis.integrations.claude import ClaudeClient
 from jarvis.integrations.cloudflare import CloudflarePagesClient
 from jarvis.integrations.firecrawl import FirecrawlClient
@@ -30,12 +31,14 @@ class Deps:
     fetch: Callable[..., Awaitable[FetchResult]] = field(default=safe_fetch)
     resolver: Callable[[str, int], Awaitable[str]] = field(default=resolve_public)
     second_probe_delay_s: float | None = None   # None => settings.broken_second_probe_minutes
+    cartesia: CartesiaClient | None = None
 
     @classmethod
     def build(cls, settings: Settings, db: Database) -> Deps:
         return cls(settings=settings, db=db, places=GooglePlacesClient(settings), serp=SerpApiClient(settings),
                    firecrawl=FirecrawlClient(settings), claude=ClaudeClient(settings),
-                   cloudflare=CloudflarePagesClient(settings), email=ResendClient(settings))
+                   cloudflare=CloudflarePagesClient(settings), email=ResendClient(settings),
+                   cartesia=CartesiaClient(settings))
 
     async def fetch_url(self, url: str, **kw) -> FetchResult:
         if self.fetch is safe_fetch:

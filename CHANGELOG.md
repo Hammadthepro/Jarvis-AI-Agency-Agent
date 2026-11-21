@@ -1,5 +1,29 @@
 # JARVIS Changelog
 
+## Revision 14: website preview pipeline repair, Cartesia voice (2026-11-21)
+- **QA runner install failure (root cause):**
+  - The Codespaces image is Ubuntu 20.04, where Playwright 1.63 cannot install Chromium (`ERROR: Playwright does not support chromium on ubuntu20.04-x64`, reproduced). QA ran Chromium on the host (`QA_RUNNER_MODE=subprocess`), which was also not isolated.
+  - `dev-up.sh` / `dev-setup.sh` now build the digest-pinned Docker QA sandbox (Ubuntu 24.04, `--network none`, read-only, non-root, no capabilities, no secrets) and prove QA executes with a real self-check (`jarvis.agents.qa_selfcheck`).
+  - The worker then runs with `QA_RUNNER_MODE=docker`. `.env` is never edited. `dev-status.sh` shows the result.
+- **Reproducible QA dependencies:** the lockfile carried a second `playwright-core` (1.65.1, pulled in by `@axe-core/playwright`'s peer range) next to Playwright 1.63.0. It is now pinned to a single 1.63.0, matching the sandbox's browsers.
+- **Pipeline honesty:**
+  - A site whose build/QA or deployment ultimately fails is marked `failed`, with the reason and retry position (`generated_sites.last_error`, migration 0012). It is no longer left looking "in progress".
+  - A deployment whose `pages.dev` URL does not verify is now a retried failure, not a successful task.
+  - A campaign that asked for previews but completed none ends as `requires_human_review` with the reasons, never `completed`.
+- **Preview correctness:**
+  - The same phone number in two formats ("(615) 555-0121" vs "+16155550121") was flagged as conflicting, which dropped the phone from previews. Phones now compare as the 10-digit number.
+  - Site copy uses the business's own verified city (a nationwide campaign has no city).
+  - Cloudflare branch names always keep the site's unique suffix, so one prospect's preview can no longer replace another's.
+- **Dashboard:** each preview shows the business, QA and deployment status, the preview link, screenshots, and the failure reason with retry information. JARVIS's `work_status` returns the same per-preview detail.
+- **Cartesia voice** through the official `livekit-plugins-cartesia==1.8.12`:
+  - `sonic-3`, voice "Katie" by default; voice, model, speed and emotion configurable.
+  - The WebSocket is prewarmed while the browser joins, and text pacing is on.
+  - New Integrations card: the key is stored encrypted, and Test connection is a free voice lookup.
+  - Without a key, voice is NOT_CONFIGURED and the agent says so; no other speech provider or LiveKit Inference route is used. The live-test speech generators also moved off the retired `cartesia/sonic-2` Inference route.
+- **No unapproved billable voice features:** the turn detector is now the local `v1-mini` model and interruption detection is local VAD. The LiveKit Inference cloud versions are opt-in. Endpointing is dynamic (0.5–3.0 s).
+- **Measured latency** per turn (`voice.latency`): endpointing, first Claude text, first audio, Cartesia TTFB, browser-audible (reported by the dashboard), total, and interrupt-to-stop. `verify-live.sh` prints it.
+- Spoken replies never include ids, URLs or markdown.
+
 ## Revision 13: JARVIS V2: objectives, provider-specific discovery, complete workflows, natural streaming voice (2026-11-20)
 - **Root causes found:**
   - **Rigid questions and forgotten objective:** Claude handed the owner's raw words to `start_prospect_search`, which ran the old regex parser. The parser asked its own canned questions ("Which type of business and which city or area should I search?") and knew nothing of earlier turns.

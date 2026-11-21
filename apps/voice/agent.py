@@ -4,10 +4,11 @@ Pipeline (one continuous session; nothing to press per sentence):
   browser mic -> LiveKit room -> streaming STT (LiveKit Inference, deepgram/nova-3: interim + final transcripts)
   -> end-of-turn decision (LiveKit turn detector model + VAD + endpointing delays) -> ONE committed user turn
   -> POST /internal/voice/command (the same JARVIS conversation as typed text: same Claude agent, history, tools,
-     approvals and budget) -> reply text -> streaming TTS (LiveKit Inference, cartesia/sonic-2) -> room audio -> browser.
+     approvals and budget) -> Claude's text streamed as it is written -> Cartesia TTS (official LiveKit plugin, Sonic 3,
+     WebSocket kept open and prewarmed per session) -> room audio -> browser.
 
-The JARVIS reply arrives whole: the shared conversation runs Claude with tools, so its answer is only known once the
-tool loop finishes. TTS starts the moment it arrives. Preemptive generation is OFF on purpose: a JARVIS turn is stored
+Claude's reply is streamed (NDJSON deltas from the API); speech starts on the first sentence. While Claude is running a
+tool there is no text to speak yet. If Cartesia is not configured the session says so and ends: no other voice is used. Preemptive generation is OFF on purpose: a JARVIS turn is stored
 and can propose or start work, so it must never run on words the owner has not finished saying.
 
 The session needs an LLM object for LiveKit to generate replies at all (AgentActivity skips the reply when
@@ -60,26 +61,31 @@ log = logging.getLogger("jarvis.voice")
 API = os.environ.get("JARVIS_API_URL", "http://api:8000")
 SECRET = os.environ.get("VOICE_AGENT_SHARED_SECRET", "")
 STT = os.environ.get("VOICE_STT_MODEL", "deepgram/nova-3")
-# Speech synthesis through LiveKit Inference (billed by the LiveKit account; no separate provider account).
-# cartesia/sonic-2 is retired in LiveKit Inference; Sonic 3 is Cartesia's current conversational model. The voice is
-# pinned so JARVIS always sounds the same (LiveKit-documented Cartesia voice "Jacqueline", en-US); any Cartesia voice id
-# available through LiveKit Inference can be set instead.
-TTS = os.environ.get("VOICE_TTS_MODEL", "cartesia/sonic-3")
-TTS_VOICE = os.environ.get("VOICE_TTS_VOICE", "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc")
-TTS_SPEED = os.environ.get("VOICE_TTS_SPEED", "normal")          # slow | normal | fast | a number such as 1.05
-TTS_EMOTION = os.environ.get("VOICE_TTS_EMOTION", "")            # optional Cartesia emotion, e.g. "calm"
-TTS_LANGUAGE = os.environ.get("VOICE_TTS_LANGUAGE", "en")
+# JARVIS's voice: Cartesia through the official LiveKit plugin (livekit-plugins-cartesia, same release as livekit-agents),
+# billed to the Cartesia account of CARTESIA_API_KEY. If Cartesia is not configured the session says so and ends:
+# no other speech provider (and no LiveKit Inference route) is ever substituted.
+# Defaults: sonic-3 (the newest model the installed plugin lists), the plugin's default English agent voice "Katie",
+# natural speed. All of them can be set in Integrations > Cartesia or with these variables.
+CARTESIA_DEFAULTS = {"model": "sonic-3", "voice_id": "f786b574-daa5-4673-aa0c-cbe3e8534c02", "speed": "1.0",
+                     "emotion": None, "language": "en"}
+CARTESIA_MODELS = ("sonic-3", "sonic-2", "sonic-turbo", "sonic-lite", "sonic-preview", "sonic")   # plugin 1.8.12 TTSModels
+# Send larger chunks of text with more context once speech has started (the first sentence still goes out at once):
+# fewer "every sentence is a separate announcement" breaks, more natural prosody (plugin text_pacing).
+TTS_TEXT_PACING = os.environ.get("VOICE_TTS_TEXT_PACING", "1") == "1"
 # Explicit dispatch: the API names this agent in each browser token (roomConfig.agents), so every new JARVIS room gets
 # exactly one agent as soon as the browser joins. Automatic dispatch is not used.
 AGENT_NAME = os.environ.get("VOICE_AGENT_NAME", "jarvis")
 GREETING = "JARVIS here. What should I work on?"
-VERSION = "3"
-# End of turn: "model" = LiveKit's turn detector (LiveKit Inference; falls back to the local v1-mini model), which
-# judges from the audio whether the owner has finished, so a mid-sentence pause doesn't end the turn. "vad" = silence only.
-TURN_DETECTION = os.environ.get("VOICE_TURN_DETECTION", "model")
-# Silence before a turn may end (min) and the longest JARVIS waits when the detector thinks the owner isn't finished (max).
-ENDPOINT_MIN_S = float(os.environ.get("VOICE_ENDPOINT_MIN_DELAY", "0.6"))
-ENDPOINT_MAX_S = float(os.environ.get("VOICE_ENDPOINT_MAX_DELAY", "4.0"))
+VERSION = "4"
+# End of turn: "local" (default) = LiveKit's turn detector model running locally (v1-mini), which judges from the audio
+# whether the owner has finished, so a mid-sentence pause doesn't end the turn; "cloud" = LiveKit Inference v1 (billed by
+# LiveKit); "vad" = silence only.
+TURN_DETECTION = os.environ.get("VOICE_TURN_DETECTION", "local")
+ADAPTIVE_INTERRUPTION = os.environ.get("VOICE_ADAPTIVE_INTERRUPTION") == "1"      # LiveKit Inference: billed; off
+# Dynamic endpointing range: the shortest silence that may end a turn, and the longest JARVIS waits when the detector
+# thinks the owner isn't finished.
+ENDPOINT_MIN_S = float(os.environ.get("VOICE_ENDPOINT_MIN_DELAY", "0.5"))
+ENDPOINT_MAX_S = float(os.environ.get("VOICE_ENDPOINT_MAX_DELAY", "3.0"))
 LOG_TRANSCRIPTS = os.environ.get("VOICE_LOG_TRANSCRIPTS") == "1"     # transcript text in logs only when asked
 # Shared by the worker and its job processes (they inherit the environment), so job processes report under it.
 AGENT_ID = os.environ.get("JARVIS_VOICE_AGENT_ID") or f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
@@ -138,37 +144,77 @@ def looks_like_echo(heard: str, recent_agent: list[str]) -> bool:
     return any(needle in " " + " ".join(_WORD.findall(a.lower())) + " " for a in recent_agent)
 
 
-def tts_options() -> dict:
-    """Arguments for livekit.agents.inference.TTS (validated here so a typo fails loudly at start, not mid-call)."""
-    extra: dict = {}
-    if TTS_SPEED:
-        try:
-            extra["speed"] = float(TTS_SPEED)
-        except ValueError:
-            if TTS_SPEED not in ("slow", "normal", "fast"):
-                raise ValueError(f"VOICE_TTS_SPEED must be slow, normal, fast or a number, not {TTS_SPEED!r}") from None
-            extra["speed"] = TTS_SPEED
-    if TTS_EMOTION and TTS.startswith("cartesia"):
-        extra["emotion"] = TTS_EMOTION
-    opts = {"model": TTS, "language": TTS_LANGUAGE}
-    if TTS_VOICE:
-        opts["voice"] = TTS_VOICE
-    if extra and TTS.startswith("cartesia"):
-        opts["extra_kwargs"] = extra
+class VoiceNotConfigured(Exception):
+    """A required voice provider is missing; the message says exactly what to configure."""
+
+
+def cartesia_settings(api: str = API, secret: str = SECRET, http: httpx.Client | None = None) -> dict:
+    """Cartesia key and voice settings: from the environment (CARTESIA_*), else from the Integrations Center via the
+    API's internal endpoint. Read for every session, so a key saved in the dashboard applies without a restart.
+    Returns {"state": "CONFIGURED" | "NOT_CONFIGURED" | "DISABLED", ...}; never logs the key."""
+    if os.environ.get("CARTESIA_API_KEY"):
+        return {"state": "CONFIGURED", "source": "environment", "api_key": os.environ["CARTESIA_API_KEY"],
+                "model": os.environ.get("CARTESIA_MODEL") or CARTESIA_DEFAULTS["model"],
+                "voice_id": os.environ.get("CARTESIA_VOICE_ID") or CARTESIA_DEFAULTS["voice_id"],
+                "speed": os.environ.get("CARTESIA_SPEED") or CARTESIA_DEFAULTS["speed"],
+                "emotion": os.environ.get("CARTESIA_EMOTION") or None,
+                "language": os.environ.get("CARTESIA_LANGUAGE") or CARTESIA_DEFAULTS["language"]}
+    c = http or httpx.Client(timeout=10)
+    try:
+        r = c.get(f"{api}/internal/voice/config", headers={"X-Voice-Agent-Key": secret})
+        cfg = (r.json() if r.status_code == 200 else {}).get("cartesia") or {"state": "NOT_CONFIGURED"}
+    except (httpx.HTTPError, ValueError) as exc:
+        return {"state": "NOT_CONFIGURED", "reason": f"the JARVIS API could not be reached for the voice settings ({exc})"}
+    finally:
+        if http is None:
+            c.close()
+    return {**CARTESIA_DEFAULTS, **{k: v for k, v in cfg.items() if v not in (None, "")}, "source": "integrations_center"} \
+        if cfg.get("state") == "CONFIGURED" else cfg
+
+
+def tts_options(cfg: dict) -> dict:
+    """Validated arguments for livekit.plugins.cartesia.TTS (a bad value fails at session start, not mid-sentence)."""
+    if cfg.get("state") != "CONFIGURED":
+        why = "is disabled in the Integrations Center" if cfg.get("state") == "DISABLED" else \
+            f"is NOT_CONFIGURED{': ' + cfg['reason'] if cfg.get('reason') else ''}"
+        raise VoiceNotConfigured(f"JARVIS's voice (Cartesia) {why}. Add a Cartesia API key in Integrations > Cartesia "
+                                 "(or set CARTESIA_API_KEY for the voice agent).")
+    model = cfg.get("model") or CARTESIA_DEFAULTS["model"]
+    if model not in CARTESIA_MODELS:
+        raise ValueError(f"Cartesia model {model!r} is not supported by livekit-plugins-cartesia 1.8.12 ({', '.join(CARTESIA_MODELS)})")
+    raw = str(cfg.get("speed") or "1.0")
+    try:
+        speed: float | str = float(raw)
+        if not 0.6 <= speed <= 2.0:
+            raise ValueError(f"Cartesia speed {raw} is outside 0.6-2.0")
+    except ValueError as exc:
+        if raw not in ("slowest", "slow", "normal", "fast", "fastest"):
+            raise ValueError(f"Cartesia speed must be 0.6-2.0 or slow/normal/fast, not {raw!r}") from exc
+        speed = raw
+    opts = {"api_key": cfg["api_key"], "model": model, "voice": cfg.get("voice_id") or CARTESIA_DEFAULTS["voice_id"],
+            "language": cfg.get("language") or "en", "text_pacing": TTS_TEXT_PACING}
+    if speed not in (1.0, "normal"):
+        opts["speed"] = speed
+    if cfg.get("emotion"):
+        opts["emotion"] = [e.strip() for e in str(cfg["emotion"]).split(",") if e.strip()]
     return opts
 
 
-def build_tts():
-    from livekit.agents import inference
-    return inference.TTS(**tts_options())
+def build_tts(cfg: dict):
+    from livekit.plugins import cartesia
+    return cartesia.TTS(**tts_options(cfg))
 
 
 _URL = re.compile(r"https?://\S+")
+_IDS = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b|\b(?:RM|TR|PA)_[A-Za-z0-9]{6,}(?::t\d+)?\b")
+_MD = re.compile(r"[*_`#>]+")
 
 
 def speakable(text: str) -> str:
-    """Links are shown in the conversation, not read out character by character."""
-    return _URL.sub("the link in the chat", text)
+    """What is said aloud: links are in the chat, not read character by character; internal ids are never spoken;
+    markdown symbols are dropped."""
+    out = _IDS.sub("", _URL.sub("the link in the chat", text))
+    return re.sub(r"[ \t]{2,}", " ", _MD.sub("", out))
 
 
 async def speakable_stream(chunks):
@@ -186,22 +232,30 @@ async def speakable_stream(chunks):
 
 
 def turn_handling(detector=None) -> dict:
-    """LiveKit turn handling for JARVIS. Barge-in is on; preemptive generation is off (see module docstring)."""
+    """LiveKit turn handling for JARVIS.
+    - Endpointing is dynamic: the wait after the owner stops adapts to their own pauses (between min and max).
+    - Interruption is VAD-based and local. The "adaptive" detector would call LiveKit Inference (a billable cloud
+      model), so it is only used when VOICE_ADAPTIVE_INTERRUPTION=1 is set deliberately.
+    - A false interruption (a cough, "mm-hm") resumes the reply instead of dropping it.
+    - Preemptive generation is off (see module docstring)."""
+    interruption = {"enabled": True, "mode": "adaptive" if ADAPTIVE_INTERRUPTION else "vad", "min_duration": 0.4,
+                    "resume_false_interruption": True, "false_interruption_timeout": 1.5}
     return {
         "turn_detection": detector if detector is not None else "vad",
-        "endpointing": {"mode": "fixed", "min_delay": ENDPOINT_MIN_S, "max_delay": ENDPOINT_MAX_S},
-        "interruption": {"enabled": True, "min_duration": 0.5, "resume_false_interruption": True,
-                         "false_interruption_timeout": 2.0},
+        "endpointing": {"mode": "dynamic", "min_delay": ENDPOINT_MIN_S, "max_delay": ENDPOINT_MAX_S},
+        "interruption": interruption,
         "preemptive_generation": {"enabled": False},
     }
 
 
 def make_turn_detector():
-    """LiveKit's end-of-turn model, or None for silence-based (VAD) turns."""
-    if TURN_DETECTION != "model":
+    """LiveKit's end-of-turn model. Default: the LOCAL v1-mini model (runs in the job process, no per-use charge).
+    VOICE_TURN_DETECTION=cloud uses LiveKit Inference's v1 model (billed by LiveKit: enable only deliberately);
+    VOICE_TURN_DETECTION=vad uses silence only."""
+    if TURN_DETECTION == "vad":
         return None
     from livekit.agents import inference
-    return inference.TurnDetector(version="v1")
+    return inference.TurnDetector(version="v1" if TURN_DETECTION == "cloud" else "v1-mini")
 
 
 class PipelineTrace:
@@ -235,6 +289,40 @@ class PipelineTrace:
         extra = " ".join(f"{k}={v}" for k, v in kv.items() if v is not None)
         log.info("voice.pipeline turn=%s stage=%s t_ms=%d %s", turn, stage, ms, extra)
 
+    def latency(self, turn: str | None = None) -> dict:
+        """Measured (never estimated) milliseconds for one turn, from this session's own events:
+        endpointing = owner stopped speaking -> turn committed; first_text = commit -> first Claude text;
+        first_audio = commit -> TTS playout started; audible = commit -> the browser heard JARVIS; total = commit ->
+        reply finished. Missing stages are omitted."""
+        turn = turn or self.turn
+        ev = [e for e in self.events if e["turn"] == turn]
+        first = {}
+        for e in ev:
+            first.setdefault(e["stage"], e["t_ms"])
+        c = first.get("turn_commit")
+        if c is None:
+            return {}
+        out = {}
+        if "speech_end" in first and first["speech_end"] <= c:
+            out["endpointing_ms"] = c - max(e["t_ms"] for e in ev if e["stage"] == "speech_end" and e["t_ms"] <= c)
+        for name, stage in (("first_text_ms", "claude_first_text"), ("first_audio_ms", "tts_playout_start"),
+                            ("audible_ms", "browser_reply_audible"), ("total_ms", "reply_played")):
+            if stage in first and first[stage] >= c:
+                out[name] = first[stage] - c
+        ttfb = next((e.get("ttfb_ms") for e in ev if e["stage"] == "tts_metrics"), None)
+        if ttfb is not None:
+            out["tts_ttfb_ms"] = ttfb
+        stop = next((e.get("interrupt_to_stop_ms") for e in ev if e["stage"] == "speech_stopped_after_barge_in"), None)
+        if stop is not None:
+            out["interrupt_to_stop_ms"] = stop
+        return out
+
+    def log_latency(self, turn: str | None = None) -> dict:
+        lat = self.latency(turn)
+        if lat:
+            log.info("voice.latency turn=%s %s", turn or self.turn, " ".join(f"{k}={v}" for k, v in lat.items()))
+        return lat
+
     def stages(self, turn: str | None = None) -> list[str]:
         return [e["stage"] for e in self.events if turn is None or e["turn"] == turn]
 
@@ -264,7 +352,7 @@ def parse_control(payload: bytes, topic: str | None, sender: str | None, owner: 
             event = json.loads(payload.decode()).get("event")
         except (ValueError, AttributeError):
             return None
-        return f"client:{event}" if event in ("mic_published", "audio_playing", "audio_blocked") else None
+        return f"client:{event}" if event in ("mic_published", "audio_playing", "audio_blocked", "reply_audible") else None
     return kind if kind in ("interrupt", "end") else None
 
 
@@ -456,7 +544,7 @@ def ensure_livekit_env(api: str = API, secret: str = SECRET, http: httpx.Client 
 
 # Worker (parent process) health, reported with every heartbeat. A running supervisor or parent is NOT enough: the API
 # reports voice as operational only when the worker is registered with LiveKit and a job process has started.
-WORKER_STATE: dict = {"registered": False, "worker_id": None, "last_error": None}
+WORKER_STATE: dict = {"registered": False, "worker_id": None, "last_error": None, "tts": None}
 
 
 def _sanitize(text: str) -> str:
@@ -481,7 +569,7 @@ def heartbeat_once(http: httpx.Client, api: str = API, secret: str = SECRET, det
                    event: str = "heartbeat") -> bool:
     try:
         r = http.post(f"{api}/internal/voice/heartbeat", headers={"X-Voice-Agent-Key": secret},
-                      json={"agent_id": AGENT_ID, "version": VERSION, "detail": detail, "event": event,
+                      json={"agent_id": AGENT_ID, "version": VERSION, "detail": detail or WORKER_STATE.get("tts"), "event": event,
                             "registered": WORKER_STATE["registered"], "worker_id": WORKER_STATE["worker_id"],
                             "last_error": WORKER_STATE["last_error"]})
         return r.status_code == 200
@@ -576,8 +664,13 @@ def jarvis_agent_class():
 def wire_session(session, trace: PipelineTrace, turns: TurnHandler, publish) -> None:
     """Logs every pipeline stage under the turn's correlation id and surfaces STT/TTS/Claude errors to the browser."""
 
+    st = {"agent": "initializing", "barge_in_at": None}
+
     def on_user_state(ev) -> None:
         if ev.new_state == "speaking":
+            if st["agent"] == "speaking":
+                st["barge_in_at"] = trace.clock()
+                trace.mark("barge_in")
             trace.mark("speech_start", trace.begin_turn())
         elif ev.old_state == "speaking":
             trace.mark("speech_end")
@@ -592,14 +685,28 @@ def wire_session(session, trace: PipelineTrace, turns: TurnHandler, publish) -> 
                 trace.mark("interim_transcript", turn, chars=len(ev.transcript))
 
     def on_agent_state(ev) -> None:
+        st["agent"] = ev.new_state
         trace.mark(f"agent_{ev.new_state}")
         if ev.new_state == "speaking":
             trace.mark("tts_playout_start")
+        elif ev.old_state == "speaking" and st["barge_in_at"] is not None:
+            trace.mark("speech_stopped_after_barge_in", interrupt_to_stop_ms=int((trace.clock() - st["barge_in_at"]) * 1000))
+            st["barge_in_at"] = None
+
+    def on_metrics(ev) -> None:
+        m = getattr(ev, "metrics", None)
+        kind = type(m).__name__
+        if kind == "EOUMetrics":
+            trace.mark("eou_metrics", end_of_utterance_ms=int(m.end_of_utterance_delay * 1000),
+                       transcription_ms=int(m.transcription_delay * 1000))
+        elif kind == "TTSMetrics":
+            trace.mark("tts_metrics", ttfb_ms=int(m.ttfb * 1000), audio_s=round(m.audio_duration, 2))
 
     def on_item(ev) -> None:
         item = ev.item
         if getattr(item, "role", None) == "assistant":
             trace.mark("reply_played", interrupted=getattr(item, "interrupted", False))
+            trace.log_latency()
 
     def on_error(ev) -> None:
         stage, text = describe_error(ev.error)
@@ -625,6 +732,7 @@ def wire_session(session, trace: PipelineTrace, turns: TurnHandler, publish) -> 
     session.on("error", on_error)
     session.on("user_transcription_timeout", on_no_transcript)
     session.on("close", on_close)
+    session.on("metrics_collected", on_metrics)
 
 
 async def entrypoint(ctx) -> None:
@@ -634,6 +742,19 @@ async def entrypoint(ctx) -> None:
     await ctx.connect()
     trace = PipelineTrace(ctx.room.name)
     trace.mark("agent_joined")
+    # Voice settings are read per session and the Cartesia WebSocket is opened (prewarmed) while the owner's browser is
+    # still joining, so the first reply does not pay the connection setup.
+    cfg = await asyncio.to_thread(cartesia_settings)
+    tts, voice_error = None, None
+    try:
+        tts = build_tts(cfg)
+        tts.prewarm()
+        trace.mark("tts_prewarmed", provider="cartesia", model=cfg.get("model"), voice=cfg.get("voice_id"),
+                   speed=cfg.get("speed"), source=cfg.get("source"))
+    except (VoiceNotConfigured, ValueError) as exc:
+        voice_error = str(exc)
+        trace.mark("tts_not_configured", error=voice_error)
+        log.error("voice.tts_unavailable %s", voice_error)
     participant = await ctx.wait_for_participant()
     ident = parse_identity(participant.identity, participant.metadata)
     if ident is None:
@@ -646,7 +767,7 @@ async def entrypoint(ctx) -> None:
             msg["stage"] = stage
         try:
             await ctx.room.local_participant.publish_data(json.dumps(msg).encode(), reliable=True, topic="jarvis")
-        except Exception as exc:                               # never let a UI message break the audio loop
+        except Exception as exc:  # noqa: BLE001 - never let a UI message break the audio loop
             log.warning("voice.publish_failed %s", exc)
 
     def on_track(track, _pub, p) -> None:
@@ -655,15 +776,23 @@ async def entrypoint(ctx) -> None:
     ctx.room.on("track_subscribed", on_track)
     ctx.room.on("local_track_published", lambda pub, _t: trace.mark("agent_audio_track_published", kind=str(pub.kind)))
 
+    if tts is None:
+        # No substitute voice: tell the owner exactly what is missing, then end the session.
+        await publish("error", voice_error or "JARVIS's voice is not configured.", stage="tts")
+        await asyncio.sleep(1.0)                      # let the message reach the browser before the room closes
+        ctx.shutdown(reason="voice NOT_CONFIGURED")
+        return
+
     vad = ctx.proc.userdata.get("vad")
     if vad is None:                                   # prewarm did not run (e.g. a custom launcher): load now
         from livekit.plugins import silero
         vad = silero.VAD.load()
     detector = make_turn_detector()
-    session = AgentSession(stt=STT, tts=build_tts(), vad=vad, llm=jarvis_bridge_llm_class()(),
+    session = AgentSession(stt=STT, tts=tts, vad=vad, llm=jarvis_bridge_llm_class()(),
                            turn_handling=turn_handling(detector))
-    trace.mark("session_configured", stt=STT, tts=TTS, voice=TTS_VOICE or "default", speed=TTS_SPEED, turn_detection=TURN_DETECTION,
-               endpointing=f"{ENDPOINT_MIN_S}-{ENDPOINT_MAX_S}s", preemptive=False)
+    trace.mark("session_configured", stt=STT, tts=f"cartesia/{cfg.get('model')}", voice=cfg.get("voice_id"),
+               speed=cfg.get("speed"), turn_detection=TURN_DETECTION, endpointing=f"dynamic {ENDPOINT_MIN_S}-{ENDPOINT_MAX_S}s",
+               interruption="adaptive" if ADAPTIVE_INTERRUPTION else "vad", preemptive=False)
 
     async def speak(text: str) -> None:
         session.say(text, allow_interruptions=True)
@@ -681,6 +810,8 @@ async def entrypoint(ctx) -> None:
             ctx.shutdown(reason="ended by user")
         elif kind and kind.startswith("client:"):
             trace.mark("browser_" + kind.removeprefix("client:"))
+            if kind == "client:reply_audible":
+                trace.log_latency()
     ctx.room.on("data_received", on_data)
 
     await session.start(room=ctx.room, agent=jarvis_agent_class()(turns),
@@ -717,6 +848,10 @@ if __name__ == "__main__":
         raise SystemExit("LiveKit is NOT_CONFIGURED: set LIVEKIT_URL/LIVEKIT_API_KEY/LIVEKIT_API_SECRET or save them in "
                          "Integrations > LiveKit (the API must be reachable at JARVIS_API_URL)")
     log.info("voice.livekit_credentials source=%s", source)
+    voice_cfg = cartesia_settings()
+    WORKER_STATE["tts"] = f"cartesia/{voice_cfg.get('model')} voice={voice_cfg.get('voice_id')}" \
+        if voice_cfg.get("state") == "CONFIGURED" else f"cartesia {voice_cfg.get('state')}"
+    log.info("voice.tts %s (source=%s)", WORKER_STATE["tts"], voice_cfg.get("source", "-"))
     start_heartbeat()
     from livekit.agents import cli
     cli.run_app(build_server())

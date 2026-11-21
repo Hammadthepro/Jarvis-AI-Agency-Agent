@@ -1,2 +1,4 @@
 livekit-agents[silero]==1.8.12
+# Speech synthesis: the official LiveKit Cartesia plugin, same release as livekit-agents (Sonic models, WebSocket pool).
+livekit-plugins-cartesia==1.8.12
 httpx>=0.27

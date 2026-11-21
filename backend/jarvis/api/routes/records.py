@@ -152,7 +152,12 @@ async def sites(request: Request, me: Principal = CurrentPrincipal, campaign_id:
                   (select runner from qa_runs q where q.site_version_id = v.id order by started_at desc limit 1) qa_runner,
                   (select url from deployments d where d.site_version_id = v.id and d.status='verified' order by created_at desc limit 1) preview_url,
                   (select value #>> '{}' from research_facts f where f.prospect_id = g.prospect_id and f.fact_key='business_name'
-                     and f.status='verified' limit 1) business_name
+                     and f.status='verified' limit 1) business_name,
+                  (select d.status from deployments d where d.site_version_id = v.id order by created_at desc limit 1) deploy_status,
+                  g.last_error, g.last_error_at,
+                  (select json_build_object('task', t.task_type, 'status', t.status, 'attempts', t.attempts, 'max_attempts', t.max_attempts)
+                     from tasks t where t.subject_id = g.id and t.task_type in ('site.build','site.deploy')
+                     order by t.created_at desc limit 1) last_task
            from generated_sites g
            left join lateral (select * from site_versions sv where sv.site_id = g.id order by version desc limit 1) v on true
            left join site_specs ss on ss.id = v.spec_id
@@ -163,7 +168,9 @@ async def sites(request: Request, me: Principal = CurrentPrincipal, campaign_id:
 @router.get("/sites/{site_id}")
 async def site_detail(site_id: UUID, request: Request, me: Principal = CurrentPrincipal):
     db = request.app.state.db
-    g = await db.fetchrow("select * from generated_sites where id=$1 and workspace_id=$2", site_id, me.workspace_id)
+    g = await db.fetchrow("""select g.*, (select value #>> '{}' from research_facts f where f.prospect_id = g.prospect_id
+                                        and f.fact_key='business_name' and f.status='verified' limit 1) business_name
+                             from generated_sites g where g.id=$1 and g.workspace_id=$2""", site_id, me.workspace_id)
     if g is None:
         raise NotFound("site not found")
     versions = await db.fetch("""select v.id, v.version, v.reason, v.file_count, v.total_bytes, v.artifact_sha256, v.created_at,

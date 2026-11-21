@@ -24,7 +24,7 @@ from jarvis.agents.command import NICHES, SERVICE_AREA_NICHES
 from jarvis.agents.deps import Deps
 from jarvis.agents.research import Researcher
 from jarvis.agents.verification import Candidate, WebsiteVerifier, persist_outcome, satisfies_filter
-from jarvis.core.errors import ComplianceBlocked
+from jarvis.core.errors import ComplianceBlocked, IntegrationState, ProviderError
 from jarvis.db.audit import audit, emit
 from jarvis.db.queue import Task, enqueue, load_checkpoints, save_checkpoint
 from jarvis.integrations.base import CallContext
@@ -398,12 +398,50 @@ async def site_build(deps: Deps, task: Task) -> dict:
         async with deps.db.acquire() as conn:
             await save_checkpoint(conn, task.id, step, state)
 
-    return await builder.build_site(deps, ctx_for(deps, task, task.subject_id), task.subject_id, cps, save)
+    try:
+        return await builder.build_site(deps, ctx_for(deps, task, task.subject_id), task.subject_id, cps, save)
+    except Exception as exc:
+        await record_site_failure(deps, task, exc, stage="build/QA")
+        raise
 
 
 @handler("site.deploy")
 async def site_deploy(deps: Deps, task: Task) -> dict:
-    return await deployment.deploy_site(deps, ctx_for(deps, task, task.subject_id), task.subject_id)
+    try:
+        out = await deployment.deploy_site(deps, ctx_for(deps, task, task.subject_id), task.subject_id)
+        if out.get("status") == "failed":
+            # The upload happened but the pages.dev URL did not serve the expected page: a failure, retried within limits.
+            raise ProviderError("cloudflare", IntegrationState.TEMPORARILY_UNAVAILABLE,
+                                f"deployed URL {out.get('url')} did not verify: {out.get('checks', [])[-1:] }", retryable=True)
+        return out
+    except Exception as exc:
+        await record_site_failure(deps, task, exc, stage="deployment")
+        raise
+
+
+def _final_attempt(task: Task, exc: Exception) -> bool:
+    from jarvis.agents.verification import BLOCKING_STATES
+    from jarvis.core.errors import BudgetBlocked
+    if isinstance(exc, (ComplianceBlocked, BudgetBlocked)):
+        return True
+    if isinstance(exc, ProviderError):
+        return exc.state in BLOCKING_STATES or not exc.retryable or task.attempts >= task.max_attempts
+    return task.attempts >= task.max_attempts
+
+
+async def record_site_failure(deps: Deps, task: Task, exc: Exception, *, stage: str) -> None:
+    """Keeps the reason and retry position on the site; on the last attempt the site is marked failed (never left
+    looking as if it were still in progress)."""
+    final = _final_attempt(task, exc)
+    msg = getattr(exc, "message", None) or str(exc)
+    reason = f"{stage} failed (attempt {task.attempts} of {task.max_attempts}{', final' if final else ', will retry'}): " \
+             f"{type(exc).__name__}: {msg}"[:1000]
+    await deps.db.execute(
+        """update generated_sites set last_error=$2, last_error_at=now(),
+               state = case when $3 and state <> 'deployed' then 'failed'::site_state else state end
+           where id=$1""", task.subject_id, reason, final)
+    async with deps.db.transaction() as conn:
+        await emit(conn, workspace_id=task.workspace_id, task_id=task.id, campaign_id=task.campaign_id, message=reason[:300])
 
 
 @handler("outreach.draft")
@@ -413,8 +451,19 @@ async def outreach_draft(deps: Deps, task: Task) -> dict:
 
 @handler("campaign.finalize")
 async def campaign_finalize(deps: Deps, task: Task) -> dict:
+    """Completed only if what was asked for exists. Previews were requested and sites were selected, but none was
+    deployed and verified: that is not a success, it needs the owner's attention, with the actual reasons."""
+    c = await _campaign(deps, task.campaign_id)
+    n = await deps.db.fetchrow(
+        """select count(*) sites, count(*) filter (where state='deployed') deployed,
+                  string_agg(distinct left(last_error, 200), ' | ') filter (where state in ('failed','requires_human_review')) errors
+           from generated_sites where campaign_id=$1""", task.campaign_id)
+    if c["sites_to_build"] and "build" in c["stages"] and n["sites"] and not n["deployed"]:
+        reason = f"No preview website was completed ({n['sites']} attempted). {n['errors'] or 'See each site for details.'}"
+        await set_campaign_state(deps, task.campaign_id, "requires_human_review", stage="completed", reason=reason[:500])
+        return {"state": "requires_human_review"}
     await set_campaign_state(deps, task.campaign_id, "completed", stage="completed")
-    return {}
+    return {"state": "completed"}
 
 
 STAGE_TASKS = {"discovery": ("discovery.page", "discovery.serp", "verify.prospect", "campaign.start"), "research": ("research.prospect",),

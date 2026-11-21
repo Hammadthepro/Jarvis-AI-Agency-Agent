@@ -31,6 +31,7 @@ Then run migrations (`python -m jarvis.db.migrate`; 0007 and 0008 add the creden
 | Firecrawl | API key | `GET /v1/team/credit-usage` (credits left) | |
 | Cloudflare Pages | API token (Pages: Edit), account ID, preview project | token verify + `GET /accounts/{id}/pages/projects` | Reports whether the preview project exists (deploy creates it if missing) |
 | LiveKit | server URL, API key, API secret | `RoomService/ListRooms` | Voice also needs the agent process (section 4) |
+| Cartesia | API key; voice id, model, speed | `GET /voices/{voice_id}` (free; no speech synthesized) | JARVIS's voice. Billed to your Cartesia account when it speaks |
 | Resend | API key, webhook signing secret (optional) | `GET /domains` (lists verified sending domains) | Sending also needs a verified domain and Outreach > Sender readiness |
 | Google Places API (New) | API key | Text Search, IDs-only field mask | **Restricted.** Blocked until written approval is recorded (Settings > compliance gate) |
 | Supabase | environment only | database health + JWKS fetch | Infrastructure; not editable from the browser |
@@ -68,9 +69,9 @@ real stage changes read from the database.
 | Stage | How | Streaming? |
 |---|---|---|
 | Speech to text | LiveKit Inference `deepgram/nova-3` | Yes: interim and final transcripts |
-| End of turn | LiveKit turn detector model (`inference.TurnDetector`, v1 with local fallback) + Silero VAD; endpointing 0.6 s min / 4.0 s max | Decides from the audio whether you finished; a pause mid-sentence doesn't end the turn |
+| End of turn | LiveKit turn detector model (local `v1-mini`) + Silero VAD; dynamic endpointing 0.5–3.0 s | Decides from the audio whether you finished; a pause mid-sentence doesn't end the turn |
 | Reply | `POST /internal/voice/command/stream` → the shared Claude conversation | **Yes.** Claude's text is streamed from the Messages API as it is written (NDJSON deltas); speech starts on the first sentence. While Claude runs a tool (a search, a proposal), nothing is spoken until that step's text arrives |
-| Text to speech | LiveKit Inference `cartesia/sonic-3`, voice pinned (`VOICE_TTS_VOICE`), 24 kHz PCM | Yes: sentence by sentence as text streams in |
+| Text to speech | Cartesia `sonic-3` via `livekit-plugins-cartesia` (your Cartesia key), voice pinned, 24 kHz PCM, WebSocket prewarmed | Yes: as text streams in, with text pacing |
 
 - **Exactly one message per spoken turn.** Interim transcripts only update the live caption. Preemptive generation is off,
   so Claude never runs on words you haven't finished.
@@ -83,31 +84,42 @@ real stage changes read from the database.
 - If the owner talks over a reply, the speech stops at once; the turn still completes on the server and is stored, so
   JARVIS remembers it. Links in replies are not read out ("the link in the chat"); they are clickable in the feed.
 
-### The voice JARVIS speaks with
-Audit of the previous setup: `cartesia/sonic-2` (now **retired** in LiveKit Inference), **no voice selected** (the
-gateway default), and synthesis started only after the whole reply had been generated. That is what sounded robotic
-and slow.
+### The voice JARVIS speaks with: Cartesia
+JARVIS speaks with **Cartesia Sonic 3** through the official LiveKit plugin (`livekit-plugins-cartesia==1.8.12`, the same
+release as `livekit-agents`). The plugin keeps a WebSocket open per session; the agent opens (prewarms) it while the
+owner's browser is still joining, and streams Claude's text into it as it arrives. Text pacing is on: after the first
+sentence, text is sent in larger chunks with more context, so JARVIS doesn't sound like separate announcements.
 
-| Option | Through | Price (LiveKit Build/Ship tier) | Notes |
-|---|---|---|---|
-| **Cartesia Sonic 3** (chosen) | LiveKit Inference: billed by the existing LiveKit account | $50 per million characters (Scale: $37.50) | Current Cartesia generation; WebSocket streaming; voice, speed, emotion and language options; documented voices |
-| Cartesia Sonic 3.5 / 3.6 | LiveKit Inference | same | Newer; 3.6 is not in the installed SDK's model list yet, 3.5 is (`VOICE_TTS_MODEL=cartesia/sonic-3.5`) |
-| Inworld TTS 2.0 / 2.0 Flash | LiveKit Inference | $25 / $15 per million characters | Cheaper; worth an A/B listen |
-| ElevenLabs Flash / Turbo | **Plugin only**: needs its own ElevenLabs account, API key and paid plan | $0.04 per 1,000 characters ($40 per million), ~75 ms | Excellent naturalness; not enabled because it needs a new subscription (not purchased) |
+| Setting | Where | Default |
+|---|---|---|
+| API key | Integrations > Cartesia (encrypted), or `CARTESIA_API_KEY` | none: voice is NOT_CONFIGURED |
+| Voice | `voice_id` / `CARTESIA_VOICE_ID` | `f786b574-daa5-4673-aa0c-cbe3e8534c02` ("Katie", the plugin's default English agent voice) |
+| Model | `model` / `CARTESIA_MODEL` | `sonic-3` (newest model in the installed plugin: sonic-3, sonic-2, sonic-turbo, sonic-lite, sonic-preview) |
+| Speed | `speed` / `CARTESIA_SPEED` | `1.0` (natural; 0.6–2.0 or slow / normal / fast) |
+| Emotion | `CARTESIA_EMOTION` | none (optional, e.g. `positivity`) |
 
-A typical spoken reply is 150–300 characters, so at $50 per million characters a reply costs about 1–1.5 cents to
-synthesize. Settings (agent environment): `VOICE_TTS_MODEL` (default `cartesia/sonic-3`), `VOICE_TTS_VOICE` (default
-`9626c31c-bec5-4cca-baa8-f8ba9e84c8bc`, LiveKit's documented en-US Cartesia voice "Jacqueline"; for example
-`a167e0f3-df7e-4d52-a9c3-f949145efdab` is "Blake", en-US male), `VOICE_TTS_SPEED` (`slow`, `normal`, `fast` or a number),
-`VOICE_TTS_EMOTION` (optional, Cartesia), `VOICE_TTS_LANGUAGE` (default `en`). Restart the agent after changing them.
+- **No substitute voice.** Without a Cartesia key the Voice page lists "Cartesia voice configured" as missing, the agent
+  tells the participant that the voice is NOT_CONFIGURED and ends the session. LiveKit Inference speech is not used.
+- **Test connection** looks up the configured voice (`GET /voices/{id}`): free, no speech synthesized. It reports
+  CONNECTED, INVALID_CREDENTIALS (401), RATE_LIMITED (429), PROVIDER_ERROR (e.g. unknown voice) or DISABLED.
+- **Cost:** speech is billed to your Cartesia account per character synthesized (a typical reply is 150–300
+  characters). JARVIS doesn't buy credits or change plans.
+- Spoken text never includes ids, URLs or markdown ("the link is in the chat").
 
-**Diagnosing a session:** every stage is logged in `.jarvis/logs/voice.log` as
-`voice.pipeline turn=<room>:t<n> stage=<stage> t_ms=<ms since session start>`. The stages, in order:
-`agent_joined`, `mic_audio_subscribed`, `browser_mic_published`, `speech_start`, `interim_transcript`, `final_transcript`,
-`turn_commit`, `reply_generation_start`, `claude_request_start`, `claude_response` (with latency), `tts_requested`,
-`agent_speaking`/`tts_playout_start`, `browser_audio_playing`, `reply_played`. Errors appear as `stt_error`, `tts_error`,
-`claude_error` or `jarvis_api_error`. The API logs `conversation.turn_received` / `conversation.reply` with the same turn id,
-and stores it in both messages' `meta.turn_id`. If a session stops at a stage, the last logged stage is where.
+### Turns, interruptions and what runs where
+| Piece | Default | Billed? |
+|---|---|---|
+| Speech-to-text | LiveKit Inference `deepgram/nova-3` (streaming interim + final) | LiveKit account (as before) |
+| End-of-turn model | **local** `turn-detector-v1-mini` in the job process (`VOICE_TURN_DETECTION=local`) | No per-use charge. `cloud` = LiveKit Inference v1 (billed; opt-in); `vad` = silence only |
+| Endpointing | **dynamic**, 0.5–3.0 s (`VOICE_ENDPOINT_MIN_DELAY` / `VOICE_ENDPOINT_MAX_DELAY`) | — |
+| Interruption | local VAD barge-in, 0.4 s minimum, false interruptions resume the reply | `VOICE_ADAPTIVE_INTERRUPTION=1` uses LiveKit Inference's adaptive detector (billed; opt-in) |
+
+### Measured latency
+For every turn the agent logs `voice.latency turn=<room>:t<n>` in `.jarvis/logs/voice.log`, computed from its own events
+(never estimated): `endpointing_ms` (owner stopped speaking → turn committed), `first_text_ms` (→ Claude's first words),
+`first_audio_ms` (→ speech playout started), `tts_ttfb_ms` (Cartesia time to first audio), `audible_ms` (→ the browser
+actually heard it; reported by the dashboard's audio meter), `total_ms` (→ reply finished) and `interrupt_to_stop_ms`
+after a barge-in. `scripts/verify-live.sh` prints these for its live tests.
 
 ### Requirements
 1. LiveKit configured and **validated** (Integrations > LiveKit > Test connection).
@@ -121,8 +133,9 @@ and stores it in both messages' `meta.turn_id`. If a session stops at a stage, t
    LiveKit credentials come from `LIVEKIT_*` in its environment, or, if saved in the dashboard, are fetched once at
    startup from the API's internal endpoint (only on the internal network, only with the shared secret).
 
-The Voice page reports **OPERATIONAL** only when all three hold; otherwise it lists exactly what is missing and links to
-Integrations. STT/TTS run through LiveKit Inference (`deepgram/nova-3`, `cartesia/sonic-2`), billed by LiveKit.
+The Voice page reports **OPERATIONAL** only when all of these hold, and Cartesia is configured; otherwise it lists exactly what is missing and links to
+Integrations. Speech-to-text runs through LiveKit Inference (`deepgram/nova-3`, billed by LiveKit); JARVIS's voice is
+Cartesia with your own Cartesia key (see "The voice JARVIS speaks with").
 
 ### Session security
 - `POST /voice/token` mints a token for one new room, valid 10 minutes, identity `user-<id>`, microphone-only publishing,

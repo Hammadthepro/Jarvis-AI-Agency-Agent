@@ -46,9 +46,14 @@ non-root user is `codespace` (uid 1000, in the `docker` group), which `devcontai
 is already part of that image, so no Features are added: a Feature would make Codespaces rebuild the ~15 GB image at
 creation time, and a failure there puts the Codespace into recovery mode.
 
-**Known limitation:** `universal:2` is Ubuntu 20.04, and Playwright 1.63 does not ship Chromium for Ubuntu 20.04. In the
-Codespace, the QA runner install therefore fails (startup warns and continues), and website QA cannot run there until
-the QA runner uses a supported environment, for example the Docker QA sandbox (`QA_RUNNER_MODE=docker`).
+**Website QA runs in the Docker QA sandbox.** `universal:2` is Ubuntu 20.04, and Playwright 1.63 has no Chromium build
+for it (`ERROR: Playwright does not support chromium on ubuntu20.04-x64`), which is why the old host install failed.
+`dev-up.sh` and `dev-setup.sh` now build `jarvis-qa-sandbox:latest` from `docker/qa-sandbox.Dockerfile` (Playwright's
+pinned Ubuntu 24.04 image, digest-pinned; rebuilt only when the runner changes), then run a real QA self-check
+(`python -m jarvis.agents.qa_selfcheck`: a page is browser-tested and screenshots must exist) and start the worker with
+`QA_RUNNER_MODE=docker`. The sandbox has no network, a read-only root, a non-root user, no capabilities and no secrets.
+`.env` is never edited: a `QA_RUNNER_MODE=subprocess` there is overridden with a warning (set
+`JARVIS_QA_ALLOW_SUBPROCESS=1` to insist on host mode). `dev-status.sh` shows "Website QA: ready" or the exact failure.
 
 **First time only:** after this configuration is added to a Codespace that already exists, run **Codespaces: Rebuild
 Container** from the Command Palette once. Until then the hooks are not active, but `scripts/dev-up.sh` still works

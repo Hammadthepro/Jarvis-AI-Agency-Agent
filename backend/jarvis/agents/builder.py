@@ -82,6 +82,16 @@ async def load_facts(db, prospect_id: UUID) -> dict:
     return facts
 
 
+def business_location(facts: dict, campaign_location: dict) -> str:
+    city = next((f["value"] for f in facts["list"] if f["key"] == "city"), None)
+    st = next((f["value"] for f in facts["list"] if f["key"] == "state"), None)
+    if city or st:
+        return ", ".join(x for x in (city, st) if x)
+    if campaign_location.get("nationwide"):
+        return "United States"
+    return ", ".join(x for x in (campaign_location.get("city"), campaign_location.get("state")) if x)
+
+
 def fact_check(content: dict, facts: dict) -> list[str]:
     problems: list[str] = []
     corpus = " ".join(f"{f['value']} {f['quote']}" for f in facts["list"]).lower()
@@ -158,7 +168,8 @@ async def build_site(deps: Deps, ctx: CallContext, site_id: UUID, checkpoints: d
     if not facts["business_name"]:
         await _set_state(db, ctx, site_id, "requires_human_review", "no independently verified business name")
         return {"state": "requires_human_review", "reason": "identity_unverified"}
-    location = ", ".join(x for x in (site["location"].get("city"), site["location"].get("state")) if x)
+    # The business's own verified location (a nationwide or state-wide campaign has no single city of its own).
+    location = business_location(facts, site["location"] or {})
     agency = await db.fetchval("select coalesce(agency_name, 'our studio') from system_settings where workspace_id = $1",
                                ctx.workspace_id) or "our studio"
 
@@ -231,6 +242,9 @@ async def build_site(deps: Deps, ctx: CallContext, site_id: UUID, checkpoints: d
         cycle += 1
         if cycle > MAX_REPAIR_CYCLES:
             await _set_state(db, ctx, site_id, "requires_human_review", "QA still failing after bounded repairs")
+            await db.execute("update generated_sites set last_error=$2, last_error_at=now() where id=$1", site_id,
+                             "QA still failing after bounded repairs: " + ", ".join(sorted({f["check"] for f in report["findings"]
+                                                                                            if f["severity"] in ("critical", "serious")}))[:800])
             return {"state": "requires_human_review", "cycles": cycle - 1}
         action, blocking = repair_plan(report, cycle)
         if action == "design_contrast":

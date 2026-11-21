@@ -1,7 +1,7 @@
-"""Writes real synthesized speech (LiveKit Inference TTS) to a 48 kHz mono WAV for the browser voice test, which feeds it
+"""Writes real synthesized speech (Cartesia Sonic 3 via the LiveKit plugin, voice "Blake") to a 48 kHz mono WAV for the browser voice test, which feeds it
 to Chromium as the microphone (--use-file-for-fake-audio-capture). Each argument is either text to speak or "@<seconds>"
 of silence, e.g.  python make_speech_wav.py out.wav @15 "Find potential customers for" @0.7 "web development in Denver" @25 ...
-Needs LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET (LiveKit Cloud)."""
+Needs CARTESIA_API_KEY (billed to that Cartesia account: a few hundred characters)."""
 import asyncio
 import os
 import sys
@@ -9,12 +9,14 @@ import wave
 
 
 async def main(out: str, parts: list[str]) -> None:
-    from livekit.agents import inference
     from livekit.agents.utils import http_context
+    from livekit.plugins import cartesia
     rate = 48000
     pcm = bytearray()
     async with http_context.open():
-        tts = inference.TTS(model=os.environ.get("VOICE_TTS_MODEL", "cartesia/sonic-2"), sample_rate=rate)
+        tts = cartesia.TTS(api_key=os.environ["CARTESIA_API_KEY"], model="sonic-3",
+                           voice=os.environ.get("JARVIS_LIVE_OWNER_VOICE", "a167e0f3-df7e-4d52-a9c3-f949145efdab"),
+                           sample_rate=rate)
         for part in parts:
             if part.startswith("@"):
                 pcm += b"\0\0" * int(rate * float(part[1:]))

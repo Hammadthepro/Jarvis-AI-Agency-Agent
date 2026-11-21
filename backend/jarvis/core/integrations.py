@@ -96,6 +96,20 @@ SPECS: dict[str, ProviderSpec] = {s.key: s for s in (
                   FieldSpec("api_secret", "API secret", True, "livekit_api_secret", pattern=r"^[A-Za-z0-9]{20,128}$")),
                  ("voice_sessions", "scoped_access_tokens"), "https://cloud.livekit.io",
                  notes=("Voice also needs the JARVIS voice agent process running (apps/voice) with VOICE_AGENT_SHARED_SECRET.",)),
+    ProviderSpec("cartesia", "Cartesia", "JARVIS's speaking voice (Sonic text-to-speech, streamed through the LiveKit agent).",
+                 (FieldSpec("api_key", "API key", True, "cartesia_api_key", pattern=r"^[A-Za-z0-9_\-]{16,128}$",
+                            hint="Cartesia API key (play.cartesia.ai > API keys)."),
+                  FieldSpec("voice_id", "Voice ID", False, "cartesia_voice_id", required=False,
+                            pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                            default="f786b574-daa5-4673-aa0c-cbe3e8534c02", hint="Any voice from the Cartesia voice library."),
+                  FieldSpec("model", "Model", False, "cartesia_model", required=False,
+                            choices=("sonic-3", "sonic-2", "sonic-turbo"), default="sonic-3"),
+                  FieldSpec("speed", "Speaking speed", False, "cartesia_speed", required=False,
+                            pattern=r"^(slow|normal|fast|(0\.[6-9]|1(\.[0-9]{1,2})?|2(\.0)?))$", default="1.0",
+                            hint="0.6 to 2.0 (1.0 is natural), or slow / normal / fast.")),
+                 ("voice_synthesis", "voice_lookup"), "https://play.cartesia.ai/keys",
+                 notes=("Speech is billed to this Cartesia account per character synthesized. Test connection only looks "
+                        "up the voice (free).",)),
     ProviderSpec("resend", "Resend", "Sends outreach email after every sending gate passes (never automatic).",
                  (FieldSpec("api_key", "API key", True, "resend_api_key", pattern=r"^re_[A-Za-z0-9_]{16,}$"),
                   FieldSpec("webhook_secret", "Webhook signing secret", True, "resend_webhook_secret", required=False,
@@ -257,8 +271,9 @@ async def load_effective(db, base: Settings) -> tuple[Settings, dict[str, dict],
 
 def apply_to_adapters(deps, livekit, eff: Settings, info: dict[str, dict]) -> None:
     deps.settings = eff
-    for a in (deps.places, deps.serp, deps.firecrawl, deps.cloudflare, deps.email):
-        a.settings = eff
+    for a in (deps.places, deps.serp, deps.firecrawl, deps.cloudflare, deps.email, getattr(deps, "cartesia", None)):
+        if a is not None:
+            a.settings = eff
     deps.claude.reconfigure(eff)
     if livekit is not None:
         livekit.settings = eff
@@ -293,7 +308,7 @@ async def credentials_version(db) -> str:
 def configured(provider: str, deps, livekit) -> bool:
     return {"anthropic": deps.claude.configured, "google_places": deps.places.configured, "serp_api": deps.serp.configured,
             "firecrawl": deps.firecrawl.configured, "cloudflare": deps.cloudflare.configured, "resend": deps.email.configured,
-            "livekit": livekit.configured,
+            "livekit": livekit.configured, "cartesia": bool(deps.settings.cartesia_api_key),
             "supabase": bool(deps.settings.supabase_url and (deps.settings.supabase_jwks_url or deps.settings.supabase_jwt_secret))
             }[provider]
 
@@ -348,6 +363,12 @@ async def validate(provider: str, deps, livekit, db, workspace_id) -> tuple[dict
                 "preview_project_exists": s.cloudflare_pages_preview_project in names}, None
     if provider == "livekit":
         return await livekit.check(), None
+    if provider == "cartesia":
+        from jarvis.integrations.cartesia import CartesiaClient
+        client = deps.cartesia if deps.cartesia is not None else CartesiaClient(s)
+        client.settings = s
+        v = await client.voice()
+        return {"voice": v, "model": s.cartesia_model, "speed": s.cartesia_speed}, None
     if provider == "resend":
         doms = await deps.email.list_domains()
         verified = [d.get("name") for d in doms if d.get("status") == "verified"]

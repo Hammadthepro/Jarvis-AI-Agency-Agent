@@ -150,8 +150,17 @@ class Researcher:
                where prospect_id = $1 and status = 'verified' and fact_key = any($2) group by fact_key""",
             prospect_id, list(SINGLE_VALUED))
         for r in rows:
-            vals = {re.sub(r"\W", "", v) for v in r["vals"]}
+            vals = {same_value_key(r["fact_key"], v) for v in r["vals"]}
             if len(vals) > 1:
                 await self.deps.db.execute(
                     "update research_facts set status = 'conflicting' where prospect_id = $1 and fact_key = $2",
                     prospect_id, r["fact_key"])
+
+
+def same_value_key(fact_key: str, value: str) -> str:
+    """Comparison key for a single-valued fact. Phone numbers compare as the 10-digit US number, so "(615) 555-0121"
+    and "+16155550121" are the same fact, not a conflict (a false conflict would drop the phone from the preview)."""
+    if fact_key == "phone":
+        digits = re.sub(r"\D", "", value)
+        return digits[-10:] if len(digits) >= 10 else digits
+    return re.sub(r"\W", "", value)

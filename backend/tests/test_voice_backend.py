@@ -13,7 +13,9 @@ LK = {"livekit_url": "wss://jarvis-test.livekit.cloud", "livekit_api_key": Secre
 
 @pytest.fixture
 def voice(client, deps):
-    s = deps.settings.model_copy(update=LK)
+    from pydantic import SecretStr
+    s = deps.settings.model_copy(update={**LK, "cartesia_api_key": SecretStr("cartesia-test-key-0123456789")})
+    deps.settings = s
     client.app.state.settings = s
     client.app.state.base_settings = s
     client.app.state.livekit.settings = s
@@ -155,3 +157,22 @@ async def test_token_dispatches_the_named_jarvis_agent(voice):
     agents = claims["roomConfig"]["agents"]
     assert agents == [{"agentName": "jarvis", "metadata": claims["metadata"]}]
     assert a["me"]["workspace_id"] in claims["metadata"]
+
+
+async def test_voice_is_not_operational_without_cartesia_and_never_substitutes_another_voice(voice, deps):
+    a = await login(voice, "nocartesia@voice.dev")
+    s0 = deps.settings.model_copy(update={"cartesia_api_key": None})
+    deps.settings = voice.app.state.base_settings = voice.app.state.settings = s0
+    voice.app.state.credentials_version = None
+    s = (await voice.get("/voice/status", headers=a["headers"])).json()
+    assert s["state"] != "OPERATIONAL" and s["checks"]["cartesia_configured"] is False
+    assert any("Cartesia API key" in m and "NOT_CONFIGURED" in m for m in s["missing"])
+    cfg = (await voice.get("/internal/voice/config", headers=agent_h())).json()
+    assert cfg["cartesia"] == {"state": "NOT_CONFIGURED"}                   # no key, no fallback provider offered
+
+
+async def test_agent_config_carries_cartesia_voice_settings(voice):
+    cfg = (await voice.get("/internal/voice/config", headers=agent_h())).json()
+    c = cfg["cartesia"]
+    assert c["state"] == "CONFIGURED" and c["model"] == "sonic-3" and c["voice_id"] == "f786b574-daa5-4673-aa0c-cbe3e8534c02"
+    assert c["speed"] == "1.0" and c["api_key"] == "cartesia-test-key-0123456789"

@@ -18,6 +18,16 @@ from jarvis.db.audit import audit
 from jarvis.integrations.base import CallContext
 
 
+def preview_branch(slug: str) -> str:
+    """One Cloudflare Pages branch per site: <niche prefix>-<site's unique suffix>, at most 28 characters. The unique
+    suffix is always kept, so two prospects never share a branch (and one preview never replaces another's)."""
+    clean = re.sub(r"-+", "-", re.sub(r"[^a-z0-9-]", "-", slug.lower())).strip("-")
+    head, _, suffix = clean.rpartition("-")
+    if not head or not suffix:
+        return clean[:28].strip("-")
+    return f"{head[:27 - len(suffix)].strip('-')}-{suffix}"
+
+
 async def deploy_site(deps: Deps, ctx: CallContext, site_id: UUID, verify_attempts: int = 5, verify_delay_s: float = 24) -> dict:
     db = deps.db
     row = await db.fetchrow(
@@ -28,7 +38,7 @@ async def deploy_site(deps: Deps, ctx: CallContext, site_id: UUID, verify_attemp
     existing = await db.fetchrow("select * from deployments where site_version_id = $1 and status = 'verified'", row["vid"])
     if existing:
         return {"status": "verified", "url": existing["url"], "deployment_id": existing["provider_deployment_id"]}
-    branch = re.sub(r"[^a-z0-9-]", "-", row["slug"].lower())[:28].strip("-")
+    branch = preview_branch(row["slug"])
     # Restart safety: a retried task must not upload again if a previous attempt already did.
     prior = await db.fetchrow("""select * from deployments where site_version_id = $1
                                  and status in ('pending','uploaded','unknown_provider_result') order by created_at desc limit 1""", row["vid"])

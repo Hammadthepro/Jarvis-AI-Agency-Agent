@@ -65,7 +65,6 @@ fi
 
 # ---- 2. dependencies (only when missing or changed) ------------------------------------------------------------------
 info "Dependencies"
-stamp_ok() { [ -f "$1" ] && [ "$1" -nt "$2" ]; }
 if [ ! -x "$PY" ]; then
   python3 -m venv backend/.venv
 fi
@@ -77,12 +76,6 @@ if ! stamp_ok dashboard/node_modules/.jarvis-installed dashboard/package-lock.js
   (cd dashboard && npm ci --no-audit --no-fund >"$LOG_DIR/npm-dashboard.log" 2>&1) || { tail -n 30 "$LOG_DIR/npm-dashboard.log" >&2; die "dashboard install failed"; }
   touch dashboard/node_modules/.jarvis-installed; ok "dashboard dependencies installed"
 else ok "dashboard dependencies up to date"; fi
-if ! stamp_ok qa-runner/node_modules/.jarvis-installed qa-runner/package-lock.json; then
-  if (cd qa-runner && npm ci --no-audit --no-fund >"$LOG_DIR/npm-qa.log" 2>&1 && npx playwright install chromium >>"$LOG_DIR/npm-qa.log" 2>&1); then
-    touch qa-runner/node_modules/.jarvis-installed; ok "QA runner (Playwright + Chromium) installed"
-  else warn "QA runner install failed (website QA will report an error until fixed; see .jarvis/logs/npm-qa.log)"; fi
-else ok "QA runner dependencies up to date"; fi
-
 # ---- 3. database ----------------------------------------------------------------------------------------------------
 info "Database"
 DB_URL_HOST="$("$PY" -c "from urllib.parse import urlsplit; from jarvis.config import get_settings; u=urlsplit(get_settings().database_url); print(f'{u.hostname}:{u.port or 5432}')")"
@@ -117,6 +110,14 @@ out="$("$PY" -m jarvis.db.migrate status 2>&1)" || die "$out"
 ok "$out"
 
 # ---- 5. API --------------------------------------------------------------------------------------------------------
+info "Website QA"
+if ensure_qa_sandbox; then ok "website QA $QA_STATUS"; export QA_RUNNER_MODE="$QA_EFFECTIVE_MODE"
+else warn "website QA NOT READY: $QA_STATUS (previews cannot pass QA until this is fixed; nothing is marked passed)"; fi
+printf '%s\n' "$QA_STATUS" >"$RUN_DIR/qa.status"
+# A worker started with another QA mode is restarted so the effective mode applies.
+if [ -f "$RUN_DIR/worker.qamode" ] && [ "$(cat "$RUN_DIR/worker.qamode")" != "${QA_RUNNER_MODE:-}" ]; then rm -f "$RUN_DIR/worker.rev"; fi
+printf '%s\n' "${QA_RUNNER_MODE:-}" >"$RUN_DIR/worker.qamode"
+
 for svc in api worker voice; do restart_if_stale "$svc"; done
 info "API"
 if [ "$RESTART_API" = 1 ] && [ -n "$(managed_pid api)" ]; then stop_proc api; fi

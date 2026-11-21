@@ -401,9 +401,20 @@ async def voice_config(request: Request, x_voice_agent_key: str | None = Header(
     if not internal:
         raise Forbidden("voice agent configuration is only served on the internal network")
     lk = request.app.state.livekit
-    from jarvis.core.integrations import DISABLED
+    from jarvis.core.integrations import DISABLED, ensure_fresh
+    await ensure_fresh(request.app.state)
+    s = request.app.state.deps.settings
+    # Cartesia (the voice) is reported separately: the agent never substitutes another speech provider for it.
+    if "cartesia" in DISABLED:
+        cartesia = {"state": "DISABLED"}
+    elif not s.cartesia_api_key:
+        cartesia = {"state": "NOT_CONFIGURED"}
+    else:
+        cartesia = {"state": "CONFIGURED", "api_key": s.cartesia_api_key.get_secret_value(), "model": s.cartesia_model,
+                    "voice_id": s.cartesia_voice_id, "speed": s.cartesia_speed, "emotion": s.cartesia_emotion,
+                    "language": s.cartesia_language}
     if "livekit" in DISABLED or not lk.configured:
-        return {"state": "DISABLED" if "livekit" in DISABLED else "NOT_CONFIGURED"}
-    s = lk.settings
-    return {"state": "CONFIGURED", "url": s.livekit_url, "api_key": s.livekit_api_key.get_secret_value(),
-            "api_secret": s.livekit_api_secret.get_secret_value()}
+        return {"state": "DISABLED" if "livekit" in DISABLED else "NOT_CONFIGURED", "cartesia": cartesia}
+    ls = lk.settings
+    return {"state": "CONFIGURED", "url": ls.livekit_url, "api_key": ls.livekit_api_key.get_secret_value(),
+            "api_secret": ls.livekit_api_secret.get_secret_value(), "cartesia": cartesia}

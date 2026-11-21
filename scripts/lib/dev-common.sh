@@ -100,3 +100,50 @@ public_urls() {
     WEB_URL="http://localhost:${WEB_PORT}"; API_URL="http://localhost:${API_PORT}"
   fi
 }
+
+# ---- Website QA sandbox ----------------------------------------------------------------------------------------------
+# Browser QA of generated sites runs in an isolated container (docker/qa-sandbox.Dockerfile: Playwright's pinned Ubuntu
+# 24.04 image, --network none, read-only, non-root, no capabilities, no secrets). Running Chromium directly on the host
+# ("subprocess" mode) is neither isolated nor possible on every OS: Playwright 1.63 has no Chromium build for Ubuntu
+# 20.04, which is what the Codespaces universal image runs ("ERROR: Playwright does not support chromium on
+# ubuntu20.04-x64"). ensure_qa_sandbox builds the image when the runner changed, proves QA really executes, and sets
+# QA_EFFECTIVE_MODE / QA_STATUS for the caller. It never edits .env.
+QA_IMAGE="jarvis-qa-sandbox:latest"
+stamp_ok() { [ -f "$1" ] && [ "$1" -nt "$2" ]; }
+qa_sandbox_rev() { cat docker/qa-sandbox.Dockerfile qa-runner/package.json qa-runner/package-lock.json qa-runner/run.mjs | sha256sum | cut -c1-16; }
+
+ensure_qa_sandbox() {
+  QA_EFFECTIVE_MODE=""; QA_STATUS="not checked"
+  local want have configured
+  configured="$(grep -E '^QA_RUNNER_MODE=' "$ROOT/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"' ')"
+  configured="${QA_RUNNER_MODE:-${configured:-docker}}"
+  if [ "$configured" = "subprocess" ] && [ "${JARVIS_QA_ALLOW_SUBPROCESS:-0}" = 1 ]; then
+    QA_EFFECTIVE_MODE=subprocess
+  elif ! docker info >/dev/null 2>&1; then
+    QA_STATUS="Docker is not running: website QA cannot run (it needs the isolated sandbox)"; return 1
+  else
+    want="$(cd "$ROOT" && qa_sandbox_rev)"
+    have="$(docker image inspect -f '{{ index .Config.Labels "jarvis.qa.rev" }}' "$QA_IMAGE" 2>/dev/null || true)"
+    if [ "$want" != "$have" ]; then
+      info "Building the website QA sandbox image (pinned Playwright 1.63, Ubuntu 24.04)"
+      if ! (cd "$ROOT" && docker build --label "jarvis.qa.rev=$want" -f docker/qa-sandbox.Dockerfile -t "$QA_IMAGE" . ) \
+           >"$LOG_DIR/qa-sandbox-build.log" 2>&1; then
+        QA_STATUS="QA sandbox image build failed (see .jarvis/logs/qa-sandbox-build.log): $(tail -n 2 "$LOG_DIR/qa-sandbox-build.log" | tr '\n' ' ')"
+        return 1
+      fi
+    fi
+    QA_EFFECTIVE_MODE=docker
+    [ "$configured" = "subprocess" ] && warn "QA_RUNNER_MODE=subprocess in .env runs Chromium on the host without isolation (and Playwright 1.63 cannot install Chromium on Ubuntu 20.04); using the isolated Docker sandbox instead. Set JARVIS_QA_ALLOW_SUBPROCESS=1 to force host mode."
+  fi
+  if [ "$QA_EFFECTIVE_MODE" = subprocess ] && ! stamp_ok qa-runner/node_modules/.jarvis-installed qa-runner/package-lock.json; then
+    (cd "$ROOT/qa-runner" && npm ci --no-audit --no-fund && npx playwright install chromium) >"$LOG_DIR/npm-qa.log" 2>&1 \
+      && touch "$ROOT/qa-runner/node_modules/.jarvis-installed" \
+      || { QA_STATUS="host QA install failed: $(grep -m1 -E 'ERROR|Error' "$LOG_DIR/npm-qa.log")"; return 1; }
+  fi
+  local out
+  if out="$(cd "$ROOT" && QA_RUNNER_MODE="$QA_EFFECTIVE_MODE" timeout 240 "$PY" -m jarvis.agents.qa_selfcheck 2>>"$LOG_DIR/qa-selfcheck.log")"; then
+    QA_STATUS="ready: $QA_EFFECTIVE_MODE ($out)"
+  else
+    QA_STATUS="QA self-check failed in $QA_EFFECTIVE_MODE mode: ${out:-see .jarvis/logs/qa-selfcheck.log}"; return 1
+  fi
+}

@@ -36,10 +36,17 @@ async def campaign_progress(db, workspace_id, campaign_id) -> dict:
         say = f"{c['name']} is blocked: {c['blocked_reason']}"
         if k["prospects"]:
             say += f" So far: {_n(k['eligible'], 'eligible business', 'eligible businesses')}, {k['qualified']} qualified."
+    elif state == "requires_human_review":
+        say = f"{c['name']} needs your attention: {c['blocked_reason'] or 'some results need review.'}"
+        if k["deployed"]:
+            say += f" {_n(k['deployed'], 'preview is', 'previews are')} ready."
     elif state in ("cancelled", "failed"):
         say = f"{c['name']} {state}." + (f" {c['blocked_reason']}" if c["blocked_reason"] else "")
     elif state == "completed":
-        if c["sites_to_build"]:
+        if c["sites_to_build"] and not k["sites"]:
+            say = (f"Done. {_n(k['eligible'], 'business', 'businesses')} verified and {k['qualified']} qualified, so no "
+                   f"preview website was built.")
+        elif c["sites_to_build"]:
             say = (f"Done. {_n(k['eligible'], 'business', 'businesses')} verified, {k['qualified']} qualified, and "
                    f"{_n(k['deployed'], 'preview website is', 'preview websites are')} ready.")
             if k["sites_failed"]:

@@ -164,7 +164,7 @@ async def test_worker_and_session_objects_construct_with_real_sdk(monkeypatch):
     assert callable(opts.entrypoint_fnc)
     from livekit.agents import AgentSession, RoomInputOptions
     detector = agent.make_turn_detector()
-    session = AgentSession(stt=agent.STT, tts=agent.TTS, llm=agent.jarvis_bridge_llm_class()(),
+    session = AgentSession(stt=agent.STT, tts=agent.build_tts(CARTESIA_CFG), llm=agent.jarvis_bridge_llm_class()(),
                            turn_handling=agent.turn_handling(detector))
     # The root cause of "JARVIS hears but never answers": with no LLM, AgentActivity skips every reply.
     assert session.llm is not None and session.llm.model == "jarvis-conversation"
@@ -408,21 +408,86 @@ async def test_links_are_not_read_out():
     assert out == "Your preview is at the link in the chat if you want a look."
 
 
-def test_tts_is_a_current_model_with_a_pinned_voice_and_configurable_speed(monkeypatch):
-    opts = agent.tts_options()
-    assert opts["model"] == "cartesia/sonic-3" and opts["voice"] == "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
-    assert opts["extra_kwargs"] == {"speed": "normal"} and opts["language"] == "en"
-    monkeypatch.setattr(agent, "TTS_SPEED", "1.1")
-    monkeypatch.setattr(agent, "TTS_EMOTION", "calm")
-    assert agent.tts_options()["extra_kwargs"] == {"speed": 1.1, "emotion": "calm"}
-    monkeypatch.setattr(agent, "TTS_SPEED", "warp")
-    with pytest.raises(ValueError, match="VOICE_TTS_SPEED"):
-        agent.tts_options()
+CARTESIA_CFG = {"state": "CONFIGURED", "api_key": "cartesia-test-key", "model": "sonic-3",
+                "voice_id": "f786b574-daa5-4673-aa0c-cbe3e8534c02", "speed": "1.0", "emotion": None, "language": "en"}
 
 
-def test_tts_object_constructs_with_the_real_sdk(monkeypatch):
-    pytest.importorskip("livekit.agents")
-    monkeypatch.setenv("LIVEKIT_API_KEY", "placeholder")
-    monkeypatch.setenv("LIVEKIT_API_SECRET", "placeholder")
-    tts = agent.build_tts()
-    assert tts.model == "cartesia/sonic-3" and tts.capabilities.streaming is True and tts.sample_rate == 24000
+def test_cartesia_options_are_validated_and_configurable():
+    o = agent.tts_options(CARTESIA_CFG)
+    assert o == {"api_key": "cartesia-test-key", "model": "sonic-3", "voice": "f786b574-daa5-4673-aa0c-cbe3e8534c02",
+                 "language": "en", "text_pacing": True}                    # natural speed (1.0) is not overridden
+    o = agent.tts_options({**CARTESIA_CFG, "speed": "1.1", "emotion": "positivity, curiosity"})
+    assert o["speed"] == 1.1 and o["emotion"] == ["positivity", "curiosity"]
+    assert agent.tts_options({**CARTESIA_CFG, "speed": "slow"})["speed"] == "slow"
+    for bad in ({"speed": "3.5"}, {"speed": "warp"}, {"model": "sonic-9"}):
+        with pytest.raises(ValueError):
+            agent.tts_options({**CARTESIA_CFG, **bad})
+
+
+def test_missing_cartesia_is_not_configured_and_never_replaced(monkeypatch):
+    monkeypatch.delenv("CARTESIA_API_KEY", raising=False)
+    for cfg, word in (({"state": "NOT_CONFIGURED"}, "NOT_CONFIGURED"), ({"state": "DISABLED"}, "disabled")):
+        with pytest.raises(agent.VoiceNotConfigured, match=word):
+            agent.build_tts(cfg)
+    src = Path(agent.__file__).read_text()
+    assert "inference.TTS" not in src                                   # no LiveKit Inference speech route at all
+
+
+def test_cartesia_settings_come_from_env_or_the_integrations_center(monkeypatch):
+    monkeypatch.setenv("CARTESIA_API_KEY", "env-key")
+    monkeypatch.setenv("CARTESIA_SPEED", "0.95")
+    c = agent.cartesia_settings(http=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(500))))
+    assert c["state"] == "CONFIGURED" and c["source"] == "environment" and c["speed"] == "0.95" and c["model"] == "sonic-3"
+    monkeypatch.delenv("CARTESIA_API_KEY")
+    monkeypatch.delenv("CARTESIA_SPEED")
+    saved = {"state": "CONFIGURED", "cartesia": {"state": "CONFIGURED", "api_key": "vault-key", "model": "sonic-3",
+                                                 "voice_id": "a167e0f3-df7e-4d52-a9c3-f949145efdab", "speed": "1.05",
+                                                 "emotion": None, "language": "en"}}
+    c = agent.cartesia_settings(http=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=saved))))
+    assert c["source"] == "integrations_center" and c["api_key"] == "vault-key" and c["voice_id"].startswith("a167e0f3")
+
+    def down(req):
+        raise httpx.ConnectError("refused", request=req)
+    c = agent.cartesia_settings(http=httpx.Client(transport=httpx.MockTransport(down)))
+    assert c["state"] == "NOT_CONFIGURED" and "could not be reached" in c["reason"]
+
+
+def test_cartesia_tts_constructs_with_the_real_plugin():
+    pytest.importorskip("livekit.plugins.cartesia")
+    from livekit.plugins import cartesia
+    tts = agent.build_tts(CARTESIA_CFG)
+    assert isinstance(tts, cartesia.TTS) and tts.model == "sonic-3" and tts.capabilities.streaming is True
+    assert tts.sample_rate == 24000 and tts._opts.voice == "f786b574-daa5-4673-aa0c-cbe3e8534c02"
+    assert callable(tts.prewarm)                                        # the WebSocket pool can be opened before speaking
+
+
+def test_turns_use_local_models_and_dynamic_endpointing():
+    th = agent.turn_handling("DETECTOR")
+    assert th["endpointing"]["mode"] == "dynamic" and th["interruption"]["mode"] == "vad"      # no billable cloud detector
+    assert th["interruption"]["resume_false_interruption"] is True and th["preemptive_generation"] == {"enabled": False}
+    det = agent.make_turn_detector()
+    assert det.model == "turn-detector-v1-mini"                          # runs locally in the job process
+
+
+def test_latency_is_measured_from_real_session_events():
+    clock = iter([0.0, 1.0, 1.4, 1.9, 2.6, 3.0, 5.5, 9.0])
+    tr = agent.PipelineTrace("R", clock=lambda: next(clock))
+    turn = tr.begin_turn()
+    tr.mark("speech_end", turn)                # 1.0
+    tr.mark("turn_commit", turn)               # 1.4  -> endpointing 400 ms
+    tr.mark("claude_first_text", turn)         # 1.9  -> +500
+    tr.mark("tts_playout_start", turn)         # 2.6  -> +1200
+    tr.mark("browser_reply_audible", turn)     # 3.0  -> +1600
+    tr.mark("reply_played", turn)              # 5.5  -> +4100
+    assert tr.latency(turn) == {"endpointing_ms": 400, "first_text_ms": 500, "first_audio_ms": 1200, "audible_ms": 1600,
+                                "total_ms": 4100}
+
+
+def test_internal_ids_and_markup_are_never_spoken():
+    said = agent.speakable("Queued as **campaign** 0f3c2a1e-1111-4222-8333-944455556666, see https://x.pages.dev now")
+    assert "0f3c2a1e" not in said and "*" not in said and "the link in the chat" in said
+
+
+def test_browser_reports_when_the_reply_is_audible():
+    msg = json.dumps({"type": "client", "event": "reply_audible"}).encode()
+    assert agent.parse_control(msg, "jarvis-control", "user-1", "user-1") == "client:reply_audible"
