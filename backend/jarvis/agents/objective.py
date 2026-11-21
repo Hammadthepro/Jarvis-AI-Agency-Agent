@@ -21,7 +21,7 @@ WEBSITE_FILTER = {"prefer_no_or_poor_website": ["ANY"], "any": ["ANY"], "no_webs
 BUILD_STAGES = [s for s in ALL_STAGES if s != "outreach_draft"]
 RESEARCH_STAGES = ["discovery", "verification", "research", "qualification"]
 FIELDS = ("original_request", "task", "business_category", "area", "target_count", "minimum_rating", "unrated_policy",
-          "website_preference", "previews_to_build", "exclusions", "discovery_source", "notes")
+          "website_preference", "previews_to_build", "exclusions", "discovery_source", "secondary_source", "notes")
 
 
 def merge(current: dict, update: dict) -> dict:
@@ -105,8 +105,15 @@ def resolve(obj: dict) -> dict:
     if not obj.get("website_preference"):
         defaults.append("businesses without a website, or with a poor one, ranked first")
     source = obj.get("discovery_source") or "serp_api"
+    secondary = obj.get("secondary_source") if obj.get("secondary_source") not in (None, source) else None
+    if rating is not None and source == "geoapify":
+        # Geoapify (OpenStreetMap) has no ratings: never drop the owner's rating requirement silently.
+        return {"parameters": None, "defaults_applied": defaults, "summary": None,
+                "missing": {"field": "discovery_source", "question": "Geoapify doesn't have ratings. Should I use SerpApi "
+                            "so I can apply the minimum rating, or drop the rating requirement?"}}
     params = CampaignParameters(niche=obj["business_category"].strip().lower()[:80], location=loc, target_count=target,
-                                discovery_provider=source, minimum_google_rating=rating, missing_rating_policy=policy,
+                                discovery_provider=source, discovery_secondary=secondary,
+                                minimum_google_rating=rating, missing_rating_policy=policy,
                                 website_filter=WEBSITE_FILTER.get(pref, ["ANY"]),
                                 stages=BUILD_STAGES if previews else RESEARCH_STAGES, sites_to_build=previews)
     return {"parameters": params, "defaults_applied": defaults, "missing": None, "summary": summary(params, obj)}

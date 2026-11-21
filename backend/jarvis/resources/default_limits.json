@@ -61,6 +61,14 @@
       "unit": "usd_micros",
       "period": "month",
       "cap": 35000000
+    },
+    {
+      "scope": "provider",
+      "provider": "geoapify",
+      "unit": "request",
+      "period": "day",
+      "cap": 2500,
+      "free_allowance": 3000
     }
   ],
   "campaign_default_cap_micros": 5000000,

@@ -78,6 +78,13 @@ SPECS: dict[str, ProviderSpec] = {s.key: s for s in (
                  (FieldSpec("api_key", "API key", True, "serpapi_api_key", pattern=r"^[A-Za-z0-9]{32,128}$"),),
                  ("website_verification", "business_research", "usage_reporting"), "https://serpapi.com/manage-api-key",
                  notes=("Free plan: limited searches per month. JARVIS stops at the configured cap.",)),
+    ProviderSpec("geoapify", "Geoapify Places", "Local business discovery from OpenStreetMap data (category + city).",
+                 (FieldSpec("api_key", "API key", True, "geoapify_api_key", pattern=r"^[A-Za-z0-9]{20,64}$",
+                            hint="Geoapify project API key (myprojects.geoapify.com)."),),
+                 ("prospect_discovery", "geocoding"), "https://myprojects.geoapify.com",
+                 notes=("Free plan: 3,000 credits per day, commercial use allowed with attribution (Powered by Geoapify, "
+                        "© OpenStreetMap contributors). Test connection makes one geocoding request (1 credit).",
+                        "Websites and phone numbers are often missing in OpenStreetMap: JARVIS verifies them independently.")),
     ProviderSpec("firecrawl", "Firecrawl", "Extracts clean text from business websites for research.",
                  (FieldSpec("api_key", "API key", True, "firecrawl_api_key", pattern=r"^fc-[A-Za-z0-9]{16,}$"),),
                  ("page_extraction", "credit_reporting"), "https://www.firecrawl.dev/app/api-keys"),
@@ -271,7 +278,8 @@ async def load_effective(db, base: Settings) -> tuple[Settings, dict[str, dict],
 
 def apply_to_adapters(deps, livekit, eff: Settings, info: dict[str, dict]) -> None:
     deps.settings = eff
-    for a in (deps.places, deps.serp, deps.firecrawl, deps.cloudflare, deps.email, getattr(deps, "cartesia", None)):
+    for a in (deps.places, deps.serp, deps.firecrawl, deps.cloudflare, deps.email, getattr(deps, "cartesia", None),
+              getattr(deps, "geoapify", None)):
         if a is not None:
             a.settings = eff
     deps.claude.reconfigure(eff)
@@ -309,6 +317,7 @@ def configured(provider: str, deps, livekit) -> bool:
     return {"anthropic": deps.claude.configured, "google_places": deps.places.configured, "serp_api": deps.serp.configured,
             "firecrawl": deps.firecrawl.configured, "cloudflare": deps.cloudflare.configured, "resend": deps.email.configured,
             "livekit": livekit.configured, "cartesia": bool(deps.settings.cartesia_api_key),
+            "geoapify": bool(deps.settings.geoapify_api_key),
             "supabase": bool(deps.settings.supabase_url and (deps.settings.supabase_jwks_url or deps.settings.supabase_jwt_secret))
             }[provider]
 
@@ -363,6 +372,15 @@ async def validate(provider: str, deps, livekit, db, workspace_id) -> tuple[dict
                 "preview_project_exists": s.cloudflare_pages_preview_project in names}, None
     if provider == "livekit":
         return await livekit.check(), None
+    if provider == "geoapify":
+        from jarvis.integrations.base import CallContext
+        from jarvis.integrations.geoapify import GeoapifyClient
+        client = deps.geoapify if deps.geoapify is not None else GeoapifyClient(s)
+        client.settings = s
+        pid = await client.city_place_id(CallContext(db, workspace_id), "Austin", "TX")
+        if not pid:
+            raise ProviderError("geoapify", IntegrationState.PROVIDER_ERROR, "geocoding returned no place for Austin, TX")
+        return {"geocoding": "ok", "credits_used": 1}, None
     if provider == "cartesia":
         from jarvis.integrations.cartesia import CartesiaClient
         client = deps.cartesia if deps.cartesia is not None else CartesiaClient(s)

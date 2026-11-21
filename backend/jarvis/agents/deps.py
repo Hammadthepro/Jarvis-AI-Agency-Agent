@@ -12,6 +12,7 @@ from jarvis.integrations.cartesia import CartesiaClient
 from jarvis.integrations.claude import ClaudeClient
 from jarvis.integrations.cloudflare import CloudflarePagesClient
 from jarvis.integrations.firecrawl import FirecrawlClient
+from jarvis.integrations.geoapify import GeoapifyClient
 from jarvis.integrations.google_places import GooglePlacesClient
 from jarvis.integrations.resend import ResendClient
 from jarvis.integrations.serpapi import SerpApiClient
@@ -32,13 +33,14 @@ class Deps:
     resolver: Callable[[str, int], Awaitable[str]] = field(default=resolve_public)
     second_probe_delay_s: float | None = None   # None => settings.broken_second_probe_minutes
     cartesia: CartesiaClient | None = None
+    geoapify: GeoapifyClient | None = None
 
     @classmethod
     def build(cls, settings: Settings, db: Database) -> Deps:
         return cls(settings=settings, db=db, places=GooglePlacesClient(settings), serp=SerpApiClient(settings),
                    firecrawl=FirecrawlClient(settings), claude=ClaudeClient(settings),
                    cloudflare=CloudflarePagesClient(settings), email=ResendClient(settings),
-                   cartesia=CartesiaClient(settings))
+                   cartesia=CartesiaClient(settings), geoapify=GeoapifyClient(settings))
 
     async def fetch_url(self, url: str, **kw) -> FetchResult:
         if self.fetch is safe_fetch:

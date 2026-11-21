@@ -71,16 +71,18 @@ async def deps(db, dsn, tmp_path, web, fake_claude):
     from jarvis.integrations.claude import ClaudeClient
     from jarvis.integrations.cloudflare import CloudflarePagesClient
     from jarvis.integrations.firecrawl import FirecrawlClient
+    from jarvis.integrations.geoapify import GeoapifyClient
     from jarvis.integrations.google_places import GooglePlacesClient
     from jarvis.integrations.resend import ResendClient
     from jarvis.integrations.serpapi import SerpApiClient
-    s = make_settings(dsn, tmp_path, anthropic_api_key="sk-ant-test", serpapi_api_key="s" * 64, firecrawl_api_key="fc-test",
+    s = make_settings(dsn, tmp_path, anthropic_api_key="sk-ant-test", serpapi_api_key="s" * 64, geoapify_api_key="g" * 32, firecrawl_api_key="fc-test",
                       google_places_api_key="AIza" + "x" * 35, cloudflare_api_token="cf-test", cloudflare_account_id="a" * 32,
                       email_provider="resend", resend_api_key="re_test")
     http = httpx.AsyncClient(transport=web.transport())
     d = Deps(settings=s, db=db, places=GooglePlacesClient(s, http), serp=SerpApiClient(s, http), firecrawl=FirecrawlClient(s, http),
              claude=ClaudeClient(s, client=fake_claude), cloudflare=CloudflarePagesClient(s, http, runner=web.wrangler_runner),
-             email=ResendClient(s, http), fetch=web.fetch, resolver=web.resolve, second_probe_delay_s=0)
+             email=ResendClient(s, http), fetch=web.fetch, resolver=web.resolve, second_probe_delay_s=0,
+             geoapify=GeoapifyClient(s, http))
     return d
 
 

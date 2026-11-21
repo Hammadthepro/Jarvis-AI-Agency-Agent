@@ -84,6 +84,7 @@ class Settings(BaseSettings):
     places_coordinates_ttl_days: int = Field(30, ge=1, le=30)
 
     serpapi_api_key: SecretStr | None = None
+    geoapify_api_key: SecretStr | None = None          # Geoapify Places (OpenStreetMap data); free plan 3,000 credits/day
     firecrawl_api_key: SecretStr | None = None
     firecrawl_max_pages_per_prospect: int = Field(5, ge=1, le=20)
 

@@ -17,6 +17,7 @@ import asyncio
 import os
 import signal
 import socket
+import time
 import uuid
 from datetime import UTC, datetime
 
@@ -45,6 +46,9 @@ BLOCKING_STATES = {IntegrationState.NOT_CONFIGURED, IntegrationState.INVALID_CRE
                    IntegrationState.QUOTA_EXCEEDED, IntegrationState.DISABLED, IntegrationState.BLOCKED_PENDING_APPROVAL}
 
 
+CANCEL_POLL_S = 2.0          # how soon a running step notices a stop request
+
+
 class Worker:
     def __init__(self, deps: Deps, *, worker_id: str | None = None, concurrency: int | None = None,
                  poll_s: float = 1.0, grace_s: float = 60.0) -> None:
@@ -68,12 +72,20 @@ class Worker:
         cancelled = asyncio.Event()
 
         async def heartbeats() -> None:
+            # A stop request must take effect quickly: check for it every CANCEL_POLL_S (one indexed lookup), and renew
+            # the lease on its own, slower schedule.
+            renew_every = max(5, self.lease_s / 3)
+            next_renew = time.monotonic() + renew_every
             while not hb_stop.is_set():
                 try:
-                    await asyncio.wait_for(hb_stop.wait(), timeout=max(5, self.lease_s / 3))
+                    await asyncio.wait_for(hb_stop.wait(), timeout=CANCEL_POLL_S)
                 except TimeoutError:
                     try:
-                        alive = await queue.heartbeat(self.db, task.id, self.worker_id, self.lease_s)
+                        if time.monotonic() >= next_renew:
+                            alive = await queue.heartbeat(self.db, task.id, self.worker_id, self.lease_s)
+                            next_renew = time.monotonic() + renew_every
+                        else:
+                            alive = not await self.db.fetchval("select cancel_requested from tasks where id=$1", task.id)
                     except DatabaseUnavailable:
                         continue
                     if not alive:
@@ -99,6 +111,9 @@ class Worker:
             if cancelled.is_set():
                 await queue.release_cancelled(self.db, task, self.worker_id)
                 await self._exec_record(task, "failed", error="cancelled or lease lost")
+                if task.campaign_id:      # the fan-in below is skipped by the re-raise: finish a requested cancellation here
+                    from jarvis.workflow.work import finish_cancellation
+                    await finish_cancellation(self.db, task.campaign_id)
             else:  # shutdown: hand the lease back for another worker
                 await self.db.execute("""update tasks set status='retry_wait', leased_by=null, lease_expires_at=null,
                                          run_after=now() where id=$1 and leased_by=$2""", task.id, self.worker_id)

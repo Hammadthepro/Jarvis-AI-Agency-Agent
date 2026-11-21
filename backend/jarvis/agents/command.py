@@ -85,7 +85,9 @@ class CampaignParameters(BaseModel):
     target_count: int = Field(ge=1, le=1000)
     # SerpApi is the default discovery source. Google Places API (New) is only used when asked for explicitly, and stays
     # blocked until its written approval is recorded (jarvis.core.provider_policy).
-    discovery_provider: Literal["serp_api", "google_places", "manual_import", "licensed_business_data"] = "serp_api"
+    discovery_provider: Literal["serp_api", "geoapify", "google_places", "manual_import", "licensed_business_data"] = "serp_api"
+    # Used when the primary provider has no more results before the target is reached (cross-provider de-duplicated).
+    discovery_secondary: Literal["serp_api", "geoapify"] | None = None
     minimum_google_rating: Decimal | None = None
     missing_rating_policy: Literal["exclude", "include_for_review"] | None = None
     website_filter: list[WebsiteFilter] = Field(default_factory=lambda: ["ANY"])

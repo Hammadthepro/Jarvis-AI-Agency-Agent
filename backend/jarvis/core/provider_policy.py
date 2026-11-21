@@ -47,6 +47,10 @@ RULES: dict[tuple[str, str], Rule] = {(r.provider, r.purpose): r for r in [
     Rule("firecrawl", "website_retrieval", "Firecrawl",
          "Firecrawl terms; public business websites only, subject to robots.txt and site-terms checks.",
          credential="FIRECRAWL_API_KEY"),
+    Rule("geoapify", "prospect_discovery", "Geoapify Places (OpenStreetMap)",
+         "Geoapify terms (free plan allows commercial use with attribution) and the OpenStreetMap ODbL licence; "
+         "results may be stored. Attribution: Powered by Geoapify, (c) OpenStreetMap contributors.",
+         credential="GEOAPIFY_API_KEY"),
     Rule("manual_import", "prospect_discovery", "Imported business list",
          "Records the operator attests they have the right to use."),
     Rule("licensed_business_data", "prospect_discovery", "Licensed business data",
@@ -56,7 +60,9 @@ RULES: dict[tuple[str, str], Rule] = {(r.provider, r.purpose): r for r in [
 
 def configured(deps, provider: str) -> bool:
     client = {"google_places": getattr(deps, "places", None), "serp_api": getattr(deps, "serp", None),
-              "firecrawl": getattr(deps, "firecrawl", None)}.get(provider)
+              "firecrawl": getattr(deps, "firecrawl", None), "geoapify": getattr(deps, "geoapify", None)}.get(provider)
+    if provider == "geoapify" and client is None:
+        return bool(deps.settings.geoapify_api_key)
     return True if client is None else bool(client.configured)
 
 
@@ -88,4 +94,4 @@ async def evaluate(conn, deps, workspace_id: UUID, provider: str, purpose: str) 
 async def discovery_options(conn, deps, workspace_id: UUID) -> list[dict]:
     """Every discovery source with its own status, for the conversation and the UI."""
     return [await evaluate(conn, deps, workspace_id, p, "prospect_discovery")
-            for p in ("serp_api", "google_places", "manual_import", "licensed_business_data")]
+            for p in ("serp_api", "geoapify", "google_places", "manual_import", "licensed_business_data")]

@@ -7,14 +7,36 @@
     "text_search_ids_only": 0,
     "place_details_enterprise": 20000
   },
-  "serp_api": {"search": 25000},
-  "firecrawl": {"credit": 3800},
-  "cloudflare": {"deployment": 0},
-  "resend": {"email": 0},
-  "livekit": {"agent_minute": 10000},
+  "serp_api": {
+    "search": 25000
+  },
+  "firecrawl": {
+    "credit": 3800
+  },
+  "cloudflare": {
+    "deployment": 0
+  },
+  "resend": {
+    "email": 0
+  },
+  "livekit": {
+    "agent_minute": 10000
+  },
   "anthropic": {
-    "claude-haiku-5-5": {"input_per_mtok": 100000, "output_per_mtok": 500000},
-    "claude-sonnet-5-5": {"input_per_mtok": 2000000, "output_per_mtok": 10000000},
-    "claude-opus-5-5": {"input_per_mtok": 4000000, "output_per_mtok": 20000000}
+    "claude-haiku-5-5": {
+      "input_per_mtok": 100000,
+      "output_per_mtok": 500000
+    },
+    "claude-sonnet-5-5": {
+      "input_per_mtok": 2000000,
+      "output_per_mtok": 10000000
+    },
+    "claude-opus-5-5": {
+      "input_per_mtok": 4000000,
+      "output_per_mtok": 20000000
+    }
+  },
+  "geoapify": {
+    "request": 0
   }
 }

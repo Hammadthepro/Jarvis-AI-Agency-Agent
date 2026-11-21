@@ -32,6 +32,9 @@ class FakeWeb:
         self.serp_error: str | None = None
         self.maps: dict[str, list[dict]] = {}    # SerpApi google_maps: location substring -> local_results (all pages)
         self.maps_requests: list[dict] = []
+        self.geo_cities: dict[str, str] = {}          # Geoapify geocoding: text substring -> place_id
+        self.geo_places: dict[str, list[dict]] = {}   # Geoapify Places: place_id -> features (all pages)
+        self.geo_requests: list[dict] = []
         self.firecrawl_pages: dict[str, str] = {}
         self.calls: list[tuple[str, str]] = []
         self.places_requests: list[dict] = []
@@ -100,6 +103,18 @@ class FakeWeb:
                         return httpx.Response(200, json={"search_metadata": {"id": "s1", "status": "Success"}, **v})
                 return httpx.Response(200, json={"search_metadata": {"id": "s0", "status": "Success"},
                                                  "error": "Google hasn't returned any results for this query."})
+            if u.host == "api.geoapify.com":
+                self.geo_requests.append({"path": u.path, **dict(u.params)})
+                if u.params.get("apiKey") in (None, "", "bad-key"):
+                    return httpx.Response(401, json={"statusCode": 401, "error": "Unauthorized", "message": "Invalid apiKey"})
+                if u.path == "/v1/geocode/search":
+                    pid = next((v for k, v in self.geo_cities.items() if k in u.params.get("text", "")), None)
+                    return httpx.Response(200, json={"results": [{"place_id": pid}] if pid else []})
+                if u.path == "/v2/places":
+                    pid = u.params.get("filter", "").removeprefix("place:")
+                    off, lim = int(u.params.get("offset", "0")), int(u.params.get("limit", "20"))
+                    return httpx.Response(200, json={"type": "FeatureCollection",
+                                                     "features": self.geo_places.get(pid, [])[off:off + lim]})
             if u.host == "api.firecrawl.dev":
                 if u.path.endswith("/team/credit-usage"):
                     return httpx.Response(200, json={"success": True, "data": {"remaining_credits": 940, "plan_credits": 1000}})

@@ -13,16 +13,18 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from urllib.parse import urlsplit
+from urllib.robotparser import RobotFileParser
 
 from jarvis.agents.deps import Deps
 from jarvis.core.errors import IntegrationState, ProviderError
 from jarvis.integrations.base import CallContext
 from jarvis.security.robots import registrable_domain, terms_blocked
-from jarvis.security.ssrf import DnsFailure, FetchResult, UnsafeDestination
+from jarvis.security.ssrf import USER_AGENT, DnsFailure, FetchResult, UnsafeDestination
 
 DIRECTORY_DOMAINS = {
     "yelp.com", "facebook.com", "instagram.com", "linkedin.com", "bbb.org", "angi.com", "angieslist.com", "homeadvisor.com",
@@ -76,6 +78,9 @@ class Outcome:
     evidence: list[dict] = field(default_factory=list)   # {source_type, source_ref, excerpt}
     confidence: float = 0.0
     identity_facts: list[dict] = field(default_factory=list)  # {fact_key, value, quote, source_ref, source_type}
+    website_check: str = "WEBSITE_UNKNOWN"                     # precise outcome (WEBSITE_CHECKS)
+    listing_website: str = "not_listed"                        # did the discovery source list a website?
+    http: list[dict] = field(default_factory=list)             # every probe: status, redirects, final URL, verdict
 
 
 def digits(s: str | None) -> str:
@@ -171,71 +176,199 @@ def query_hash(q: str) -> str:
     return hashlib.sha256(q.encode()).hexdigest()
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# HTTP classification. A probe's verdict says what the server actually answered; only some verdicts can confirm that
+# a website is broken, and only after a second probe minutes later. Others say "a site is there but we could not check
+# it" and must never become "broken" or "no website".
+# ---------------------------------------------------------------------------------------------------------------------
+CONFIRMS_BROKEN = {"nxdomain", "connect_error", "tls_error", "http_5xx", "not_found", "parked", "redirect_loop"}
+SITE_PRESENT_UNVERIFIABLE = {"blocked", "auth_required", "rate_limited", "robots_disallowed", "http_5xx", "timeout",
+                             "http_4xx_other", "unconfirmed_identity"}
+WEBSITE_CHECK = {"blocked": "WEBSITE_BLOCKED", "robots_disallowed": "WEBSITE_BLOCKED", "auth_required": "WEBSITE_AUTH_REQUIRED",
+                 "rate_limited": "WEBSITE_RATE_LIMITED", "unconfirmed_identity": "WEBSITE_FOUND"}
+WEBSITE_CHECKS = ("NO_WEBSITE_LISTED", "NO_WEBSITE_FOUND", "WEBSITE_FOUND", "WEBSITE_WORKING", "WEBSITE_BROKEN_CONFIRMED",
+                  "WEBSITE_BLOCKED", "WEBSITE_RATE_LIMITED", "WEBSITE_AUTH_REQUIRED", "WEBSITE_REDIRECTED", "WEBSITE_UNKNOWN")
+ANTI_BOT_MARKERS = ("captcha", "attention required", "just a moment", "access denied", "are you a robot", "cf-chl",
+                    "request blocked", "bot detection")
+_ROBOTS: dict[str, tuple[float, str]] = {}      # origin -> (expires, verdict); per worker process
+ROBOTS_TTL_S = 6 * 3600
+
+
+def classify(res: FetchResult) -> str:
+    """Verdict of one fetch: ok | parked | not_found | blocked | auth_required | rate_limited | http_5xx | http_4xx_other
+    | nxdomain | connect_error | tls_error | timeout | redirect_loop | unsafe."""
+    if res.error:
+        e = res.error.split(":")[0]
+        return {"too_many_redirects": "redirect_loop"}.get(e, e)
+    s = res.status
+    if s is None:
+        return "connect_error"
+    if s in (401, 407):
+        return "auth_required"
+    if s == 403:
+        return "blocked"
+    if s == 429:
+        return "rate_limited"
+    if s in (404, 410):
+        return "not_found"
+    if s >= 500:
+        return "http_5xx"
+    if s >= 400:
+        return "http_4xx_other"
+    return "parked" if is_parked(res.body) else "ok"
+
+
+def anti_bot(res: FetchResult) -> bool:
+    h = res.headers or {}
+    body = (res.body or "")[:20_000].lower()
+    return bool("cf-ray" in h or "cf-mitigated" in h or any(m in body for m in ANTI_BOT_MARKERS))
+
+
+def retry_after_s(res: FetchResult) -> float | None:
+    ra = (res.headers or {}).get("retry-after", "")
+    return float(ra) if ra.replace(".", "", 1).isdigit() else None
+
+
+def probe_record(label: str, res: FetchResult, verdict: str) -> dict:
+    """The evidence behind a verdict: what was requested, what answered, where it redirected."""
+    return {"check": label, "url": res.url, "final_url": res.final_url, "status": res.status, "verdict": verdict,
+            "redirects": list(res.redirects or [])[:10], "content_type": (res.headers or {}).get("content-type", "")[:80],
+            "error": res.error, "anti_bot": anti_bot(res) if verdict in ("blocked", "rate_limited") else None,
+            "retry_after_s": retry_after_s(res) if verdict == "rate_limited" else None,
+            "at": datetime.now(UTC).isoformat(timespec="seconds")}
+
+
+def name_in_domain(name: str | None, host: str) -> bool:
+    """A domain plausibly belongs to the business when its label contains the business's distinctive name words."""
+    label = (host or "").lower().split(".")[0].replace("-", "")
+    toks = [t for t in name_tokens(name or "") if len(t) >= 3]
+    if not toks or not label:
+        return False
+    hit = sum(1 for t in toks if t in label)
+    return hit == len(toks) or hit >= 2
+
+
+def _origin(url: str) -> str:
+    p = urlsplit(url)
+    return f"{p.scheme}://{p.netloc}"
+
+
 class WebsiteVerifier:
     def __init__(self, deps: Deps) -> None:
         self.deps = deps
 
-    async def _probe(self, url: str) -> tuple[FetchResult, str]:
-        """Returns (result, verdict) verdict in ok | parked | http_4xx | http_5xx | nxdomain | connect_error | tls_error | timeout | unsafe"""
+    async def _robots(self, url: str) -> tuple[str, FetchResult | None]:
+        """robots.txt decision for the URL's origin: allowed | robots_disallowed | blocked | http_5xx | unreachable.
+        Network failures are never cached (a later probe must be live)."""
+        origin = _origin(url)
+        hit = _ROBOTS.get(origin)
+        if hit and hit[0] > time.monotonic():
+            return hit[1], None
+        res = await self.deps.fetch_url(origin + "/robots.txt")
+        v = classify(res)
+        if v in ("nxdomain", "connect_error", "tls_error", "timeout", "unsafe", "redirect_loop"):
+            return "unreachable", res
+        if res.status in (401, 403):
+            verdict = "blocked"
+        elif res.status is not None and res.status >= 500:
+            return "http_5xx", res
+        elif res.status is not None and res.status >= 400:
+            verdict = "allowed"                      # no robots.txt: no restrictions (RFC 9309)
+        else:
+            rp = RobotFileParser()
+            rp.parse(res.body.splitlines())
+            verdict = "allowed" if (rp.can_fetch(USER_AGENT.split("/")[0], url) and rp.can_fetch("*", url)) else "robots_disallowed"
+        _ROBOTS[origin] = (time.monotonic() + ROBOTS_TTL_S, verdict)
+        return verdict, res
+
+    async def _probe(self, url: str, out: Outcome | None = None, label: str = "probe") -> tuple[FetchResult, str]:
+        """One SSRF-safe check of a site: robots.txt first (respected), then the page. Records the evidence."""
         if not re.match(r"^https?://", url):
             url = "https://" + url
-        res = await self.deps.fetch_url(url)
-        if res.error:
-            return res, res.error.split(":")[0]
-        if res.status is None:
-            return res, "connect_error"
-        if res.status >= 500:
-            return res, "http_5xx"
-        if res.status >= 400:
-            return res, "http_4xx"
-        if is_parked(res.body):
-            return res, "parked"
-        return res, "ok"
+        rv, rres = await self._robots(url)
+        if rv == "unreachable":
+            res, verdict = rres, classify(rres)
+        elif rv in ("blocked", "robots_disallowed", "http_5xx"):
+            res = rres or FetchResult(url, url, None, {}, "", error=None)
+            verdict = rv
+        else:
+            res = await self.deps.fetch_url(url)
+            verdict = classify(res)
+            ra = retry_after_s(res) if verdict == "rate_limited" else None
+            if ra is not None and ra <= 15:          # honour a short Retry-After once; longer waits stay "rate limited"
+                await asyncio.sleep(ra)
+                res = await self.deps.fetch_url(url)
+                verdict = classify(res)
+            if verdict == "not_found" and urlsplit(res.final_url).path not in ("", "/"):
+                root = await self.deps.fetch_url(_origin(res.final_url) + "/")   # a missing deep link is not a missing site
+                if classify(root) == "ok":
+                    res, verdict = root, "ok"
+        if out is not None:
+            out.http.append(probe_record(label, res, verdict))
+        return res, verdict
+
+    def _site_found(self, out: Outcome, c: Candidate, res: FetchResult, score: float, reason: str, confidence: float) -> Outcome:
+        health, sig = quality_signals(res)
+        out.status, out.site_health, out.url, out.final_url = "VERIFIED_HAS_WEBSITE", health, res.final_url, res.final_url
+        start = urlsplit(res.url).hostname or ""
+        moved = bool(res.redirects) and registrable_domain(start) != registrable_domain(urlsplit(res.final_url).hostname or "")
+        out.website_check = "WEBSITE_REDIRECTED" if moved else "WEBSITE_WORKING"
+        out.evidence.append({"source_type": "http_probe", "source_ref": res.final_url, "excerpt": _title(res.body) or None,
+                             "signals": sig, "redirects": list(res.redirects or [])[:10]})
+        out.identity_facts += extract_identity(c, _visible(res.body), res.final_url, "official_website")
+        out.confidence, out.reason = confidence, reason
+        return out
 
     async def verify(self, ctx: CallContext, c: Candidate) -> Outcome:
-        out = Outcome(status="WEBSITE_UNCERTAIN")
+        out = await self._verify(ctx, c)
+        if c.source == "google_places":
+            # The listed URL is Google Places content: keep what the server answered, never the URL itself.
+            for rec in out.http:
+                if rec["check"].startswith("listed_site"):
+                    rec.update(url="listed-url (google-derived, not stored)", final_url=None, redirects=[])
+        return out
+
+    async def _verify(self, ctx: CallContext, c: Candidate) -> Outcome:
+        out = Outcome(status="WEBSITE_UNCERTAIN", website_check="WEBSITE_UNKNOWN",
+                      listing_website="listed" if c.listed_url else "not_listed")
         delay = (self.deps.second_probe_delay_s if self.deps.second_probe_delay_s is not None
                  else self.deps.settings.broken_second_probe_minutes * 60)
 
-        # 1) Listed website (hint from the discovery source)
+        # 1) Website listed by the discovery source: a hint to check, never proof either way.
         if c.listed_url:
             out.listing_sources.append("maps_hint" if c.source == "google_places" else c.source)
-            res, verdict = await self._probe(c.listed_url)
+            res, verdict = await self._probe(c.listed_url, out, "listed_site")
+            if verdict not in ("ok",) and (verdict in CONFIRMS_BROKEN or verdict == "timeout"):
+                out.checks.append(Check("listed_site_probe", "completed", verdict, {"status": res.status}))
+                await asyncio.sleep(delay)
+                res2, verdict2 = await self._probe(c.listed_url, out, "listed_site_second_probe")
+                out.checks.append(Check("listed_site_second_probe", "completed", verdict2, {"delay_s": delay, "status": res2.status}))
+                if verdict in CONFIRMS_BROKEN and verdict2 in CONFIRMS_BROKEN:
+                    out.status, out.site_health, out.reason = "VERIFIED_HAS_WEBSITE", "broken", f"{verdict}, then {verdict2}"
+                    out.website_check = "WEBSITE_BROKEN_CONFIRMED"
+                    out.url = c.listed_url if c.source != "google_places" else None
+                    out.evidence.append({"source_type": "http_probe", "source_ref": out.url or "listed-url (google-derived, not stored)",
+                                         "excerpt": f"two failing probes {delay:.0f}s apart: {verdict} (HTTP {res.status}), "
+                                                    f"{verdict2} (HTTP {res2.status})"})
+                    out.confidence = 0.85
+                    return out
+                res, verdict = res2, verdict2
             if verdict == "ok":
                 score = identity_score(c, _visible(res.body), _title(res.body))
                 out.checks.append(Check("listed_site_probe", "completed", "responds", {"identity": score, "status": res.status}))
                 if score >= 0.6:
-                    health, sig = quality_signals(res)
-                    out.status, out.site_health, out.final_url = "VERIFIED_HAS_WEBSITE", health, res.final_url
-                    out.url = res.final_url  # identity confirmed by our own probe => independent evidence
-                    out.evidence.append({"source_type": "http_probe", "source_ref": res.final_url,
-                                         "excerpt": _title(res.body) or None, "signals": sig})
-                    out.identity_facts += extract_identity(c, _visible(res.body), res.final_url, "official_website")
-                    out.confidence = min(1.0, 0.6 + score * 0.4)
-                    out.reason = "identity_confirmed_on_site"
-                    return out
+                    return self._site_found(out, c, res, score, "identity_confirmed_on_site", min(1.0, 0.6 + score * 0.4))
                 out.checks.append(Check("listed_site_identity", "completed", "mismatch", {"identity": score}))
-            else:
-                out.checks.append(Check("listed_site_probe", "completed", verdict))
-                await asyncio.sleep(delay)
-                res2, verdict2 = await self._probe(c.listed_url)
-                out.checks.append(Check("listed_site_second_probe", "completed", verdict2, {"delay_s": delay}))
-                if verdict2 != "ok":
-                    out.status, out.site_health, out.reason = "VERIFIED_HAS_WEBSITE", "broken", verdict2
-                    out.url = c.listed_url if c.source != "google_places" else None
-                    out.evidence.append({"source_type": "http_probe", "source_ref": out.url or "listed-url (google-derived, not stored)",
-                                         "excerpt": f"two failing probes {delay:.0f}s apart: {verdict}, {verdict2}"})
-                    out.confidence = 0.85
-                    return out
-                score = identity_score(c, _visible(res2.body), _title(res2.body))
-                if score >= 0.6:
-                    health, sig = quality_signals(res2)
-                    out.status, out.site_health, out.url, out.final_url = "VERIFIED_HAS_WEBSITE", health, res2.final_url, res2.final_url
-                    out.evidence.append({"source_type": "http_probe", "source_ref": res2.final_url, "excerpt": _title(res2.body), "signals": sig})
-                    out.confidence, out.reason = 0.75, "recovered_on_second_probe"
-                    return out
+            elif verdict in SITE_PRESENT_UNVERIFIABLE or verdict == "unsafe":
+                # The listed site answered, but not with a page we may read: blocked, login, rate limit, robots, a server
+                # error that did not persist, or a timeout. Inconclusive by design: not broken, not "no website".
+                out.checks.append(Check("listed_site_probe", "completed", verdict, {"status": res.status}))
+                out.website_check = WEBSITE_CHECK.get(verdict, "WEBSITE_UNKNOWN")
+                out.url = c.listed_url if c.source != "google_places" else None
+                out.reason, out.confidence = f"listed_site_{verdict}", 0.5
+                return out
 
-        # 2) Independent search
+        # 2) Independent search (name + location, and the phone number), in parallel.
         if not c.name:
             out.status, out.reason = "VERIFICATION_FAILED", "no_identity_to_search"
             return out
@@ -243,14 +376,20 @@ class WebsiteVerifier:
         if len(digits(c.phone)) == 10:
             p = digits(c.phone)
             queries.append((f'"({p[:3]}) {p[3:6]}-{p[6:]}"', "serp_phone"))
-        candidates: dict[str, dict] = {}
-        profiles: list[str] = []
-        for q, label in queries:
+        loc = ", ".join(x for x in (c.city, c.state) if x) or None
+
+        async def search(q: str):
             try:
-                resp = await self.deps.serp.search(ctx, q, location=", ".join(x for x in (c.city, c.state) if x) or None)
+                return await self.deps.serp.search(ctx, q, location=loc), None
             except ProviderError as exc:
                 if exc.state in BLOCKING_STATES:
                     raise  # missing credentials/quota must surface as a blocked task, not a silent "failed check"
+                return None, exc
+        found = await asyncio.gather(*(search(q) for q, _ in queries))
+        candidates: dict[str, dict] = {}
+        profiles: list[str] = []
+        for (q, label), (resp, exc) in zip(queries, found, strict=True):
+            if exc is not None:
                 out.checks.append(Check(label, "failed", exc.state.value, {"error": exc.message[:200]}))
                 continue
             out.checks.append(Check(label, "completed", f"{len(resp.results)} results",
@@ -272,65 +411,81 @@ class WebsiteVerifier:
 
         serp_done = [ch for ch in out.checks if ch.check.startswith("serp_") and ch.status == "completed"]
         serp_failed = [ch for ch in out.checks if ch.check.startswith("serp_") and ch.status == "failed"]
-
-        # 3) Probe search candidates for identity
         matches: list[tuple[str, float, FetchResult]] = []
-        for host, info in list(candidates.items())[:5]:
-            res, verdict = await self._probe(info["url"])
-            if verdict != "ok":
-                out.checks.append(Check("candidate_probe", "completed", verdict, {"host": host}))
-                continue
-            score = identity_score(c, _visible(res.body), _title(res.body))
-            out.checks.append(Check("candidate_probe", "completed", f"identity {score}", {"host": host}))
-            if score >= 0.6:
-                matches.append((host, score, res))
+        unverifiable: list[tuple[str, str, str]] = []   # (host, verdict, url): a likely site we could not read
+
+        def weigh(host: str, url: str, res: FetchResult, verdict: str, check: str) -> None:
+            if verdict == "ok":
+                score = identity_score(c, _visible(res.body), _title(res.body))
+                out.checks.append(Check(check, "completed", f"identity {score}", {"host": host}))
+                if score >= 0.6:
+                    matches.append((host, score, res))
+                elif score >= 0.3 and name_in_domain(c.name, host):
+                    unverifiable.append((host, "unconfirmed_identity", url))
+                return
+            out.checks.append(Check(check, "completed", verdict, {"host": host, "status": res.status}))
+            if verdict in SITE_PRESENT_UNVERIFIABLE and name_in_domain(c.name, host):
+                unverifiable.append((host, verdict, url))
+
+        # 3) Probe search candidates (parallel)
+        cand = list(candidates.items())[:5]
+        for (host, info), (res, verdict) in zip(cand, await asyncio.gather(
+                *(self._probe(i["url"], out, "candidate") for _h, i in cand)), strict=True):
+            weigh(host, info["url"], res, verdict, "candidate_probe")
 
         # 4) Profiles: look for a website link (skip sites whose terms forbid automated access)
         profile_links: set[str] = set()
+        allowed_profiles = []
         for link in profiles:
             if terms_blocked(link):
                 out.checks.append(Check("profile_check", "skipped", "terms_blocked", {"host": urlsplit(link).hostname}))
-                continue
-            res, verdict = await self._probe(link)
+            else:
+                allowed_profiles.append(link)
+        for link, (res, verdict) in zip(allowed_profiles, await asyncio.gather(
+                *(self._probe(link, out, "profile") for link in allowed_profiles)), strict=True):
             if verdict != "ok":
                 out.checks.append(Check("profile_check", "failed", verdict, {"host": urlsplit(link).hostname}))
                 continue
-            found = {registrable_domain(urlsplit(h).hostname or "") for h in re.findall(r'href="(https?://[^"]+)"', res.body)}
-            found = {h for h in found if h and h not in DIRECTORY_DOMAINS and h != registrable_domain(urlsplit(link).hostname or "")}
-            profile_links |= found
+            links = {registrable_domain(urlsplit(h).hostname or "") for h in re.findall(r'href="(https?://[^"]+)"', res.body)}
+            links = {h for h in links if h and h not in DIRECTORY_DOMAINS and h != registrable_domain(urlsplit(link).hostname or "")}
+            profile_links |= links
             if identity_score(c, _visible(res.body), _title(res.body)) >= 0.6:
                 out.identity_facts += extract_identity(c, _visible(res.body), res.final_url,
                                                        "social_page" if registrable_domain(urlsplit(link).hostname or "") in SOCIAL_DOMAINS else "directory_page")
                 out.evidence.append({"source_type": "directory_page", "source_ref": res.final_url, "excerpt": _title(res.body)})
-            out.checks.append(Check("profile_check", "completed", f"{len(found)} external links", {"host": urlsplit(link).hostname}))
-        for host in list(profile_links)[:3]:
-            if host in {m[0] for m in matches}:
-                continue
-            res, verdict = await self._probe(f"https://{host}")
-            if verdict == "ok":
-                score = identity_score(c, _visible(res.body), _title(res.body))
-                if score >= 0.6:
-                    matches.append((host, score, res))
+            out.checks.append(Check("profile_check", "completed", f"{len(links)} external links", {"host": urlsplit(link).hostname}))
+        extra = [h for h in list(profile_links)[:3] if h not in {m[0] for m in matches}]
+        for host, (res, verdict) in zip(extra, await asyncio.gather(
+                *(self._probe(f"https://{h}", out, "profile_link") for h in extra)), strict=True):
+            weigh(host, f"https://{host}", res, verdict, "profile_link_probe")
 
-        # 5) Candidate domains via DNS
-        dns_done = 0
-        for dom in candidate_domains(c.name, c.city, self.deps.settings.max_candidate_domains):
+        # 5) Candidate domains derived from the name (DNS, then a probe where they resolve), in parallel.
+        doms = candidate_domains(c.name, c.city, self.deps.settings.max_candidate_domains)
+
+        async def resolve(dom: str) -> str:
             try:
                 await self.deps.resolver(dom, 443)
+                return "resolves"
             except DnsFailure:
-                dns_done += 1
-                out.checks.append(Check("candidate_domain_dns", "completed", "nxdomain", {"domain": dom}))
-                continue
+                return "nxdomain"
             except UnsafeDestination:
-                dns_done += 1
-                out.checks.append(Check("candidate_domain_dns", "completed", "non_public", {"domain": dom}))
+                return "non_public"
+        dns = await asyncio.gather(*(resolve(d) for d in doms))
+        live = [d for d, r in zip(doms, dns, strict=True) if r == "resolves"]
+        probes = dict(zip(live, await asyncio.gather(*(self._probe(f"https://{d}", out, "candidate_domain") for d in live)),
+                          strict=True))
+        dns_done = len(doms)
+        for dom, r in zip(doms, dns, strict=True):
+            if r != "resolves":
+                out.checks.append(Check("candidate_domain_dns", "completed", r, {"domain": dom}))
                 continue
-            dns_done += 1
-            res, verdict = await self._probe(f"https://{dom}")
+            res, verdict = probes[dom]
             score = identity_score(c, _visible(res.body), _title(res.body)) if verdict == "ok" else 0
             out.checks.append(Check("candidate_domain_dns", "completed", f"resolves; {verdict}; identity {score}", {"domain": dom}))
             if score >= 0.6 and dom not in {m[0] for m in matches}:
                 matches.append((dom, score, res))
+            elif verdict in SITE_PRESENT_UNVERIFIABLE or (verdict == "ok" and score >= 0.3):
+                unverifiable.append((dom, verdict if verdict != "ok" else "unconfirmed_identity", f"https://{dom}"))
 
         # 6) Decide
         distinct = {m[0] for m in matches}
@@ -340,13 +495,16 @@ class WebsiteVerifier:
             return out
         if matches:
             host, score, res = matches[0]
-            health, sig = quality_signals(res)
-            out.status, out.site_health, out.url, out.final_url = "VERIFIED_HAS_WEBSITE", health, res.final_url, res.final_url
-            out.evidence.append({"source_type": "http_probe", "source_ref": res.final_url, "excerpt": _title(res.body), "signals": sig})
-            out.identity_facts += extract_identity(c, _visible(res.body), res.final_url, "official_website")
-            out.confidence, out.reason = round(min(1.0, 0.5 + score * 0.5), 2), "found_via_independent_search"
+            self._site_found(out, c, res, score, "found_via_independent_search", round(min(1.0, 0.5 + score * 0.5), 2))
             if c.listed_url and any(ch.check == "listed_site_identity" for ch in out.checks):
                 out.reason = "listed_url_mismatch_official_site_found"
+            return out
+        if unverifiable:
+            # A site that is probably theirs exists but could not be read (blocked, login, rate limit, robots, server
+            # error) or could not be tied to them: never conclude "no website" from that.
+            host, verdict, url = unverifiable[0]
+            out.status, out.website_check, out.url = "WEBSITE_UNCERTAIN", WEBSITE_CHECK.get(verdict, "WEBSITE_UNKNOWN"), url
+            out.reason, out.confidence = f"likely_site_unverifiable:{verdict}", 0.4
             return out
         if serp_failed or not serp_done:
             out.status, out.reason, out.confidence = "VERIFICATION_FAILED", "verification_incomplete", 0.0
@@ -361,10 +519,24 @@ class WebsiteVerifier:
         conf = round(min(conf, 1.0), 2)
         out.confidence = conf
         if conf >= self.deps.settings.no_website_min_confidence:
-            out.status, out.reason = "VERIFIED_NO_WEBSITE", "all_required_checks_completed_no_site_found"
+            out.status, out.reason, out.website_check = "VERIFIED_NO_WEBSITE", "all_required_checks_completed_no_site_found", \
+                "NO_WEBSITE_FOUND"
         else:
             out.status, out.reason = "WEBSITE_UNCERTAIN", "insufficient_evidence"
+            out.website_check = "NO_WEBSITE_LISTED" if not c.listed_url else "WEBSITE_UNKNOWN"
         return out
+
+
+def provenance(source_type: str, source_ref: str) -> tuple[str, str]:
+    """(provider, independence key) of a piece of evidence. Pages are grouped by website: two facts from one website
+    (or from one provider listing) are ONE source, not two independent confirmations."""
+    host = registrable_domain(urlsplit(source_ref).hostname or "") if "://" in (source_ref or "") else ""
+    provider = {"serp_result": "serp_api", "firecrawl_page": "firecrawl", "manual_import": "manual_import"}.get(source_type, "web")
+    if source_type == "serp_result" and host:
+        return "serp_api", f"web:{host}"          # a search result points at another website: that website is the source
+    if host:
+        return provider, f"web:{host}"
+    return provider, f"{provider}:{(source_ref or '')[:80]}"
 
 
 async def persist_outcome(db, *, workspace_id, prospect_id, task_id, out: Outcome) -> list:
@@ -372,37 +544,44 @@ async def persist_outcome(db, *, workspace_id, prospect_id, task_id, out: Outcom
     async with db.transaction() as conn:
         ev_ids = []
         for e in out.evidence[:40]:
+            provider, ind = provenance(e["source_type"], e["source_ref"])
             ev_ids.append(await conn.fetchval(
-                """insert into evidence(workspace_id, prospect_id, source_type, source_ref, retention_policy, content_excerpt)
-                   values ($1,$2,$3,$4,$5,$6) returning id""",
+                """insert into evidence(workspace_id, prospect_id, source_type, source_ref, retention_policy, content_excerpt,
+                                        source_provider, independence_key)
+                   values ($1,$2,$3,$4,$5,$6,$7,$8) returning id""",
                 workspace_id, prospect_id, e["source_type"], e["source_ref"][:2000],
-                "days_180" if e["source_type"] == "serp_result" else "indefinite", (e.get("excerpt") or None)))
+                "days_180" if e["source_type"] == "serp_result" else "indefinite", (e.get("excerpt") or None), provider, ind))
         seen: set[tuple] = set()
         for f in out.identity_facts:
             key = (f["fact_key"], f["value"])
             if key in seen:
                 continue
             seen.add(key)
+            provider, ind = provenance(f["source_type"], f["source_ref"])
             eid = await conn.fetchval(
-                """insert into evidence(workspace_id, prospect_id, source_type, source_ref, retention_policy, content_excerpt)
-                   values ($1,$2,$3,$4,'indefinite',$5) returning id""",
-                workspace_id, prospect_id, f["source_type"], f["source_ref"][:2000], f["quote"])
+                """insert into evidence(workspace_id, prospect_id, source_type, source_ref, retention_policy, content_excerpt,
+                                        source_provider, independence_key)
+                   values ($1,$2,$3,$4,'indefinite',$5,$6,$7) returning id""",
+                workspace_id, prospect_id, f["source_type"], f["source_ref"][:2000], f["quote"], provider, ind)
             await conn.execute(
                 """insert into research_facts(workspace_id, prospect_id, fact_key, value, status, evidence_id, quote, confidence)
                    values ($1,$2,$3,$4,'verified',$5,$6,0.9)""",
                 workspace_id, prospect_id, f["fact_key"], f["value"], eid, f["quote"])
         await conn.execute(
             """insert into website_verifications(workspace_id, prospect_id, task_id, status, site_health, reason, url,
-                   final_url, listing_sources, checks, evidence_ids, confidence)
-               values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)""",
+                   final_url, listing_sources, checks, evidence_ids, confidence, website_check, listing_website, http_evidence)
+               values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)""",
             workspace_id, prospect_id, task_id, out.status, out.site_health, out.reason, out.url, out.final_url,
-            out.listing_sources, [c.__dict__ for c in out.checks], ev_ids, out.confidence)
+            out.listing_sources, [c.__dict__ for c in out.checks], ev_ids, out.confidence, out.website_check,
+            out.listing_website, out.http[:40])
         return ev_ids
 
 
 def satisfies_filter(status: str, health: str | None, website_filter: list[str]) -> bool:
     if "ANY" in website_filter:
-        return status in ("VERIFIED_HAS_WEBSITE", "VERIFIED_NO_WEBSITE")
+        # An inconclusive check (blocked, rate limited, login, unreadable) keeps the business, marked for research,
+        # instead of silently dropping it; qualification will not treat its website as an opportunity.
+        return status in ("VERIFIED_HAS_WEBSITE", "VERIFIED_NO_WEBSITE", "WEBSITE_UNCERTAIN")
     ok = False
     if "NO_WEBSITE" in website_filter:
         ok |= status == "VERIFIED_NO_WEBSITE"

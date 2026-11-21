@@ -25,7 +25,7 @@ from jarvis.core.errors import (
     ValidationFailed,
 )
 from jarvis.db.audit import audit, emit
-from jarvis.db.queue import enqueue, request_cancel
+from jarvis.db.queue import enqueue
 from jarvis.integrations.base import CallContext
 
 router = APIRouter()
@@ -176,7 +176,16 @@ async def _create_campaign(deps: Deps, me: Principal, p: cmd.CampaignParameters,
                 raise ComplianceBlocked(st["reason"], details={"scope": st["scope"], "intended_use": st["intended_use"],
                                                                "alternative": "Use SerpApi discovery, or import a business list "
                                                                               "you have the right to use (Campaigns > Import)."})
-        elif p.discovery_provider != "manual_import":
+        if p.discovery_provider == "geoapify" or p.discovery_secondary == "geoapify":
+            from jarvis.integrations.geoapify import category_for
+            if not category_for(p.niche):
+                raise ValidationFailed(f"Geoapify has no category for '{p.niche}'; use SerpApi for this business type",
+                                       details={"provider": "geoapify", "niche": p.niche})
+        for extra in ([p.discovery_secondary] if p.discovery_secondary else []):
+            pol2 = await provider_policy.evaluate(conn, deps, me.workspace_id, extra, "prospect_discovery")
+            if not pol2["allowed"]:
+                raise ValidationFailed(f"secondary discovery source unavailable: {pol2['reason']}", details={"provider": extra})
+        if p.discovery_provider not in ("google_places", "manual_import"):      # Places is gated above
             pol = await provider_policy.evaluate(conn, deps, me.workspace_id, p.discovery_provider, "prospect_discovery")
             if not pol["allowed"]:
                 if pol.get("not_configured"):
@@ -188,13 +197,14 @@ async def _create_campaign(deps: Deps, me: Principal, p: cmd.CampaignParameters,
         cid = await conn.fetchval(
             """insert into campaigns(workspace_id, command_id, name, niche, location, target_count, discovery_provider,
                    minimum_google_rating, missing_rating_policy, website_filter, stages, sites_to_build, state,
-                   budget_cap_micros, per_site_cap_micros, authorized_at, authorized_by, current_stage, objective)
-               values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'authorized',$13,$14,now(),$15,'queued',$16) returning id""",
+                   budget_cap_micros, per_site_cap_micros, authorized_at, authorized_by, current_stage, objective,
+                   discovery_secondary)
+               values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'authorized',$13,$14,now(),$15,'queued',$16,$17) returning id""",
             me.workspace_id, command_id, name, p.niche, p.location.model_dump(), p.target_count, p.discovery_provider,
             p.minimum_google_rating, p.missing_rating_policy, p.website_filter, p.stages, p.sites_to_build,
             int(budget_cap * 1_000_000) if budget_cap is not None else defaults["campaign_default_cap_micros"],
             int(per_site * 1_000_000) if per_site is not None else defaults["site_default_cap_micros"], me.user_id,
-            _jsonable(objective or {}))
+            _jsonable(objective or {}), p.discovery_secondary)
         if command_id:
             await conn.execute("update commands set status='confirmed', campaign_id=$2 where id=$1", command_id, cid)
         for i, r in enumerate(import_rows or []):
@@ -290,39 +300,8 @@ async def get_campaign(campaign_id: UUID, request: Request, me: Principal = Curr
 @router.post("/campaigns/{campaign_id}/{action}")
 async def campaign_action(campaign_id: UUID, action: str, request: Request, me: Principal = CurrentPrincipal):
     me.require("operator")
-    deps = _deps(request)
-    if action not in ("pause", "resume", "cancel", "retry"):
-        raise NotFound("unknown action")
-    async with deps.db.transaction() as conn:
-        c = await conn.fetchrow("select * from campaigns where id=$1 and workspace_id=$2 for update", campaign_id, me.workspace_id)
-        if c is None:
-            raise NotFound("campaign not found")
-        allowed = {"pause": {"running", "authorized"}, "resume": {"paused", "blocked"}, "cancel": {"running", "authorized", "paused", "blocked",
-                   "requires_human_review"}, "retry": {"blocked", "failed"}}[action]
-        if c["state"] not in allowed:
-            raise InvalidTransition(f"cannot {action} a {c['state']} campaign")
-        if action == "pause":
-            await conn.execute("update campaigns set state='paused' where id=$1", campaign_id)
-            await conn.execute("""update tasks set status='blocked', error_code='PAUSED' where campaign_id=$1
-                                  and status in ('pending','retry_wait')""", campaign_id)
-            new = "paused"
-        elif action in ("resume", "retry"):
-            await conn.execute("update campaigns set state='running', blocked_reason=null where id=$1", campaign_id)
-            await conn.execute("""update tasks set status='pending', run_after=now(), error_code=null,
-                                  attempts=least(attempts, max_attempts - 1) where campaign_id=$1 and status in ('blocked','failed','dead')""",
-                               campaign_id)
-            if c["state"] == "authorized":
-                await enqueue(conn, workspace_id=me.workspace_id, campaign_id=campaign_id, task_type="campaign.start",
-                              idempotency_key=f"c:{campaign_id}:start")
-            new = "running"
-        else:
-            await conn.execute("update campaigns set state='cancelled' where id=$1", campaign_id)
-            await request_cancel(conn, workspace_id=me.workspace_id, campaign_id=campaign_id)
-            new = "cancelled"
-        await audit(conn, workspace_id=me.workspace_id, actor_type="user", actor_id=str(me.user_id), action=f"campaign.{action}",
-                    entity_type="campaign", entity_id=campaign_id, from_state=c["state"], to_state=new)
-        await emit(conn, workspace_id=me.workspace_id, campaign_id=campaign_id, event_type="state", message=f"Campaign {new} by operator")
-    return {"state": new}
+    from jarvis.workflow.work import control
+    return await control(_deps(request).db, me, campaign_id, action)
 
 
 @router.get("/events")

@@ -26,6 +26,9 @@ from jarvis.integrations.base import CallContext
 
 AFFIRMATIVE = re.compile(r"^\W*(yes|yeah|yep|yup|sure|ok(ay)?|confirm(ed)?|go( ahead)?|do it|proceed|start( it)?|please do|"
                          r"authori[sz]e( it)?|approved?|let'?s do it|sounds good)\b", re.I)
+# The owner's own words that ask to stop/pause work, or to build a website now (their instruction is the authorization).
+STOP_WORDS = re.compile(r"\b(stop|cancel|halt|abort|pause|hold on|wait)\b", re.I)
+BUILD_NOW = re.compile(r"\b(start|begin|go ahead and|now|please)?\s*(build|create|make|generate)(ing)?\b[^.?!]*\b(web ?sites?|sites?|previews?)\b", re.I)
 MAX_STEPS = 8
 HISTORY = 16
 
@@ -53,6 +56,11 @@ How you work: the owner gives you OBJECTIVES, not isolated commands. Keep the wh
   don't ask again for those. Production deployment and outreach always need their own separate approval; you never do
   them.
 - A correction wins: update the objective and confirm the change briefly.
+
+Tasks: every piece of work is a task with a visible status (QUEUED, RUNNING, PAUSED, WAITING, COMPLETED, FAILED,
+CANCEL_REQUESTED, CANCELLED). When you start or change work, say in one sentence what you understood. When the owner
+says to stop, pause or switch ("stop searching and build a website"), use control_work / build_websites and say what
+actually happened (for CANCEL_REQUESTED: the current step is stopping; results so far are kept).
 
 Truthfulness:
 - Tool results are the only truth. Say work has started or been queued only when a tool result says started=true with a
@@ -86,8 +94,10 @@ OBJECTIVE_FIELDS = {
                            "description": "prefer_* ranks first without excluding; *_only excludes the rest"},
     "previews_to_build": {"type": "integer", "description": "preview websites to build for the best qualified prospects"},
     "exclusions": {"type": "array", "items": {"type": "string"}, "description": "businesses or kinds to leave out"},
-    "discovery_source": {"enum": ["serp_api", "google_places"],
+    "discovery_source": {"enum": ["serp_api", "geoapify", "google_places"],
                          "description": "only when the owner names a source; default serp_api"},
+    "secondary_source": {"enum": ["serp_api", "geoapify"],
+                         "description": "only when the owner asks for a second source (used when the first runs out)"},
     "notes": {"type": "string", "description": "anything else the owner asked for"},
 }
 
@@ -113,6 +123,18 @@ TOOLS: list[dict[str, Any]] = [
      "input_schema": {"type": "object", "properties": {}}},
     {"name": "cancel_pending_action", "description": "Cancel the proposal awaiting the owner's yes (the objective is kept "
      "so it can be adjusted).", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "control_work", "description": "Stop (cancel), pause, resume or retry the current task (or a named task id). "
+     "Use when the owner asks to stop, pause, continue or retry. Returns the real status: CANCEL_REQUESTED means the step "
+     "running right now is being stopped and will finish stopping shortly.",
+     "input_schema": {"type": "object", "properties": {"action": {"enum": ["cancel", "pause", "resume", "retry"]},
+                                                       "task_id": {"type": "string"}}, "required": ["action"]}},
+    {"name": "build_websites", "description": "Build preview websites from results already found (best qualified first, or "
+     "the businesses named), with browser QA and a private preview deploy. Set stop_current_search when the owner says to "
+     "stop searching and build instead. Starts at once when the owner asked for it directly; otherwise needs their yes.",
+     "input_schema": {"type": "object", "properties": {
+         "count": {"type": "integer", "description": "how many websites (default 1)"},
+         "business_names": {"type": "array", "items": {"type": "string"}},
+         "stop_current_search": {"type": "boolean"}}}},
     {"name": "discovery_sources", "description": "Each prospect discovery source and whether it can be used right now, "
      "with its own reason.", "input_schema": {"type": "object", "properties": {}}},
     {"name": "work_status", "description": "Real progress of the current or most recent work, from the database: stage, "
@@ -285,6 +307,8 @@ class Turn:
         action = st["pending_action"]
         if action and action.get("type") == "work_on_business":
             return await self._start_business(action)
+        if action and action.get("type") == "build_websites":
+            return await self._start_build(action)
         if not action or action.get("type") != "objective":
             return {"ok": False, "message": "nothing is waiting for confirmation"}
         from jarvis.agents import command as cmd
@@ -331,6 +355,95 @@ class Turn:
         return {"ok": True, "cancelled_commands": n, "cancelled_proposal": bool(st["pending_action"]),
                 "objective_kept": bool(o)}
 
+    async def _active_task(self, task_id: str | None = None) -> UUID | None:
+        if task_id:
+            return UUID(task_id)
+        st = await self.state()
+        f = st["focus"].get("campaign_id")
+        if f and await self.db.fetchval("""select state::text in ('authorized','running','paused','blocked',
+                                           'requires_human_review','cancel_requested') from campaigns where id=$1""", UUID(f)):
+            return UUID(f)
+        return await self.db.fetchval(
+            """select id from campaigns where workspace_id=$1 and state::text in ('authorized','running','paused','blocked',
+               'requires_human_review','cancel_requested') order by created_at desc limit 1""", self.me.workspace_id)
+
+    async def t_control_work(self, action: str, task_id: str | None = None) -> dict:
+        from jarvis.workflow import work
+        if action not in ("cancel", "pause", "resume", "retry"):
+            return {"ok": False, "message": "action must be cancel, pause, resume or retry"}
+        if action in ("pause", "cancel") and not AFFIRMATIVE.match(self.text.strip()) and not STOP_WORDS.search(self.text):
+            return {"ok": False, "refused": True, "message": "Not changed: the owner did not ask to stop or pause."}
+        cid = await self._active_task(task_id)
+        if cid is None:
+            return {"ok": False, "message": "nothing is running"}
+        res = await work.control(self.db, self.me, cid, action)
+        s = await work.summary(self.db, self.me.workspace_id, cid)
+        self.meta["campaign_id"] = str(cid)
+        return {"ok": True, "task_id": str(cid), "task": s["name"], "status": res["status"],
+                "what_happens": {"CANCEL_REQUESTED": "the step running right now is being stopped; results so far are kept",
+                                 "CANCELLED": "stopped; results so far are kept", "PAUSED": "paused; resume any time",
+                                 "RUNNING": "running again"}.get(res["status"], ""), "current_operation": s["current_operation"]}
+
+    async def t_build_websites(self, count: int = 1, business_names: list[str] | None = None,
+                               stop_current_search: bool = False) -> dict:
+        """Build previews from earlier results. The owner's own words authorize it when they ask for it directly."""
+        action = {"type": "build_websites", "count": max(1, min(int(count or 1), 10)), "business_names": business_names or [],
+                  "stop_current_search": bool(stop_current_search)}
+        if AFFIRMATIVE.match(self.text.strip()) or BUILD_NOW.search(self.text):
+            return await self._start_build(action)
+        await self.save_state(pending=action)
+        return {"ok": True, "needs_owner_yes": True, "proposal": f"build {action['count']} preview website(s)"
+                + (" after stopping the current search" if stop_current_search else "")}
+
+    async def _start_build(self, a: dict) -> dict:
+        from jarvis.workflow import work
+        stopped = None
+        source = await self._active_task() or await self._focus_campaign()
+        if a.get("stop_current_search"):
+            active = await self._active_task()
+            kind = await self.db.fetchval("select work_kind from campaigns where id=$1", active) if active else None
+            if active and kind == "discovery":
+                res = await work.control(self.db, self.me, active, "cancel")
+                stopped = {"task_id": str(active), "status": res["status"]}
+        ids = None
+        if a.get("business_names"):
+            rows = await self.db.fetch(
+                """select distinct f.prospect_id from research_facts f join prospects p on p.id=f.prospect_id
+                   where p.workspace_id=$1 and f.fact_key='business_name' and f.value #>> '{}' ilike any($2::text[])""",
+                self.me.workspace_id, [f"%{n[:80]}%" for n in a["business_names"]])
+            ids = [r["prospect_id"] for r in rows] or None
+            if ids is None:
+                return {"ok": False, "message": "no researched business matches those names", "stopped": stopped}
+        from jarvis.core.errors import ValidationFailed as _VF
+        used_earlier = None
+        try:
+            out = await work.start_website_build(self.deps, self.me, parent_id=source, prospect_ids=ids, count=a["count"])
+        except _VF:
+            if ids:
+                raise
+            # The stopped search found nothing usable yet: build from the most recent search that has verified results.
+            earlier = await self.db.fetchval(
+                """select c.id from campaigns c where c.workspace_id=$1 and c.work_kind='discovery' and c.id <> $2
+                   and exists (select 1 from prospects p join research_facts f on f.prospect_id=p.id and f.fact_key='business_name'
+                               and f.status='verified' where p.campaign_id=c.id and p.state <> 'rejected')
+                   order by c.created_at desc limit 1""", self.me.workspace_id, source)
+            if earlier is None:
+                return {"ok": False, "message": "no search has verified businesses to build for yet", "stopped": stopped}
+            used_earlier = str(earlier)
+            out = await work.start_website_build(self.deps, self.me, parent_id=earlier, prospect_ids=None, count=a["count"])
+        await self.save_state(focus={"campaign_id": out["task_id"]}, pending=None)
+        self.meta["campaign_id"] = out["task_id"]
+        names = [r["n"] for r in await self.db.fetch(
+            """select (select f.value #>> '{}' from research_facts f where f.prospect_id=p and f.fact_key='business_name' limit 1) n
+               from unnest($1::uuid[]) p""", [UUID(x) for x in out["prospects"]])]
+        return {"ok": True, "started": True, "task_id": out["task_id"], "campaign_id": out["task_id"],
+                "building_for": [untrusted(n or "", 120) for n in names], "previous_search": stopped,
+                "from_results_of": used_earlier or (str(source) if source else None),
+                "note_source": "the stopped search had no verified businesses yet, so the results of an earlier search were used"
+                if used_earlier else None,
+                "state": "queued in the durable worker",
+                "note": "Steps: website structure and content, build, isolated browser QA with fixes, private preview deploy."}
+
     async def _focus_campaign(self) -> UUID | None:
         st = await self.state()
         if st["focus"].get("campaign_id"):
@@ -340,11 +453,15 @@ class Turn:
 
     async def t_work_status(self) -> dict:
         from jarvis.api.routes.conversation import campaign_progress
-        cid = await self._focus_campaign()
+        from jarvis.workflow import work
+        cid = await self._active_task() or await self._focus_campaign()
         if cid is None:
             return {"ok": True, "message": "no work has been started yet"}
         p = await campaign_progress(self.db, self.me.workspace_id, cid)
+        w = await work.summary(self.db, self.me.workspace_id, cid)
         self.meta["campaign_id"] = str(cid)
+        p = {**p, "status": w["status"], "current_operation": w["current_operation"], "remaining_steps": w["remaining_steps"],
+             "elapsed_s": w["elapsed_s"]}
         sites = await self.db.fetch(
             """select g.state, g.last_error, (select f.value #>> '{}' from research_facts f where f.prospect_id=g.prospect_id
                       and f.fact_key='business_name' and f.status='verified' limit 1) business,

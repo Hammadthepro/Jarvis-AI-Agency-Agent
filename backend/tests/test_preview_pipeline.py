@@ -129,3 +129,16 @@ def test_same_phone_in_two_formats_is_not_a_conflict():
     from jarvis.agents.research import same_value_key
     assert same_value_key("phone", "(615) 555-0121") == same_value_key("phone", "+16155550121") == "6155550121"
     assert same_value_key("phone", "(615) 555-0121") != same_value_key("phone", "(615) 555-0199")
+
+
+async def test_prospect_api_shows_readiness_provenance_and_website_evidence(client, deps, web, db):
+    a, me, cid = await one_vet_campaign(client, deps, web, "prov@t.dev")
+    assert await run_until(deps, cid, timeout=240) == "completed"
+    row = (await client.get(f"/prospects?campaign_id={cid}", headers=a["headers"])).json()[0]
+    assert row["readiness"] == "qualified" and row["website_check"] == "NO_WEBSITE_FOUND" and row["listing_website"] == "not_listed"
+    d = (await client.get(f"/prospects/{row['id']}", headers=a["headers"])).json()
+    score = d["scores"][0]
+    assert score["rule_set_version"] == 2 and {c["rule"] for c in score["components"]} >= {"identity", "evidence_confidence"}
+    srcs = {s["source"] for s in d["sources"]}
+    assert "serp_api" in srcs and any(s.startswith("web:") for s in srcs)        # listing + an independent website
+    assert d["verifications"][0]["http_evidence"] is not None

@@ -148,7 +148,8 @@ async def test_nationwide_veterinary_objective_runs_to_verified_previews(client,
     assert web.sent == []                                                              # no outreach
 
     prog = await campaign_progress(db, me.workspace_id, __import__("uuid").UUID(cid))
-    assert prog["say"].startswith("Done. 4 businesses verified, 3 qualified, and 2 preview websites are ready.")
+    # v2 scoring: the unrated business has one listing source and no verified services -> needs research, not qualified
+    assert prog["say"].startswith("Done. 4 businesses verified, 2 qualified, and 2 preview websites are ready.")
     assert "1 business kept for your review" in prog["say"]
     # proactive updates in the owner's conversation, from real state changes only (no duplicates)
     updates = [r["content"] for r in await db.fetch(

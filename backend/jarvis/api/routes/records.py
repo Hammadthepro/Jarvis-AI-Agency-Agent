@@ -62,13 +62,15 @@ async def prospects(request: Request, me: Principal = CurrentPrincipal, campaign
                   (select value #>> '{}' from research_facts f where f.prospect_id = p.id and f.fact_key='business_name'
                      and f.status='verified' order by created_at limit 1) business_name,
                   v.status website_status, v.site_health, v.confidence website_confidence, v.final_url website_url,
-                  s.total score, g.id site_id, g.state site_state,
+                  v.website_check, v.listing_website,
+                  s.total score, s.readiness, s.evidence_confidence, s.missing, g.id site_id, g.state site_state,
                   (select url from deployments d join site_versions sv on sv.id = d.site_version_id where sv.site_id = g.id
                      and d.status = 'verified' order by d.created_at desc limit 1) preview_url,
                   (select state from outreach_drafts o where o.prospect_id = p.id order by created_at desc limit 1) outreach_state
            from prospects p
            left join lateral (select * from website_verifications w where w.prospect_id = p.id order by checked_at desc limit 1) v on true
-           left join lateral (select total from qualification_scores q where q.prospect_id = p.id order by computed_at desc limit 1) s on true
+           left join lateral (select total, readiness, evidence_confidence, missing from qualification_scores q
+                              where q.prospect_id = p.id order by computed_at desc limit 1) s on true
            left join generated_sites g on g.prospect_id = p.id
            where p.workspace_id = $1 and p.deleted_at is null and ($2::uuid is null or p.campaign_id = $2)
              and ($3::text is null or p.state::text = $3) and ($4::text is null or v.status::text = $4)
@@ -95,19 +97,27 @@ async def prospect_detail(pid: UUID, request: Request, me: Principal = CurrentPr
     return J({
         "prospect": p,
         "facts": [dict(r) for r in await db.fetch("""select f.id, f.fact_key, f.value #>> '{}' as value, f.status, f.quote, f.confidence,
-                                                     e.source_type, e.source_ref, e.retrieved_at from research_facts f
+                                                     e.source_type, e.source_ref, e.retrieved_at, e.source_provider,
+                                                     e.independence_key from research_facts f
                                                      left join evidence e on e.id = f.evidence_id where f.prospect_id=$1
                                                      order by f.fact_key, f.created_at""", pid)],
         "verifications": [{**{k: v for k, v in dict(r).items() if k != "evidence_ids"},
                            "evidence_refs": await resolve_evidence(db, list(r["evidence_ids"]))}
                           for r in await db.fetch("""select id, status, site_health, reason, url, final_url, listing_sources,
-                                                     checks, evidence_ids, confidence, checked_at from website_verifications
+                                                     checks, evidence_ids, confidence, checked_at, website_check, listing_website,
+                                                     http_evidence from website_verifications
                                                      where prospect_id=$1 order by checked_at desc""", pid)],
         "evidence": [dict(r) for r in await db.fetch("""select id, source_type, source_ref, retrieved_at, left(content_excerpt, 400) excerpt
                                                        from evidence where prospect_id=$1 order by retrieved_at desc limit 100""", pid)],
         "contacts": [dict(r) for r in await db.fetch("""select contact_type, value, verification, is_public_business_contact,
                                                        harvesting_prohibited from contacts where prospect_id=$1""", pid)],
-        "scores": [dict(r) for r in await db.fetch("""select total, components, rule_set_version, computed_at from qualification_scores
+        "sources": [dict(r) for r in await db.fetch(
+            """select coalesce(e.independence_key, e.source_type::text) source, min(e.source_provider) provider,
+                      count(distinct f.fact_key) facts, array_agg(distinct f.fact_key) fields, min(e.retrieved_at) first_seen
+               from research_facts f join evidence e on e.id = f.evidence_id where f.prospect_id=$1 and f.status='verified'
+               group by 1 order by 3 desc""", pid)],
+        "scores": [dict(r) for r in await db.fetch("""select total, components, rule_set_version, computed_at, readiness,
+                                                     evidence_confidence, missing, reasons from qualification_scores
                                                      where prospect_id=$1 order by computed_at desc""", pid)],
     })
 
